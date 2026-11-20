@@ -36,6 +36,8 @@ from dataclasses import dataclass, field
 from typing import Callable, Iterable, Protocol
 
 VOLUME_TOLERANCE = 0.01  # 1 % ανοχή στη σύγκριση έντασης (στρογγυλοποιήσεις Windows)
+DEFAULT_RAMP_MS = 150  # σταδιακή αλλαγή έντασης αντί για απότομο βήμα («κλικ»)
+RAMP_STEP_MS = 10
 
 # Τιμές του GlobalSystemMediaTransportControlsSessionPlaybackStatus.
 PLAYBACK_STATUS_NAMES = {
@@ -94,6 +96,7 @@ class AppSession(Protocol):
     def get_mute(self) -> bool: ...
     def set_mute(self, muted: bool) -> None: ...
     def get_volume(self) -> float: ...
+    def set_volume(self, value: float) -> None: ...
 
 
 class MediaSession(Protocol):
@@ -109,6 +112,22 @@ class MediaSession(Protocol):
 # ---------------------------------------------------------------------------
 # Λογική δοκιμών (ανεξάρτητη από Windows)
 # ---------------------------------------------------------------------------
+
+
+Sleep = Callable[[float], None]
+
+
+def ramp_volume(set_volume: Callable[[float], None], start: float, end: float,
+                ramp_ms: float, sleep: Sleep = time.sleep) -> None:
+    """Αλλάζει την ένταση σταδιακά από start σε end μέσα σε ramp_ms.
+
+    Με ramp_ms <= 0 η αλλαγή γίνεται με ένα βήμα (όπως στην αρχική έκδοση).
+    """
+    steps = max(1, int(ramp_ms // RAMP_STEP_MS)) if ramp_ms > 0 else 1
+    for i in range(1, steps + 1):
+        set_volume(end if i == steps else start + (end - start) * i / steps)
+        if i < steps:
+            sleep(ramp_ms / steps / 1000)
 
 
 def pick_test_volume(current: float, requested: float) -> float:
@@ -130,10 +149,11 @@ class MasterChange:
     applied_mute: bool | None = None
 
 
-def apply_master(master: MasterVolume, test_volume: float) -> MasterChange:
+def apply_master(master: MasterVolume, test_volume: float, ramp_ms: float = 0,
+                 sleep: Sleep = time.sleep) -> MasterChange:
     """Αποθηκεύει την τρέχουσα κατάσταση και εφαρμόζει ένταση ανακοίνωσης χωρίς mute."""
     change = MasterChange(master.get_volume(), master.get_mute())
-    master.set_volume(test_volume)
+    ramp_volume(master.set_volume, change.original_volume, test_volume, ramp_ms, sleep)
     change.applied_volume = test_volume
     if change.original_mute:
         master.set_mute(False)
@@ -141,13 +161,14 @@ def apply_master(master: MasterVolume, test_volume: float) -> MasterChange:
     return change
 
 
-def restore_master(master: MasterVolume, change: MasterChange) -> list[str]:
+def restore_master(master: MasterVolume, change: MasterChange, ramp_ms: float = 0,
+                   sleep: Sleep = time.sleep) -> list[str]:
     """Επαναφέρει μόνο ό,τι αλλάξαμε και δεν άλλαξε χειροκίνητα στο μεταξύ."""
     notes: list[str] = []
     if change.applied_volume is not None:
         current = master.get_volume()
         if _same_volume(current, change.applied_volume):
-            master.set_volume(change.original_volume)
+            ramp_volume(master.set_volume, current, change.original_volume, ramp_ms, sleep)
             notes.append(f"ένταση: επαναφορά σε {pct(change.original_volume)}")
         else:
             notes.append(
@@ -164,7 +185,34 @@ def restore_master(master: MasterVolume, change: MasterChange) -> list[str]:
     return notes
 
 
-def mute_other_sessions(sessions: Iterable[AppSession], own_pid: int) -> tuple[list[AppSession], list[str]]:
+def fade_mute(session: AppSession, ramp_ms: float, sleep: Sleep = time.sleep) -> None:
+    """Χαμηλώνει σταδιακά στο 0, κάνει mute και ξαναβάζει την αρχική ένταση.
+
+    Η ένταση της εφαρμογής μένει όπως ήταν· αλλάζει μόνο το mute. Έτσι, αν ο
+    χρήστης την ξεσιγάσει χειροκίνητα, δεν τη βρίσκει «κολλημένη» στο 0.
+    """
+    if ramp_ms <= 0:
+        session.set_mute(True)
+        return
+    original = session.get_volume()
+    ramp_volume(session.set_volume, original, 0.0, ramp_ms, sleep)
+    session.set_mute(True)
+    session.set_volume(original)
+
+
+def fade_unmute(session: AppSession, ramp_ms: float, sleep: Sleep = time.sleep) -> None:
+    """Αντίστροφα: ένταση 0 όσο είναι σε mute, unmute και σταδιακή άνοδος."""
+    if ramp_ms <= 0:
+        session.set_mute(False)
+        return
+    original = session.get_volume()
+    session.set_volume(0.0)
+    session.set_mute(False)
+    ramp_volume(session.set_volume, 0.0, original, ramp_ms, sleep)
+
+
+def mute_other_sessions(sessions: Iterable[AppSession], own_pid: int, ramp_ms: float = 0,
+                        sleep: Sleep = time.sleep) -> tuple[list[AppSession], list[str]]:
     """Σιγάζει όσες συνεδρίες δεν είναι ήδη σιγασμένες, εκτός από τη δική μας.
 
     Επιστρέφει τις συνεδρίες που σιγάσαμε εμείς και σημειώσεις για την αναφορά.
@@ -180,7 +228,7 @@ def mute_other_sessions(sessions: Iterable[AppSession], own_pid: int) -> tuple[l
             if session.get_mute():
                 notes.append(f"{label}: ήταν ήδη σε mute, δεν αγγίζεται")
                 continue
-            session.set_mute(True)
+            fade_mute(session, ramp_ms, sleep)
             if session.get_mute():
                 muted_by_us.append(session)
                 notes.append(f"{label}: σίγαση OK")
@@ -191,7 +239,8 @@ def mute_other_sessions(sessions: Iterable[AppSession], own_pid: int) -> tuple[l
     return muted_by_us, notes
 
 
-def unmute_our_sessions(muted_by_us: Iterable[AppSession]) -> list[str]:
+def unmute_our_sessions(muted_by_us: Iterable[AppSession], ramp_ms: float = 0,
+                        sleep: Sleep = time.sleep) -> list[str]:
     """Ξεσιγάζει μόνο όσες σιγάσαμε εμείς και είναι ακόμη σιγασμένες."""
     notes: list[str] = []
     for session in muted_by_us:
@@ -200,7 +249,7 @@ def unmute_our_sessions(muted_by_us: Iterable[AppSession]) -> list[str]:
             if not session.get_mute():
                 notes.append(f"{label}: ήδη χωρίς mute (χειροκίνητη αλλαγή), δεν αγγίζεται")
                 continue
-            session.set_mute(False)
+            fade_unmute(session, ramp_ms, sleep)
             notes.append(f"{label}: επαναφορά OK")
         except Exception as exc:  # noqa: BLE001 - π.χ. η εφαρμογή έκλεισε
             notes.append(f"{label}: ΣΦΑΛΜΑ επαναφοράς (ίσως έκλεισε): {exc!r}")
@@ -352,6 +401,9 @@ class PycawSession:
     def get_volume(self) -> float:
         return float(self._volume.GetMasterVolume())
 
+    def set_volume(self, value: float) -> None:
+        self._volume.SetMasterVolume(float(value), None)
+
 
 def load_pycaw_sessions() -> list[PycawSession]:
     from pycaw.pycaw import AudioUtilities
@@ -458,7 +510,7 @@ def check_master(report: Report, args, wait: Callable[[str], None]) -> None:
     target = pick_test_volume(master.get_volume(), args.test_volume / 100)
     change = None
     try:
-        change = apply_master(master, target)
+        change = apply_master(master, target, args.ramp_ms)
         now_vol, now_mute = master.get_volume(), master.get_mute()
         ok = _same_volume(now_vol, target) and not now_mute
         report.add(
@@ -468,7 +520,7 @@ def check_master(report: Report, args, wait: Callable[[str], None]) -> None:
         wait(f"Ακούστηκε η αλλαγή έντασης στο {pct(target)};")
     finally:
         if change is not None:
-            for note in restore_master(master, change):
+            for note in restore_master(master, change, args.ramp_ms):
                 report.add(f"Επαναφορά {note}")
             report.add(
                 f"Τελική ένταση: {pct(master.get_volume())}, mute: {onoff(master.get_mute())}"
@@ -496,12 +548,12 @@ def check_sessions(report: Report, args, wait: Callable[[str], None]) -> None:
 
     muted_by_us: list[AppSession] = []
     try:
-        muted_by_us, notes = mute_other_sessions(sessions, os.getpid())
+        muted_by_us, notes = mute_other_sessions(sessions, os.getpid(), args.ramp_ms)
         for note in notes:
             report.add(f"Σίγαση: {note}")
         wait("Σταμάτησε να ακούγεται ο ήχος των εφαρμογών;")
     finally:
-        for note in unmute_our_sessions(muted_by_us):
+        for note in unmute_our_sessions(muted_by_us, args.ramp_ms):
             report.add(f"Επαναφορά: {note}")
 
 
@@ -562,6 +614,10 @@ def build_parser() -> argparse.ArgumentParser:
         "--hold-seconds", type=float, default=5.0,
         help="διάρκεια κάθε αλλαγής όταν δεν γίνονται ερωτήσεις (προεπιλογή 5)",
     )
+    parser.add_argument(
+        "--ramp-ms", type=float, default=DEFAULT_RAMP_MS,
+        help=f"σταδιακή αλλαγή έντασης/σίγασης σε ms, 0 = απότομα (προεπιλογή {DEFAULT_RAMP_MS})",
+    )
     parser.add_argument("--no-questions", action="store_true", help="χωρίς ερωτήσεις ν/ο")
     parser.add_argument("--report", default=None, help="αρχείο αναφοράς (προεπιλογή με ημερομηνία)")
     return parser
@@ -585,6 +641,7 @@ def main(argv: list[str] | None = None) -> int:
     for pkg in ("pycaw", "comtypes", "psutil", "winrt-runtime", "winrt-Windows.Media.Control", "winsdk"):
         report.add(f"{pkg}: {package_version(pkg)}")
     report.add(f"Λειτουργία: {'dry-run (μόνο ανάγνωση)' if args.dry_run else 'με αλλαγές και επαναφορά'}")
+    report.add(f"Σταδιακή αλλαγή (ramp): {args.ramp_ms:g} ms")
 
     interactive = sys.stdin.isatty() and not args.no_questions and not args.dry_run
     wait = make_waiter(interactive, args.hold_seconds, report)

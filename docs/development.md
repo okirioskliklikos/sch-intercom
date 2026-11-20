@@ -144,7 +144,7 @@
 4. Πρωτόκολλο σύνδεσης v4: ο Director ορίζει την κοινή ένταση και ο Client αναφέρει στο heartbeat την κατάσταση ήχου (εφαρμόστηκε / απέτυχε / έξοδος σε mute).
 5. Ειδοποιήσεις στον Director.
 
-**Βήμα 1 σε εξέλιξη:** διαγνωστικό script `tools/windows_audio_check.py` (οδηγίες: `docs/windows-audio-check.md`). Ελέγχει ένταση/mute εξόδου, σίγαση ανά εφαρμογή και, κατόπιν αιτήματος του χρήστη, **pause/play των media** που παίζουν (Windows System Media Transport Controls), με επαναφορά μόνο όσων άλλαξε το script. Αναμένεται αναφορά από πραγματική εκτέλεση σε Windows 11.
+**Βήμα 1 σε εξέλιξη:** διαγνωστικό script `tools/windows_audio_check.py` (οδηγίες: `docs/windows-audio-check.md`). Ελέγχει ένταση/mute εξόδου, σίγαση ανά εφαρμογή και, κατόπιν αιτήματος του χρήστη, **pause/play των media** που παίζουν (Windows System Media Transport Controls), με επαναφορά μόνο όσων άλλαξε το script. Ο χρήστης το εκτέλεσε σε Windows 11 χωρίς διαχειριστή (20/11/2026): ένταση, σίγαση εφαρμογών και pause/play στον Chrome λειτούργησαν. Ανέφερε μικρά παράσιτα όταν ο ήχος ανοίγει/κλείνει· προστέθηκαν σταδιακή αλλαγή έντασης/σίγασης 150 ms στο script (`--ramp-ms`) και fade-in/fade-out 150 ms στον ήχο ανακοίνωσης του Client (`--fade-ms`, 20 ms μετά από κενό δικτύου, `--resume-fade-ms`), βλ. `docs/latency.md`.
 
 ### Πώς συνεχίζεται η εργασία σε νέα συζήτηση
 

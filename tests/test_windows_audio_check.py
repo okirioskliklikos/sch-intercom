@@ -38,6 +38,8 @@ class FakeSession:
         self.muted = muted
         self.mute_works = mute_works
         self.closed = False
+        self.volume = 1.0
+        self.volume_history = []
 
     def get_mute(self):
         if self.closed:
@@ -51,7 +53,13 @@ class FakeSession:
             self.muted = muted
 
     def get_volume(self):
-        return 1.0
+        return self.volume
+
+    def set_volume(self, value):
+        if self.closed:
+            raise OSError("session closed")
+        self.volume = value
+        self.volume_history.append(value)
 
 
 class FakeMedia:
@@ -184,6 +192,47 @@ class MediaPauseTests(unittest.TestCase):
         joined = "\n".join(notes)
         self.assertIn("ΔΕΝ δηλώνει δυνατότητα pause", joined)
         self.assertIn("δέχτηκε το pause αλλά", joined)
+
+
+class RampTests(unittest.TestCase):
+    def test_ramp_is_gradual(self):
+        values, sleeps = [], []
+        wac.ramp_volume(values.append, 0.5, 0.3, 150, sleep=sleeps.append)
+        self.assertEqual(len(values), 15)
+        self.assertAlmostEqual(values[-1], 0.3)
+        self.assertTrue(all(a > b for a, b in zip(values, values[1:])))
+        self.assertLessEqual(max(abs(a - b) for a, b in zip([0.5] + values, values)), 0.02)
+        self.assertAlmostEqual(sum(sleeps), 0.14)
+
+    def test_zero_ramp_is_single_step(self):
+        values = []
+        wac.ramp_volume(values.append, 0.5, 0.3, 0, sleep=lambda _: None)
+        self.assertEqual(values, [0.3])
+
+    def test_master_with_ramp_restores(self):
+        master = FakeMaster(0.8)
+        change = wac.apply_master(master, 0.3, ramp_ms=150, sleep=lambda _: None)
+        self.assertAlmostEqual(master.volume, 0.3)
+        wac.restore_master(master, change, ramp_ms=150, sleep=lambda _: None)
+        self.assertAlmostEqual(master.volume, 0.8)
+
+    def test_fade_mute_keeps_app_volume(self):
+        chrome = FakeSession("chrome.exe", 200)
+        chrome.volume = 0.7
+        muted, _ = wac.mute_other_sessions([chrome], own_pid=1, ramp_ms=150, sleep=lambda _: None)
+        self.assertTrue(chrome.muted)
+        self.assertEqual(chrome.volume, 0.7)  # μένει η αρχική ένταση
+        self.assertEqual(min(chrome.volume_history), 0.0)  # χαμήλωσε σταδιακά πριν το mute
+        wac.unmute_our_sessions(muted, ramp_ms=150, sleep=lambda _: None)
+        self.assertFalse(chrome.muted)
+        self.assertAlmostEqual(chrome.volume, 0.7)
+
+    def test_manual_unmute_with_ramp_not_stuck_at_zero(self):
+        chrome = FakeSession("chrome.exe", 200)
+        muted, _ = wac.mute_other_sessions([chrome], own_pid=1, ramp_ms=150, sleep=lambda _: None)
+        chrome.muted = False  # ο χρήστης ξεσίγασε
+        wac.unmute_our_sessions(muted, ramp_ms=150, sleep=lambda _: None)
+        self.assertEqual(chrome.volume, 1.0)
 
 
 class GuardTests(unittest.TestCase):

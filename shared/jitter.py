@@ -8,6 +8,8 @@
 import threading
 from collections import deque
 
+from shared.audio import apply_gain_ramp
+
 
 class JitterBuffer:
     """Thread-safe ουρά blocks σταθερού μεγέθους.
@@ -15,9 +17,15 @@ class JitterBuffer:
     max_blocks: μέγιστος αριθμός blocks σε αναμονή· τα παλιότερα πετιούνται.
     prefill_blocks: μετά από άδειασμα, πόσα blocks περιμένουμε πριν συνεχίσει η
     αναπαραγωγή (ώστε να μην εναλλάσσονται συνεχώς ήχος και σιωπή).
+    fade_in_samples / fade_out_samples: γρήγορο fade-in στην αρχή της ανακοίνωσης
+    και fade-out στο τέλος της (μετά το STREAM_STOP), ώστε να μην ακούγεται «κλικ»
+    από το απότομο πέρασμα σιωπή ↔ φωνή. resume_fade_samples: συντομότερο fade-in
+    όταν ο ήχος συνεχίζει μετά από κενό δικτύου. 0 = χωρίς fade.
     """
 
-    def __init__(self, max_blocks: int, block_bytes: int, prefill_blocks: int | None = None):
+    def __init__(self, max_blocks: int, block_bytes: int, prefill_blocks: int | None = None,
+                 *, fade_in_samples: int = 0, fade_out_samples: int = 0,
+                 resume_fade_samples: int = 0):
         if max_blocks < 1:
             raise ValueError("max_blocks πρέπει να είναι τουλάχιστον 1")
         self.max_blocks = max_blocks
@@ -33,7 +41,13 @@ class JitterBuffer:
         # Στον πραγματικό Client καλείται standby() πριν αρχίσει η λήψη.
         self._active = True
         self._draining = False
-
+        self._block_samples = block_bytes // 2
+        self.fade_in_samples = max(0, fade_in_samples)
+        self.fade_out_samples = max(0, fade_out_samples)
+        self.resume_fade_samples = max(0, resume_fade_samples)
+        self._started = False  # έχει ήδη ακουστεί PCM σε αυτή την ανακοίνωση
+        self._fade_total = 0  # μήκος τρέχοντος fade-in σε δείγματα
+        self._fade_done = 0  # δείγματα του fade-in που έχουν ήδη παιχτεί
 
     def __len__(self) -> int:
         with self._lock:
@@ -50,6 +64,8 @@ class JitterBuffer:
             self._active = False
             self._draining = False
             self._filling = True
+            self._started = False
+            self._fade_total = self._fade_done = 0
             self._blocks.clear()
             self._levels.clear()
 
@@ -61,6 +77,8 @@ class JitterBuffer:
             self._filling = True
             self._draining = False
             self._active = True
+            self._started = False
+            self._fade_total = self._fade_done = 0
             self.dropped = 0
             self.underruns = 0
 
@@ -80,26 +98,69 @@ class JitterBuffer:
     def pop(self) -> bytes:
         """Επιστρέφει το επόμενο block ή σιωπή αν η ουρά δεν έχει αρκετά δεδομένα."""
         with self._lock:
-            if not self._active:
-                return self._silence
-            if self._draining:
-                if self._blocks:
-                    self._levels.append(len(self._blocks))
-                    return self._blocks.popleft()
-                self._active = False
-                self._draining = False
-                self._filling = True
-                return self._silence
-            self._levels.append(len(self._blocks))
-            if self._filling:
-                if len(self._blocks) < self.prefill_blocks:
-                    return self._silence
-                self._filling = False
-            if not self._blocks:
-                self.underruns += 1
-                self._filling = True
-                return self._silence
-            return self._blocks.popleft()
+            block, fade_in, fade_out = self._pop_locked()
+        if fade_in is not None:
+            block = apply_gain_ramp(block, *fade_in)
+        if fade_out is not None:
+            block = apply_gain_ramp(block, *fade_out)
+        return block
+
+    def _start_fade_in(self) -> None:
+        """Ξεκινά fade-in: πλήρες στην αρχή, σύντομο μετά από κενό δικτύου."""
+        self._fade_total = self.resume_fade_samples if self._started else self.fade_in_samples
+        self._fade_done = 0
+        self._started = True
+
+    def _next_fade_in(self) -> tuple[float, float] | None:
+        """Gain πρώτου/τελευταίου δείγματος του block· 0 → 1 σε fade_total δείγματα.
+
+        Οι τιμές πάνω από 1 κόβονται ανά δείγμα στο apply_gain_ramp, ώστε η κλίση
+        να μένει ίδια από block σε block.
+        """
+        if self._fade_done >= self._fade_total:
+            return None
+        n = self._block_samples
+        span = max(1, self._fade_total - 1)
+        start = self._fade_done / span
+        end = (self._fade_done + n - 1) / span
+        self._fade_done += n
+        return start, end
+
+    def _pop_locked(self):
+        if not self._active:
+            return self._silence, None, None
+        if self._draining:
+            if self._blocks:
+                if not self._started:
+                    self._start_fade_in()
+                self._levels.append(len(self._blocks))
+                fade_out = None
+                if self.fade_out_samples:
+                    # Μετά το STREAM_STOP ξέρουμε πόσος ήχος απομένει: fade-out
+                    # ώστε το τελευταίο δείγμα να καταλήγει ομαλά στη σιωπή.
+                    # Gain δείγματος = (r - 1) / (F - 1), όπου r τα δείγματα που
+                    # απομένουν μαζί με αυτό: το τελευταίο δείγμα παίζει με 0.
+                    remaining = len(self._blocks) * self._block_samples
+                    last = remaining - self._block_samples + 1
+                    if last <= self.fade_out_samples:
+                        span = max(1, self.fade_out_samples - 1)
+                        fade_out = ((remaining - 1) / span, (last - 1) / span)
+                return self._blocks.popleft(), self._next_fade_in(), fade_out
+            self._active = False
+            self._draining = False
+            self._filling = True
+            return self._silence, None, None
+        self._levels.append(len(self._blocks))
+        if self._filling:
+            if len(self._blocks) < self.prefill_blocks:
+                return self._silence, None, None
+            self._filling = False
+            self._start_fade_in()
+        if not self._blocks:
+            self.underruns += 1
+            self._filling = True
+            return self._silence, None, None
+        return self._blocks.popleft(), self._next_fade_in(), None
 
     def take_level_stats(self) -> tuple[int, float, int] | None:
         """(ελάχιστο, μέσο, μέγιστο) πλήθος blocks σε αναμονή από την τελευταία κλήση."""
