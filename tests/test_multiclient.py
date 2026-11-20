@@ -4,10 +4,12 @@ import socket
 import threading
 import time
 import unittest
+import uuid
 
 from director.broadcast import AudioBroadcaster, _ClientSession
 from director.main import accept_clients
 from shared.audio import BLOCK_BYTES, receive_frame
+from shared.identity import send_hello
 
 
 def pcm(n):
@@ -26,6 +28,7 @@ class MultiClientTests(unittest.TestCase):
                                          daemon=True)
         self.listener.start()
         self.clients = []
+        self.identities = []
 
     def tearDown(self):
         self.stop.set()
@@ -39,7 +42,12 @@ class MultiClientTests(unittest.TestCase):
         for _ in range(number - len(self.clients)):
             s = socket.create_connection(self.server.getsockname(), timeout=2)
             s.settimeout(3)
+            index = len(self.clients)
+            client_id = str(uuid.UUID(int=index + 1))
+            room = "C2627-Γ1" if index % 2 == 0 else "C2627-Γ2"
+            send_hello(s, client_id, room)
             self.clients.append(s)
+            self.identities.append((client_id, room))
         end = time.monotonic() + 3
         while self.broadcast.client_count != number and time.monotonic() < end:
             time.sleep(0.01)
@@ -107,7 +115,7 @@ class MultiClientTests(unittest.TestCase):
         sender, receiver = socket.socketpair()
         try:
             # Χωρίς εκκίνηση sender thread: προσομοίωση Client που δεν διαβάζει.
-            session = _ClientSession(1, sender, "slow", 5, lambda _: None)
+            session = _ClientSession(str(uuid.UUID(int=99)), "C2627-Γ1", sender, "slow", 5, lambda _: None)
             dropped = sum(session.enqueue(pcm(n)) for n in range(100))
             self.assertEqual(session.pending.qsize(), 5)
             self.assertEqual(dropped, 95)
@@ -116,12 +124,51 @@ class MultiClientTests(unittest.TestCase):
         finally:
             receiver.close()
 
+    def test_routing_rooms_individual_and_all(self):
+        self.connect_clients(3)
+        selected_id = self.identities[1][0]
+        scenarios = [
+            ({"rooms": {"C2627-Γ1"}, "client_ids": set()},
+             [pcm(1), bytes(BLOCK_BYTES), pcm(1)]),
+            ({"rooms": set(), "client_ids": {selected_id}},
+             [bytes(BLOCK_BYTES), pcm(2), bytes(BLOCK_BYTES)]),
+            ({"rooms": set(), "client_ids": set()},
+             [bytes(BLOCK_BYTES)] * 3),
+            ({}, [pcm(4)] * 3),
+        ]
+        for n, (targets, expected) in enumerate(scenarios, start=1):
+            self.broadcast.set_targets(**targets)
+            self.broadcast.publish(pcm(n), n * 1000)
+            frames = [receive_frame(s) for s in self.clients]
+            self.assertEqual([f.pcm for f in frames], expected)
+
+    def test_duplicate_identity_replaces_old_connection(self):
+        self.connect_clients(1)
+        previous = self.clients[0]
+        new = socket.create_connection(self.server.getsockname(), timeout=2)
+        new.settimeout(2)
+        send_hello(new, *self.identities[0])
+        self.clients.append(new)
+        end = time.monotonic() + 2
+        while time.monotonic() < end:
+            if previous.fileno() >= 0:
+                try:
+                    if previous.recv(1) == b"":
+                        break
+                except (OSError, socket.timeout):
+                    pass
+            time.sleep(0.01)
+        self.assertEqual(self.broadcast.client_count, 1)
+        self.broadcast.publish(pcm(9), 9)
+        self.assertEqual(receive_frame(new).pcm, pcm(9))
+
     def test_max_clients(self):
         self.broadcast.max_clients = 2
         self.connect_clients(2)
         extra = socket.create_connection(self.server.getsockname(), timeout=2)
         extra.settimeout(2)
         self.clients.append(extra)
+        send_hello(extra, str(uuid.UUID(int=200)), "C2627-Γ3")
         self.assertEqual(extra.recv(1), b"")
         self.assertEqual(self.broadcast.client_count, 2)
 
