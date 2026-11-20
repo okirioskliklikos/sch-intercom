@@ -6,6 +6,7 @@ import threading
 from types import SimpleNamespace
 
 from director.gui import AnnouncementControls, summarize_rooms
+from director.gui import run_microphone
 from director.main import stream_microphone
 from shared.audio import BLOCK_BYTES, BLOCK_SAMPLES
 
@@ -124,6 +125,49 @@ class MicrophoneMeterTests(TestCase):
         self.assertEqual(len(levels), 1)
         self.assertAlmostEqual(levels[0], 0.5)
         self.assertEqual(publishes, [])
+
+
+class MicrophoneRetryTests(TestCase):
+    def test_error_does_not_stop_director_and_retry_clears_it(self):
+        stop = threading.Event()
+        ready = threading.Event()
+        errors = []
+        calls = []
+
+        def fake_stream(_broadcaster, *, stop, ready_callback, **kwargs):
+            calls.append(kwargs)
+            if len(calls) == 1:
+                raise OSError("η συσκευή αποσυνδέθηκε")
+            # Δεύτερη προσπάθεια: το σφάλμα ήταν ορατό και το stop ΔΕΝ πατήθηκε.
+            self.assertEqual(errors, ["η συσκευή αποσυνδέθηκε"])
+            self.assertFalse(stop.is_set())
+            self.assertFalse(ready.is_set())
+            ready_callback()
+            stop.set()
+
+        run_microphone(fake_stream, object(), stop=stop, ready=ready,
+                       set_error=errors.append, retry_seconds=0, device=3)
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(calls[0], {"device": 3})
+        self.assertEqual(errors, ["η συσκευή αποσυνδέθηκε", None])
+        # Μετά τον κανονικό τερματισμό το μικρόφωνο δεν θεωρείται έτοιμο.
+        self.assertFalse(ready.is_set())
+
+    def test_error_after_ready_clears_ready(self):
+        stop = threading.Event()
+        ready = threading.Event()
+        errors = []
+
+        def fake_stream(_broadcaster, *, stop, ready_callback, **kwargs):
+            ready_callback()
+            self.assertTrue(ready.is_set())
+            stop.set()
+            raise RuntimeError()
+
+        run_microphone(fake_stream, object(), stop=stop, ready=ready,
+                       set_error=errors.append, retry_seconds=0)
+        self.assertFalse(ready.is_set())
+        self.assertEqual(errors, [None, "RuntimeError"])
 
 
 if __name__ == "__main__":
