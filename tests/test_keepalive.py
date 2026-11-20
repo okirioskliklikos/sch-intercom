@@ -7,7 +7,7 @@ import unittest
 import uuid
 
 from client.main import (ANNOUNCEMENT_PREFILL_MS, DEFAULT_BUFFER_MS, DEFAULT_LATENCY,
-                         RECEIVE_TIMEOUT_SECONDS, pump_frames)
+                         RECEIVE_TIMEOUT_SECONDS, pump_frames, run_with_reconnect)
 from shared.audio import (BLOCK_BYTES, BLOCK_MS, Frame, HEADER_BYTES, MESSAGE_KEEPALIVE,
                           MESSAGE_STREAM_STOP, encode_control, encode_frame, receive_message)
 from shared.control import KEEPALIVE_INTERVAL_SECONDS
@@ -104,7 +104,7 @@ class ControlProtocolTests(unittest.TestCase):
             # Ακόμη κι αν έρθουν πολλά keepalive, δεν μετρούν ως ήχος.
             for _ in range(3):
                 sender.sendall(encode_control(MESSAGE_KEEPALIVE))
-            self.assertTrue(wait_until(lambda: jitter.mode == "ανακοίνωση"))
+            self.assertTrue(wait_until(lambda: jitter._draining), "Δεν παραλήφθηκε STREAM_STOP")
             self.assertEqual([jitter.pop() for _ in range(8)], [pcm(n) for n in range(8)])
             self.assertEqual(jitter.pop(), bytes(BLOCK_BYTES))
             self.assertEqual(jitter.mode, "αναμονή")
@@ -170,6 +170,56 @@ class ControlProtocolTests(unittest.TestCase):
         finally:
             sender.close()
             receiver.close()
+
+    def test_missing_keepalive_causes_reconnect_at_three_seconds(self):
+        server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        server.bind(("127.0.0.1", 0))
+        server.listen(2)
+        server.settimeout(8)
+        connections = []
+        seen_second = threading.Event()
+        closed_first = threading.Event()
+        def director():
+            try:
+                first, _ = server.accept()
+                connections.append(first)
+                first.sendall(encode_control(MESSAGE_KEEPALIVE))
+                # Η σύνδεση παραμένει ανοιχτή, αλλά σιωπούν όλα τα μηνύματα.
+                second, _ = server.accept()
+                seen_second.set()
+                connections.append(second)
+                first.settimeout(1)
+                if first.recv(1) == b"":
+                    closed_first.set()
+                second.sendall(encode_frame(pcm(31), 31, 0))
+                second.close()
+            except OSError:
+                pass
+        background = threading.Thread(target=director, daemon=True)
+        background.start()
+        sessions = []
+        start = time.monotonic()
+        def session(connection):
+            jitter = JitterBuffer(12, BLOCK_BYTES)
+            jitter.standby()
+            try:
+                pump_frames(connection, jitter, DelayTracker(), report=None)
+            finally:
+                sessions.append(len(jitter))
+        try:
+            run_with_reconnect(*server.getsockname(), session, reconnect_delay=0,
+                               max_sessions=2, log=lambda _: None, sleep=lambda _: None)
+            elapsed = time.monotonic() - start
+            self.assertTrue(seen_second.is_set())
+            self.assertTrue(closed_first.is_set())
+            self.assertEqual(sessions, [0, 1])
+            self.assertGreaterEqual(elapsed, 2.8)
+            self.assertLess(elapsed, 5.0)
+        finally:
+            server.close()
+            for connection in connections:
+                connection.close()
+            background.join(timeout=1)
 
     def test_playback_defaults_remain(self):
         self.assertEqual(DEFAULT_BUFFER_MS, 250)
