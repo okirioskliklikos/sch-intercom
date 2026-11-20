@@ -72,6 +72,82 @@ class DiscoveryTests(unittest.TestCase):
         finally:
             thread.join()
 
+    def _send_beacons(self, port, beacons, delay=0.06):
+        """Στέλνει (identifier, tcp_port) beacons στο localhost από νέο thread."""
+        def sender():
+            time.sleep(delay)
+            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+                for identifier, tcp_port in beacons:
+                    sock.sendto(encode_beacon(identifier, tcp_port), ("127.0.0.1", port))
+        thread = threading.Thread(target=sender)
+        thread.start()
+        return thread
+
+    @staticmethod
+    def _free_udp_port():
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as test:
+            test.bind(("127.0.0.1", 0))
+            return test.getsockname()[1]
+
+    def test_preferred_director_returns_after_confirm_window(self):
+        identifier = str(uuid.uuid4())
+        port = self._free_udp_port()
+        thread = self._send_beacons(port, [(identifier, 50555)])
+        try:
+            start = time.monotonic()
+            result = discover(udp_port=port, timeout=2.0, preferred_id=identifier,
+                              confirm=0.3)
+            elapsed = time.monotonic() - start
+        finally:
+            thread.join()
+        self.assertEqual(result, ("127.0.0.1", 50555, identifier))
+        self.assertGreaterEqual(elapsed, 0.25)
+        self.assertLess(elapsed, 1.0)
+
+    def test_without_preferred_id_waits_full_window(self):
+        identifier = str(uuid.uuid4())
+        port = self._free_udp_port()
+        thread = self._send_beacons(port, [(identifier, 50555)])
+        try:
+            start = time.monotonic()
+            result = discover(udp_port=port, timeout=0.6, confirm=0.1)
+            elapsed = time.monotonic() - start
+        finally:
+            thread.join()
+        self.assertEqual(result, ("127.0.0.1", 50555, identifier))
+        self.assertGreaterEqual(elapsed, 0.55)
+
+    def test_default_confirm_window_is_shorter_than_full_window(self):
+        from shared.discovery import ANNOUNCE_INTERVAL, CONFIRM_WINDOW, DISCOVERY_WINDOW
+        self.assertGreater(CONFIRM_WINDOW, ANNOUNCE_INTERVAL)
+        self.assertLess(CONFIRM_WINDOW, DISCOVERY_WINDOW)
+
+    def test_same_id_from_two_addresses_rejected(self):
+        identifier = str(uuid.uuid4())
+        for preferred in (None, identifier):
+            with self.subTest(preferred=preferred):
+                port = self._free_udp_port()
+                thread = self._send_beacons(port, [(identifier, 50555), (identifier, 50999)])
+                try:
+                    with self.assertRaisesRegex(ValueError, "πολλές διευθύνσεις"):
+                        discover(udp_port=port, timeout=0.4, preferred_id=preferred,
+                                 confirm=0.3)
+                finally:
+                    thread.join()
+
+    def test_conflict_logged_and_retried_by_client(self):
+        calls = []
+        def discovery(**kwargs):
+            calls.append(kwargs)
+            raise ValueError("Το ID Director εμφανίστηκε από πολλές διευθύνσεις")
+        lines = []
+        with mock.patch("client.main.open_connection") as connect:
+            run_with_reconnect(None, 50555, lambda _: None, max_sessions=2,
+                               discovery=discovery, sleep=lambda _: None, log=lines.append)
+        connect.assert_not_called()
+        self.assertEqual(len(calls), 2)
+        self.assertTrue(any("πολλές διευθύνσεις" in line for line in lines))
+
     def test_preferred_director_and_ip_change_on_reconnect(self):
         identifier = str(uuid.uuid4())
         discovered = []
