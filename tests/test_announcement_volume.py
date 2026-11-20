@@ -189,7 +189,7 @@ class PumpIntegrationTests(unittest.TestCase):
                 self.assertTrue(volume.active)  # STOP alone does not restore
                 jitter.pop()  # last PCM
                 jitter.pop()  # callback enters standby
-                time.sleep(0.11)  # simulated minimum hardware drain allowance
+                time.sleep(1.55)  # 1,5 s grace after the actual queue drain
             return message
 
         with patch("client.main.receive_message", side_effect=receive):
