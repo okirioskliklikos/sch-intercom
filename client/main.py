@@ -7,6 +7,7 @@
 import argparse
 from pathlib import Path
 import socket
+import sys
 import threading
 import time
 from collections.abc import Callable
@@ -73,6 +74,7 @@ def pump_frames(
     """PCM/έλεγχος στην ίδια κατεύθυνση TCP, χωρίς reconnect σε αναμονή."""
     received = 0
     in_announcement = False
+    stop_received_at: float | None = None
     next_report = time.monotonic() + report_every_s
     timeout = connection.gettimeout()
     last_valid = time.monotonic()
@@ -89,6 +91,7 @@ def pump_frames(
                     except Exception as exc:
                         print(f"[ήχος] Αδυναμία προσωρινής έντασης: {exc}", flush=True)
                 jitter.begin_announcement()
+                stop_received_at = None
                 delay.reset()
                 in_announcement = True
             delay.record(message.seq, message.timestamp_us, clock_us())
@@ -98,9 +101,12 @@ def pump_frames(
             if in_announcement:
                 jitter.finish_announcement()
                 in_announcement = False
+                stop_received_at = time.monotonic()
         # Μετά το STREAM_STOP περιμένουμε να αδειάσει η ουρά από το callback.
         # Τα KEEPALIVE ανά 0,5 s δίνουν περιθώριο και για τη latency της κάρτας.
         if (volume is not None and volume.active and not in_announcement
+                and stop_received_at is not None
+                and time.monotonic() - stop_received_at >= 0.1
                 and jitter.mode == "αναμονή"):
             volume.end()
         # KEEPALIVE: μόνο επιβεβαίωση ζωντανής σύνδεσης· όχι PCM/underrun.
@@ -135,9 +141,13 @@ def play_stream(
     jitter = make_jitter_buffer(buffer_ms, fade_ms, resume_fade_ms)
     jitter.standby()
     delay = DelayTracker()
+    journal = recovery_path or Path.home() / ".school-intercom" / "volume-recovery.json"
+    # Αν προηγούμενος Client έπεσε, ανάκαμψη και χωρίς νέα ενεργοποίηση
+    # της λειτουργίας από CLI. Δεν επιχειρούμε αλλαγές σε Linux.
+    if announcement_volume is None and sys.platform == "win32" and journal.exists():
+        create_volume_controller(0, device=device, recovery_path=journal)
     volume = (create_volume_controller(
-        announcement_volume, device=device,
-        recovery_path=recovery_path or Path.home() / ".school-intercom" / "volume-recovery.json")
+        announcement_volume, device=device, recovery_path=journal)
         if announcement_volume is not None else None)
 
     def on_audio(outdata, frames, timestamp, status):
