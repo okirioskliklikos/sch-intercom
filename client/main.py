@@ -18,8 +18,8 @@ from shared.jitter import DelayTracker, JitterBuffer
 from shared.identity import load_identity, receive_welcome, send_hello
 from shared.discovery import discover, DISCOVERY_PORT
 from shared.control import heartbeat_sender
-from client.windows_volume import (AnnouncementVolume, create_volume_controller,
-                                   recover_pending_volume)
+from client.windows_volume import (AnnouncementVolume, AudioPolicyWorker,
+                                   create_volume_controller, recover_pending_volume)
 from client.windows_apps import ApplicationAudio
 
 RECONNECT_DELAY_SECONDS = 3
@@ -71,7 +71,7 @@ def pump_frames(
     clock_us: Callable[[], int] = now_us,
     report: Callable[[str], None] | None = None,
     report_every_s: float = REPORT_EVERY_SECONDS,
-    volume: AnnouncementVolume | None = None,
+    volume: AnnouncementVolume | AudioPolicyWorker | None = None,
 ) -> None:
     """PCM/έλεγχος στην ίδια κατεύθυνση TCP, χωρίς reconnect σε αναμονή."""
     received = 0
@@ -157,10 +157,14 @@ def play_stream(
     # Κανένα πρόβλημα έντασης/ανάκαμψης δεν σταματά τον Client: μόνο προειδοποίηση.
     if announcement_volume is None:
         recover_pending_volume(journal, device=device)
-    volume = (create_volume_controller(
-        announcement_volume, device=device, recovery_path=journal,
-        apps=ApplicationAudio(log=lambda msg: print(msg, flush=True)) if mute_others else None)
-        if announcement_volume is not None else None)
+    # Οι αλλαγές ήχου Windows (fade, pause/play) γίνονται σε δικό τους νήμα,
+    # ώστε η λήψη να μη σταματά και να μη χάνονται οι πρώτες λέξεις.
+    volume = None
+    if announcement_volume is not None:
+        volume = AudioPolicyWorker(lambda: create_volume_controller(
+            announcement_volume, device=device, recovery_path=journal,
+            apps=ApplicationAudio(log=lambda msg: print(msg, flush=True))
+            if mute_others else None))
 
     def on_audio(outdata, frames, timestamp, status):
         if status:
@@ -195,7 +199,7 @@ def play_stream(
                 # Σφάλμα εδώ δεν πρέπει να κρύψει το αρχικό ούτε να σταματήσει
                 # την επανασύνδεση· το αρχείο ανάκαμψης μένει για την επόμενη φορά.
                 try:
-                    volume.end()
+                    volume.close()
                 except Exception as exc:  # noqa: BLE001
                     print(f"[ήχος] Αποτυχία επαναφοράς έντασης: {exc}", flush=True)
 
