@@ -82,6 +82,59 @@ class ControlProtocolTests(unittest.TestCase):
             message = receive_message(client)
         self.assertEqual(message.pcm, pcm(2))
 
+    def test_selected_client_gets_keepalive_when_microphone_stalls(self):
+        """Επιλεγμένος Client χωρίς PCM (κόλλημα μικροφώνου) δεν μένει χωρίς μηνύματα."""
+        server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        server.bind(("127.0.0.1", 0))
+        server.listen(1)
+        client = socket.create_connection(server.getsockname(), timeout=2)
+        incoming, _ = server.accept()
+        server.close()
+        client.settimeout(2)
+        director = AudioBroadcaster(heartbeat_timeout=4)
+        self.addCleanup(director.close)
+        self.addCleanup(client.close)
+        self.assertTrue(director.add_client(incoming, str(uuid.uuid4()), "C2627-Γ1"))
+        director.publish(pcm(1), 10)
+        self.assertEqual(receive_message(client).pcm, pcm(1))
+        # Ο Client παραμένει επιλεγμένος· δεν γίνεται άλλο publish.
+        start = time.monotonic()
+        for _ in range(2):
+            message = receive_message(client, deadline=time.monotonic() + 1.0)
+            self.assertNotIsInstance(message, Frame)
+            self.assertEqual(message.kind, MESSAGE_KEEPALIVE)
+        elapsed = time.monotonic() - start
+        self.assertGreaterEqual(elapsed, 0.9)
+        self.assertLess(elapsed, 1.6)
+        # Όταν επανέλθει το μικρόφωνο, ο ήχος συνεχίζει χωρίς STOP ή επανασύνδεση.
+        director.publish(pcm(2), 20)
+        message = receive_message(client)
+        while not isinstance(message, Frame):
+            self.assertEqual(message.kind, MESSAGE_KEEPALIVE)
+            message = receive_message(client)
+        self.assertEqual(message.pcm, pcm(2))
+
+    def test_no_keepalive_while_pcm_flows(self):
+        server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        server.bind(("127.0.0.1", 0))
+        server.listen(1)
+        client = socket.create_connection(server.getsockname(), timeout=2)
+        incoming, _ = server.accept()
+        server.close()
+        client.settimeout(2)
+        director = AudioBroadcaster(heartbeat_timeout=4)
+        self.addCleanup(director.close)
+        self.addCleanup(client.close)
+        self.assertTrue(director.add_client(incoming, str(uuid.uuid4()), "C2627-Γ1"))
+        for n in range(40):  # 0,8 s ροής, 20 ms ανά block
+            director.publish(pcm(n % 250), n)
+            time.sleep(0.02)
+        kinds = []
+        for _ in range(40):
+            message = receive_message(client)
+            kinds.append("pcm" if isinstance(message, Frame) else message.kind)
+        self.assertEqual(kinds, ["pcm"] * 40)
+
     def test_partial_invalid_message_does_not_extend_timeout(self):
         sender, receiver = socket.socketpair()
         try:

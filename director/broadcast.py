@@ -231,17 +231,20 @@ class _ClientSession:
             self.on_disconnect(self)
 
     def _run(self) -> None:
-        last_keepalive = time.monotonic()
+        # KEEPALIVE σε όποιον δεν έλαβε τίποτα για 0,5 s, επιλεγμένο ή όχι: αν
+        # σταματήσει η λήψη μικροφώνου του Director, οι επιλεγμένοι Clients δεν
+        # αποσυνδέονται άδικα στα 3 s ενώ το δίκτυο είναι υγιές.
+        last_sent = time.monotonic()
         try:
             while not self.stopped.is_set():
                 try:
                     frame = self.pending.get(timeout=0.1)
                 except queue.Empty:
-                    if self.selected or time.monotonic() - last_keepalive < KEEPALIVE_INTERVAL_SECONDS:
+                    if time.monotonic() - last_sent < KEEPALIVE_INTERVAL_SECONDS:
                         continue
                     frame = encode_control(MESSAGE_KEEPALIVE)
-                    last_keepalive = time.monotonic()
                 self.connection.sendall(frame)
+                last_sent = time.monotonic()
                 self.bytes_sent += len(frame)
         except OSError:
             pass
