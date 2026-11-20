@@ -10,6 +10,10 @@ import uuid
 DISCOVERY_PORT = 50556
 ANNOUNCE_INTERVAL = 1.0
 DISCOVERY_WINDOW = 2.5
+# Με γνωστό Director ο Client σταματά νωρίτερα, αλλά μόνο αφού περάσει λίγο
+# παραπάνω από ένα διάστημα beacon: έτσι ο πραγματικός Director προλαβαίνει να
+# ακουστεί και ένα αντιγραμμένο ID από άλλη διεύθυνση εντοπίζεται.
+CONFIRM_WINDOW = ANNOUNCE_INTERVAL + 0.2
 MAGIC = b"SID1:"
 MAX_BEACON_BYTES = 128
 
@@ -75,13 +79,16 @@ def announce(stop, identifier: str, tcp_port: int, *, udp_port: int = DISCOVERY_
 
 
 def discover(*, udp_port: int = DISCOVERY_PORT, timeout: float = DISCOVERY_WINDOW,
-             preferred_id: str | None = None) -> tuple[str, int, str] | None:
+             preferred_id: str | None = None,
+             confirm: float = CONFIRM_WINDOW) -> tuple[str, int, str] | None:
     """Επιστρέφει IP πηγής, TCP port και UUID ή None.
 
     Δεν εμπιστεύεται IP μέσα στο beacon. Με πολλούς Directors και χωρίς
-    προτιμώμενο ID δεν επιλέγει αυθαίρετα έναν.
+    προτιμώμενο ID δεν επιλέγει αυθαίρετα έναν. Με προτιμώμενο ID επιστρέφει
+    μόλις περάσει το confirm (αντί για όλο το timeout), αν έχει βρεθεί.
+    Αν το ίδιο ID έρθει από δύο διευθύνσεις (IP ή TCP port), δεν επιλέγει καμία.
     """
-    candidates: dict[str, tuple[str, int, str]] = {}
+    candidates: dict[str, set[tuple[str, int]]] = {}
     with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as listener:
         listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         if hasattr(socket, "SO_REUSEPORT"):
@@ -90,9 +97,14 @@ def discover(*, udp_port: int = DISCOVERY_PORT, timeout: float = DISCOVERY_WINDO
             except OSError:
                 pass
         listener.bind(("", udp_port))
-        deadline = time.monotonic() + timeout
+        start = time.monotonic()
+        deadline = start + timeout
+        early = start + min(confirm, timeout) if preferred_id is not None else deadline
         while True:
-            remaining = deadline - time.monotonic()
+            now = time.monotonic()
+            if candidates and now >= early:
+                break
+            remaining = (early if candidates else deadline) - now
             if remaining <= 0:
                 break
             listener.settimeout(remaining)
@@ -106,7 +118,15 @@ def discover(*, udp_port: int = DISCOVERY_PORT, timeout: float = DISCOVERY_WINDO
                 continue
             if preferred_id is not None and identifier != preferred_id:
                 continue
-            candidates[identifier] = (sender[0], tcp_port, identifier)
+            candidates.setdefault(identifier, set()).add((sender[0], tcp_port))
     if len(candidates) > 1:
         raise ValueError("Βρέθηκαν πολλοί Directors: ορίστε χειροκίνητα --host")
-    return next(iter(candidates.values()), None)
+    if not candidates:
+        return None
+    identifier, addresses = next(iter(candidates.items()))
+    if len(addresses) > 1:
+        found = ", ".join(f"{host}:{port}" for host, port in sorted(addresses))
+        raise ValueError(f"Το ID Director εμφανίστηκε από πολλές διευθύνσεις ({found})· "
+                         "πιθανή πλαστοπροσωπία, δεν γίνεται σύνδεση")
+    host, tcp_port = next(iter(addresses))
+    return host, tcp_port, identifier
