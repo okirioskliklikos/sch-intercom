@@ -195,10 +195,11 @@ class ApplicationAudio:
             except Exception as exc:
                 self.log(f"[ήχος] Αδυναμία ανάγνωσης εφαρμογών για επαναφορά: {exc}")
                 return False
+            changes = []
             for item in list(record["apps"]):
                 matches = [s for s in sessions if _same_identity(s, item)]
                 if not matches:
-                    # Κλειστή/αντικατασταθείσα session: δεν αγγίζουμε άλλη διεργασία.
+                    # Κλειστή/αντικατασταθείσα session: ποτέ σε νέα διεργασία.
                     self.log("[ήχος] Η προηγούμενη συνεδρία δεν υπάρχει πλέον.")
                     record["apps"].remove(item)
                     save(record)
@@ -208,18 +209,44 @@ class ApplicationAudio:
                     current = session.get_volume()
                     original = item["original"]
                     can_restore = same_volume(current, 0.0) or (
-                        item["stage"] == "pending"
+                        item["stage"] in ("pending", "restoring")
                         and min(0.0, original) - 0.01 <= current
                         <= max(0.0, original) + 0.01)
                     if can_restore:
-                        self._ramp(session, current, original)
+                        item["stage"] = "restoring"  # crash mid fade-in
+                        changes.append((session, item, current))
                     else:
-                        self.log("[ήχος] Εφαρμογή άλλαξε ένταση χειροκίνητα· παραμένει.")
-                    record["apps"].remove(item)
-                    save(record)
+                        self.log("[ήχος] Χειροκίνητη αλλαγή έντασης· δεν αναιρείται.")
+                        record["apps"].remove(item)
+                        save(record)
                 except Exception as exc:
                     ok = False
                     self.log(f"[ήχος] Εκκρεμεί επαναφορά εφαρμογής: {exc}")
+            if changes:
+                save(record)  # journaling ΠΡΙΝ το fade-in
+                import time
+                steps = max(1, int(self.ramp_ms // 10))
+                failed = set()
+                for index in range(1, steps + 1):
+                    for session, item, current in changes:
+                        if id(item) in failed:
+                            continue
+                        try:
+                            session.set_volume(
+                                item["original"] if index == steps
+                                else current + (item["original"] - current) * index / steps)
+                        except Exception as exc:
+                            failed.add(id(item))
+                            ok = False
+                            self.log(f"[ήχος] Αποτυχία επαναφοράς εφαρμογής: {exc}")
+                    if index < steps and self.sleep is None:
+                        time.sleep(self.ramp_ms / steps / 1000)
+                    elif index < steps:
+                        self.sleep(self.ramp_ms / steps / 1000)
+                for session, item, current in changes:
+                    if id(item) not in failed:
+                        record["apps"].remove(item)
+                save(record)
         return ok and not record.get("apps") and not record.get("media")
 
     async def _resume_media(self, record, save):
