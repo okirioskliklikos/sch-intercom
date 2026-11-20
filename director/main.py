@@ -83,7 +83,7 @@ def show_help() -> str:
 def stream_microphone(broadcaster: AudioBroadcaster, *, device: int | None = None,
                       latency: str | float = "low", stop: threading.Event | None = None,
                       stats: DirectorStats | None = None,
-                      level_callback=None) -> None:
+                      level_callback=None, ready_callback=None) -> None:
     import sounddevice as sd
 
     pending: queue.Queue[tuple[int, bytes]] = queue.Queue(maxsize=MAX_PENDING_BLOCKS)
@@ -120,6 +120,8 @@ def stream_microphone(broadcaster: AudioBroadcaster, *, device: int | None = Non
         samplerate=SAMPLE_RATE, channels=CHANNELS, dtype=DTYPE,
         blocksize=BLOCK_SAMPLES, device=device, latency=latency, callback=on_audio,
     ) as microphone:
+        if ready_callback is not None:
+            ready_callback()
         print(
             f"Μικρόφωνο ενεργό — μιλήστε. Ctrl+C για τερματισμό. "
             f"Καθυστέρηση κάρτας ήχου {microphone.latency * 1000:.0f} ms",
