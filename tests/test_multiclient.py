@@ -8,7 +8,8 @@ import uuid
 
 from director.broadcast import AudioBroadcaster, _ClientSession
 from director.main import accept_clients
-from shared.audio import BLOCK_BYTES, receive_frame
+from shared.audio import (BLOCK_BYTES, Frame, MESSAGE_KEEPALIVE, MESSAGE_STREAM_STOP,
+                          receive_frame, receive_message)
 from shared.identity import receive_welcome, send_hello
 
 
@@ -128,20 +129,38 @@ class MultiClientTests(unittest.TestCase):
     def test_routing_rooms_individual_and_all(self):
         self.connect_clients(3)
         selected_id = self.identities[1][0]
-        scenarios = [
-            ({"rooms": {"C2627-Γ1"}, "client_ids": set()},
-             [pcm(1), bytes(BLOCK_BYTES), pcm(1)]),
-            ({"rooms": set(), "client_ids": {selected_id}},
-             [bytes(BLOCK_BYTES), pcm(2), bytes(BLOCK_BYTES)]),
-            ({"rooms": set(), "client_ids": set()},
-             [bytes(BLOCK_BYTES)] * 3),
-            ({}, [pcm(4)] * 3),
-        ]
-        for n, (targets, expected) in enumerate(scenarios, start=1):
-            self.broadcast.set_targets(**targets)
-            self.broadcast.publish(pcm(n), n * 1000)
-            frames = [receive_frame(s) for s in self.clients]
-            self.assertEqual([f.pcm for f in frames], expected)
+
+        def next_non_keepalive(connection):
+            until = time.monotonic() + 2
+            while time.monotonic() < until:
+                message = receive_message(connection)
+                if isinstance(message, Frame) or message.kind != MESSAGE_KEEPALIVE:
+                    return message
+            self.fail("Δεν εμφανίστηκε PCM/STOP")
+
+        self.broadcast.set_targets(rooms={"C2627-Γ1"}, client_ids=set())
+        self.broadcast.publish(pcm(1), 1000)
+        self.assertEqual(next_non_keepalive(self.clients[0]).pcm, pcm(1))
+        self.assertEqual(next_non_keepalive(self.clients[1]).kind, MESSAGE_STREAM_STOP)
+        self.assertEqual(next_non_keepalive(self.clients[2]).pcm, pcm(1))
+
+        self.broadcast.set_targets(rooms=set(), client_ids={selected_id})
+        self.broadcast.publish(pcm(2), 2000)
+        self.assertEqual(next_non_keepalive(self.clients[0]).kind, MESSAGE_STREAM_STOP)
+        self.assertEqual(next_non_keepalive(self.clients[1]).pcm, pcm(2))
+        self.assertEqual(next_non_keepalive(self.clients[2]).kind, MESSAGE_STREAM_STOP)
+
+        self.broadcast.set_targets(rooms=set(), client_ids=set())
+        self.assertEqual(next_non_keepalive(self.clients[1]).kind, MESSAGE_STREAM_STOP)
+        # Σε πλήρη αναμονή δεν διακινείται PCM, μόνο keepalive.
+        for connection in self.clients:
+            message = receive_message(connection)
+            self.assertEqual(message.kind, MESSAGE_KEEPALIVE)
+
+        self.broadcast.set_targets()
+        self.broadcast.publish(pcm(4), 4000)
+        for connection in self.clients:
+            self.assertEqual(next_non_keepalive(connection).pcm, pcm(4))
 
     def test_duplicate_identity_replaces_old_connection(self):
         self.connect_clients(1)

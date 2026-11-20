@@ -61,6 +61,29 @@ class JitterBufferTests(unittest.TestCase):
         self.assertEqual(jitter.take_level_stats(), (2, 2.5, 3))
         self.assertIsNone(jitter.take_level_stats())
 
+    def test_idle_is_silent_without_underruns(self):
+        jitter = JitterBuffer(12, BLOCK_BYTES, prefill_blocks=6)
+        jitter.standby()
+        for _ in range(80):
+            self.assertEqual(jitter.pop(), bytes(BLOCK_BYTES))
+        self.assertEqual(jitter.mode, "αναμονή")
+        self.assertEqual(jitter.underruns, 0)
+        self.assertIsNone(jitter.take_level_stats())
+        self.assertIn("κατάσταση: αναμονή", format_report(jitter, DelayTracker(), 0,
+                                                        mode="αναμονή"))
+
+    def test_stop_drains_even_short_announcement_without_underrun(self):
+        jitter = JitterBuffer(12, BLOCK_BYTES, prefill_blocks=6)
+        jitter.standby()
+        jitter.begin_announcement()
+        jitter.push(block(17))
+        self.assertEqual(jitter.pop(), bytes(BLOCK_BYTES))  # ακόμη prefill
+        jitter.finish_announcement()
+        self.assertEqual(jitter.pop(), block(17))
+        self.assertEqual(jitter.pop(), bytes(BLOCK_BYTES))
+        self.assertEqual(jitter.mode, "αναμονή")
+        self.assertEqual(jitter.underruns, 0)
+
     def test_invalid_size(self):
         with self.assertRaises(ValueError):
             JitterBuffer(0, BLOCK_BYTES)

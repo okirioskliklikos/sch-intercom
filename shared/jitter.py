@@ -29,10 +29,46 @@ class JitterBuffer:
         self.dropped = 0
         self.underruns = 0
         self._levels: list[int] = []
+        # Το legacy JitterBuffer παραμένει ενεργό για ανεξάρτητες δοκιμές.
+        # Στον πραγματικό Client καλείται standby() πριν αρχίσει η λήψη.
+        self._active = True
+        self._draining = False
+
 
     def __len__(self) -> int:
         with self._lock:
             return len(self._blocks)
+
+    @property
+    def mode(self) -> str:
+        with self._lock:
+            return "ανακοίνωση" if self._active else "αναμονή"
+
+    def standby(self) -> None:
+        """Καθαρή αναμονή χωρίς underruns ούτε καταχώριση επιπέδων."""
+        with self._lock:
+            self._active = False
+            self._draining = False
+            self._filling = True
+            self._blocks.clear()
+            self._levels.clear()
+
+    def begin_announcement(self) -> None:
+        """Νέα ανακοίνωση: απομάκρυνση παλιάς ουράς και prefill."""
+        with self._lock:
+            self._blocks.clear()
+            self._levels.clear()
+            self._filling = True
+            self._draining = False
+            self._active = True
+            self.dropped = 0
+            self.underruns = 0
+
+    def finish_announcement(self) -> None:
+        """STREAM_STOP: παίζουμε όλα τα εναπομείναντα PCM χωρίς νέο prefill."""
+        with self._lock:
+            if self._active:
+                self._draining = True
 
     def push(self, block: bytes) -> None:
         with self._lock:
@@ -44,6 +80,16 @@ class JitterBuffer:
     def pop(self) -> bytes:
         """Επιστρέφει το επόμενο block ή σιωπή αν η ουρά δεν έχει αρκετά δεδομένα."""
         with self._lock:
+            if not self._active:
+                return self._silence
+            if self._draining:
+                if self._blocks:
+                    self._levels.append(len(self._blocks))
+                    return self._blocks.popleft()
+                self._active = False
+                self._draining = False
+                self._filling = True
+                return self._silence
             self._levels.append(len(self._blocks))
             if self._filling:
                 if len(self._blocks) < self.prefill_blocks:
@@ -86,6 +132,13 @@ class DelayTracker:
         if self._best_offset_us is None or offset < self._best_offset_us:
             self._best_offset_us = offset
         self._extra_us.append(offset - self._best_offset_us)
+
+    def reset(self) -> None:
+        """Οι μετρήσεις δικτύου αρχίζουν από την αρχή κάθε ανακοίνωσης."""
+        self._best_offset_us = None
+        self._extra_us.clear()
+        self.gaps = 0
+        self._last_seq = None
 
     def take_stats(self) -> tuple[float, float] | None:
         """(μέση, μέγιστη) επιπλέον καθυστέρηση σε ms από την τελευταία κλήση."""
