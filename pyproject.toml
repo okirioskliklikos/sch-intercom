@@ -1,0 +1,16 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "school-intercom"
+version = "0.1.0"
+description = "Experimental LAN school intercom audio prototype"
+requires-python = ">=3.10"
+dependencies = ["sounddevice>=0.5,<1"]
+
+[tool.setuptools.packages.find]
+include = ["director*", "client*", "shared*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
