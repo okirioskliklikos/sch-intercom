@@ -7,6 +7,7 @@ Type 0 = PCM (640 bytes), 1 = KEEPALIVE, 2 = STREAM_STOP (χωρίς payload).
 """
 
 import select
+from array import array
 import socket
 import struct
 import time
@@ -107,3 +108,23 @@ def receive_frame(connection: socket.socket) -> Frame:
     if not isinstance(message, Frame):
         raise ValueError("Αναμενόταν PCM frame")
     return message
+
+
+def apply_gain_ramp(pcm: bytes, start_gain: float, end_gain: float) -> bytes:
+    """Γραμμική αλλαγή έντασης σε block int16 (fade-in/fade-out χωρίς «κλικ»).
+
+    Το πρώτο δείγμα παίρνει start_gain και το τελευταίο end_gain. Με σταθερό
+    gain 1.0 επιστρέφεται το ίδιο block χωρίς αντιγραφή.
+    """
+    if start_gain >= 1.0 and end_gain >= 1.0:
+        return pcm
+    samples = array("h")
+    samples.frombytes(pcm)
+    count = len(samples)
+    if count == 0:
+        return pcm
+    step = (end_gain - start_gain) / (count - 1) if count > 1 else 0.0
+    for i in range(count):
+        gain = start_gain + step * i
+        samples[i] = int(samples[i] * max(0.0, min(1.0, gain)))
+    return samples.tobytes()

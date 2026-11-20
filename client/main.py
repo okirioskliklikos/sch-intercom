@@ -26,6 +26,10 @@ RECEIVE_TIMEOUT_SECONDS = 3.0
 CONNECT_TIMEOUT_SECONDS = 5
 DEFAULT_BUFFER_MS = 250
 ANNOUNCEMENT_PREFILL_MS = 120
+# Fade-in/fade-out αρχής/τέλους ανακοίνωσης και σύντομο fade-in μετά από κενό
+# δικτύου, ώστε να μην ακούγεται «κλικ» στα απότομα περάσματα σιωπή ↔ φωνή.
+DEFAULT_FADE_MS = 150
+DEFAULT_RESUME_FADE_MS = 20
 REPORT_EVERY_SECONDS = 5
 # 40 ms: δοκιμάστηκε από τον χρήστη σε Windows χωρίς κροτάλισμα (το "low" έδινε 100 ms).
 DEFAULT_LATENCY = 0.04
@@ -94,17 +98,27 @@ def pump_frames(
             next_report = time.monotonic() + report_every_s
 
 
+def make_jitter_buffer(buffer_ms: int = DEFAULT_BUFFER_MS, fade_ms: int = DEFAULT_FADE_MS,
+                       resume_fade_ms: int = DEFAULT_RESUME_FADE_MS) -> JitterBuffer:
+    fade_samples = max(0, fade_ms) * SAMPLE_RATE // 1000
+    return JitterBuffer(max(1, buffer_ms // BLOCK_MS), BLOCK_BYTES,
+                        prefill_blocks=max(1, ANNOUNCEMENT_PREFILL_MS // BLOCK_MS),
+                        fade_in_samples=fade_samples, fade_out_samples=fade_samples,
+                        resume_fade_samples=max(0, resume_fade_ms) * SAMPLE_RATE // 1000)
+
+
 def play_stream(
     connection: socket.socket,
     *,
     device: int | None = None,
     buffer_ms: int = DEFAULT_BUFFER_MS,
     latency: str | float = DEFAULT_LATENCY,
+    fade_ms: int = DEFAULT_FADE_MS,
+    resume_fade_ms: int = DEFAULT_RESUME_FADE_MS,
 ) -> None:
     import sounddevice as sd
 
-    jitter = JitterBuffer(max(1, buffer_ms // BLOCK_MS), BLOCK_BYTES,
-                          prefill_blocks=max(1, ANNOUNCEMENT_PREFILL_MS // BLOCK_MS))
+    jitter = make_jitter_buffer(buffer_ms, fade_ms, resume_fade_ms)
     jitter.standby()
     delay = DelayTracker()
 
@@ -218,6 +232,14 @@ def main() -> None:
         "--latency", type=parse_latency, default=DEFAULT_LATENCY,
         help=f"Καθυστέρηση κάρτας ήχου: low, high ή δευτερόλεπτα. Default {DEFAULT_LATENCY}",
     )
+    parser.add_argument(
+        "--fade-ms", type=int, default=DEFAULT_FADE_MS,
+        help=f"Fade-in/fade-out στην αρχή/τέλος ανακοίνωσης σε ms, 0 = χωρίς (default {DEFAULT_FADE_MS})",
+    )
+    parser.add_argument(
+        "--resume-fade-ms", type=int, default=DEFAULT_RESUME_FADE_MS,
+        help=f"Fade-in μετά από κενό δικτύου σε ms (default {DEFAULT_RESUME_FADE_MS})",
+    )
     args = parser.parse_args()
 
     client_id, room = load_identity(args.identity_file, room_override=args.room)
@@ -232,7 +254,8 @@ def main() -> None:
         sender.start()
         try:
             play_stream(connection, device=args.device,
-                        buffer_ms=args.buffer_ms, latency=args.latency)
+                        buffer_ms=args.buffer_ms, latency=args.latency,
+                        fade_ms=args.fade_ms, resume_fade_ms=args.resume_fade_ms)
         finally:
             heartbeat_stop.set()
             sender.join(timeout=1)
