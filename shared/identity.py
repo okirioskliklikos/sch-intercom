@@ -18,7 +18,8 @@ MAX_HELLO_BYTES = 512
 # Έκδοση πρωτοκόλλου σύνδεσης Director <-> Client. Αυξάνεται σε κάθε ασύμβατη
 # αλλαγή σε οποιαδήποτε κατεύθυνση. 1 = πριν από το heartbeat (χωρίς πεδίο),
 # 2 = heartbeat Client -> Director και απάντηση WELCOME.
-CONNECTION_PROTOCOL = 2
+# 3 = KEEPALIVE/STREAM_STOP αντί για σιωπηλά PCM σε μη επιλεγμένους Clients.
+CONNECTION_PROTOCOL = 3
 WELCOME_MAGIC = b"SIWK"
 WELCOME = struct.Struct("!4sBB")
 WELCOME_OK = 0
