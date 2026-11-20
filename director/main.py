@@ -16,10 +16,70 @@ from shared.audio import BLOCK_BYTES, BLOCK_SAMPLES, CHANNELS, DEFAULT_PORT, DTY
 
 # Κοινή ουρά λήψης του μικροφώνου (5 x 20 ms = 100 ms).
 MAX_PENDING_BLOCKS = 5
+STATS_INTERVAL_SECONDS = 5
+
+
+class DirectorStats:
+    """Thread-safe μετρητές και προαιρετική περιοδική εμφάνιση."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self.started = time.monotonic()
+        self.frames = 0
+        self.microphone_dropped = 0
+        self.periodic = False
+
+    def update(self, frames: int, dropped: int) -> None:
+        with self._lock:
+            self.frames = frames
+            self.microphone_dropped = dropped
+
+    def set_periodic(self, enabled: bool) -> None:
+        with self._lock:
+            self.periodic = enabled
+
+    def periodic_enabled(self) -> bool:
+        with self._lock:
+            return self.periodic
+
+    def report(self, broadcaster: AudioBroadcaster) -> str:
+        with self._lock:
+            frames, lost = self.frames, self.microphone_dropped
+        elapsed = time.monotonic() - self.started
+        return (
+            f"[Director] {frames} blocks / {elapsed:.1f}s | "
+            f"χαμένα μικροφώνου: {lost} | "
+            f"χαμένα ουρών Clients: {broadcaster.dropped} | "
+            f"Clients: {broadcaster.client_count}"
+        )
+
+
+def periodic_stats(stats: DirectorStats, broadcaster: AudioBroadcaster,
+                   stop: threading.Event) -> None:
+    while not stop.wait(STATS_INTERVAL_SECONDS):
+        if stats.periodic_enabled():
+            print(stats.report(broadcaster), flush=True)
+
+
+def show_help() -> str:
+    return """Διαθέσιμες εντολές:
+  help, ?       Εμφάνιση διαθέσιμων εντολών
+  status        Συνδεδεμένοι Clients και αίθουσες
+  stats         Εμφάνιση στατιστικών μία φορά
+  stats on      Στατιστικά κάθε 5 δευτερόλεπτα
+  stats off     Διακοπή περιοδικών στατιστικών (προεπιλογή)
+  all           Μετάδοση σε όλους τους Clients
+  none          Παύση ομιλίας προς όλους
+  room <όνομα>  Μετάδοση σε μία ή περισσότερες αίθουσες
+  client <UUID> Μετάδοση σε έναν ή περισσότερους Clients
+  quit          Τερματισμός Director"""
+
+
 
 
 def stream_microphone(broadcaster: AudioBroadcaster, *, device: int | None = None,
-                      latency: str | float = "low", stop: threading.Event | None = None) -> None:
+                      latency: str | float = "low", stop: threading.Event | None = None,
+                      stats: DirectorStats | None = None) -> None:
     import sounddevice as sd
 
     pending: queue.Queue[tuple[int, bytes]] = queue.Queue(maxsize=MAX_PENDING_BLOCKS)
@@ -46,7 +106,6 @@ def stream_microphone(broadcaster: AudioBroadcaster, *, device: int | None = Non
                 pass
 
     frames_sent = 0
-    started = time.monotonic()
     with sd.RawInputStream(
         samplerate=SAMPLE_RATE, channels=CHANNELS, dtype=DTYPE,
         blocksize=BLOCK_SAMPLES, device=device, latency=latency, callback=on_audio,
@@ -63,14 +122,8 @@ def stream_microphone(broadcaster: AudioBroadcaster, *, device: int | None = Non
                 continue
             broadcaster.publish(block, captured_us)
             frames_sent += 1
-            if frames_sent % 250 == 0:
-                seconds = round(time.monotonic() - started, 1)
-                print(
-                    f"[Director] {frames_sent} blocks / {seconds}s, "
-                    f"χαμένα μικροφώνου: {dropped}, "
-                    f"χαμένα ουρών Clients: {broadcaster.dropped}, "
-                    f"Clients: {broadcaster.client_count}", flush=True,
-                )
+            if stats is not None:
+                stats.update(frames_sent, dropped)
 
 
 def accept_clients(server: socket.socket, broadcaster: AudioBroadcaster,
@@ -98,10 +151,10 @@ def accept_clients(server: socket.socket, broadcaster: AudioBroadcaster,
             print(f"[Director] Απόρριψη Client {address}: όριο {broadcaster.max_clients}", flush=True)
 
 
-def command_loop(broadcaster: AudioBroadcaster, stop: threading.Event) -> None:
+def command_loop(broadcaster: AudioBroadcaster, stop: threading.Event,
+                 stats: DirectorStats) -> None:
     """Προσωρινός έλεγχος παραληπτών από το τερματικό του Director."""
-    print("Εντολές: status | all | none | room <όνομα> [όνομα...] | client <UUID> [UUID...]",
-          flush=True)
+    print("Πληκτρολογήστε help για τις διαθέσιμες εντολές.", flush=True)
     while not stop.is_set():
         try:
             line = input("Director> ").strip()
@@ -111,7 +164,21 @@ def command_loop(broadcaster: AudioBroadcaster, stop: threading.Event) -> None:
             continue
         command, *values = line.split()
         try:
-            if command == "status" and not values:
+            if command in ("help", "?") and not values:
+                print(show_help(), flush=True)
+            elif command == "stats" and not values:
+                print(stats.report(broadcaster), flush=True)
+            elif command == "stats" and values == ["on"]:
+                stats.set_periodic(True)
+                print("Περιοδικά στατιστικά ενεργά (κάθε 5 δευτερόλεπτα)", flush=True)
+            elif command == "stats" and values == ["off"]:
+                stats.set_periodic(False)
+                print("Περιοδικά στατιστικά ανενεργά", flush=True)
+            elif command == "quit" and not values:
+                stop.set()
+                print("Τερματισμός Director...", flush=True)
+                return
+            elif command == "status" and not values:
                 clients = broadcaster.clients_snapshot()
                 print("Συνδεδεμένοι Clients:", len(clients), flush=True)
                 for client_id, room in clients:
@@ -129,7 +196,7 @@ def command_loop(broadcaster: AudioBroadcaster, stop: threading.Event) -> None:
                 broadcaster.set_targets(rooms=set(), client_ids=set(values))
                 print("Επιλεγμένοι Clients:", ", ".join(values), flush=True)
             else:
-                print("Άγνωστη εντολή. status | all | none | room ΟΝΟΜΑ | client UUID", flush=True)
+                print("Άγνωστη εντολή. Πληκτρολογήστε help.", flush=True)
         except ValueError as exc:
             print(f"Μη έγκυρη επιλογή: {exc}", flush=True)
 
@@ -151,6 +218,7 @@ def main() -> None:
 
     broadcaster = AudioBroadcaster(max_clients=MAX_CLIENTS, on_event=lambda s: print(s, flush=True))
     stop = threading.Event()
+    stats = DirectorStats()
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as server:
         server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         server.bind((args.host, args.port))
@@ -159,16 +227,22 @@ def main() -> None:
         receiver = threading.Thread(target=accept_clients, args=(server, broadcaster, stop),
                                     daemon=True, name="accept-clients")
         receiver.start()
-        commands = threading.Thread(target=command_loop, args=(broadcaster, stop),
+        commands = threading.Thread(target=command_loop, args=(broadcaster, stop, stats),
                                     daemon=True, name="director-commands")
         commands.start()
+        reporter = threading.Thread(target=periodic_stats,
+                                    args=(stats, broadcaster, stop),
+                                    daemon=True, name="director-stats")
+        reporter.start()
         try:
-            stream_microphone(broadcaster, device=args.device, latency=args.latency, stop=stop)
+            stream_microphone(broadcaster, device=args.device, latency=args.latency,
+                              stop=stop, stats=stats)
         except KeyboardInterrupt:
             print("\nΟ Director τερματίστηκε.", flush=True)
         finally:
             stop.set()
             receiver.join(timeout=1)
+            reporter.join(timeout=1)
             broadcaster.close()
 
 
