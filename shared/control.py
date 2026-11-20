@@ -11,7 +11,8 @@ import time
 HEARTBEAT = b"SIHB"
 HEARTBEAT_INTERVAL_SECONDS = 2.0
 HEARTBEAT_TIMEOUT_SECONDS = 6.0
-# Director → Client: μόνο σε μη επιλεγμένους παραλήπτες.
+# Director → Client: σε κάθε Client που δεν έλαβε τίποτα για τόσο χρόνο
+# (στην πράξη στους μη επιλεγμένους, και στους επιλεγμένους αν σταματήσει το μικρόφωνο).
 KEEPALIVE_INTERVAL_SECONDS = 0.5
 
 
