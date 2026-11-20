@@ -156,6 +156,36 @@ class ApplicationAudioTests(unittest.TestCase):
         self.assertAlmostEqual(app.volume, 0.7)
         self.assertEqual(media.plays, 1)
 
+    def test_single_journal_restores_master_sessions_and_media_after_crash(self):
+        import json
+        from pathlib import Path
+        from tempfile import TemporaryDirectory
+        app, media = FakeApp(), FakeMedia()
+        master = FakeMaster()
+        engine = self.make_engine([app], [media])
+        with TemporaryDirectory() as folder:
+            path = Path(folder) / "volume-recovery.json"
+            manager = AnnouncementVolume(
+                master, path, target_percent=80, apps=engine,
+                sleep=lambda _: None, log=lambda _: None)
+            self.assertTrue(manager.begin())
+            saved = json.loads(path.read_text(encoding="utf-8"))
+            self.assertEqual(saved["stage"], "applied")
+            self.assertEqual(len(saved["apps"]), 1)
+            self.assertEqual(len(saved["media"]), 1)
+            self.assertAlmostEqual(master.volume, 0.8)
+            self.assertEqual(app.volume, 0)
+            self.assertFalse(media.playing)
+            # Προσομοίωση restart: νέο αντικείμενο πάνω στον ΙΔΙΟ journal.
+            recovered = AnnouncementVolume(
+                master, path, target_percent=80, apps=engine,
+                sleep=lambda _: None, log=lambda _: None)
+            self.assertTrue(recovered.recover())
+            self.assertAlmostEqual(master.volume, 0.2)
+            self.assertAlmostEqual(app.volume, 0.7)
+            self.assertTrue(media.playing)
+            self.assertFalse(path.exists())
+
     def test_missing_media_backend_keeps_journal(self):
         app, media = FakeApp(), FakeMedia()
         record = {}
