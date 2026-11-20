@@ -143,5 +143,57 @@ class AnnouncementVolumeTests(unittest.TestCase):
         self.assertAlmostEqual(self.master.volume, 0.2)
 
 
+class PumpIntegrationTests(unittest.TestCase):
+    def test_stop_waits_until_jitter_drains_before_restoring(self):
+        import time
+        from unittest.mock import patch
+        from client.main import pump_frames
+        from shared.audio import Frame, ControlMessage, MESSAGE_STREAM_STOP, MESSAGE_KEEPALIVE
+        from shared.jitter import JitterBuffer, DelayTracker
+
+        class Connection:
+            def gettimeout(self):
+                return None
+
+        class VolumeSpy:
+            def __init__(self):
+                self.active = False
+                self.events = []
+
+            def begin(self):
+                self.active = True
+                self.events.append("begin")
+
+            def end(self):
+                self.active = False
+                self.events.append("end")
+
+        volume = VolumeSpy()
+        jitter = JitterBuffer(12, 640, prefill_blocks=1)
+        jitter.standby()
+        responses = iter([
+            Frame(0, 0, bytes(640)),
+            ControlMessage(MESSAGE_STREAM_STOP),
+            ControlMessage(MESSAGE_KEEPALIVE),
+        ])
+
+        def receive(*_args, **_kwargs):
+            try:
+                message = next(responses)
+            except StopIteration:
+                raise EOFError("end of synthetic stream")
+            if isinstance(message, ControlMessage) and message.kind == MESSAGE_KEEPALIVE:
+                self.assertTrue(volume.active)  # STOP alone does not restore
+                jitter.pop()  # last PCM
+                jitter.pop()  # callback enters standby
+                time.sleep(0.11)  # simulated minimum hardware drain allowance
+            return message
+
+        with patch("client.main.receive_message", side_effect=receive):
+            with self.assertRaises(EOFError):
+                pump_frames(Connection(), jitter, DelayTracker(), volume=volume)
+        self.assertEqual(volume.events, ["begin", "end"])
+
+
 if __name__ == "__main__":
     unittest.main()
