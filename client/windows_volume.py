@@ -62,7 +62,7 @@ class AnnouncementVolume:
     def _read(self) -> dict | None:
         if not self.path.exists():
             return None
-        if self.path.stat().st_size > 4096:
+        if self.path.stat().st_size > 65536:
             raise ValueError("Το αρχείο ανάκαμψης είναι υπερβολικά μεγάλο")
         record = json.loads(self.path.read_text(encoding="utf-8"))
         if (not isinstance(record, dict) or record.get("version") != 1
