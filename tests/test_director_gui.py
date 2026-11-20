@@ -86,7 +86,7 @@ class DirectorGuiControlTests(TestCase):
         try:
             controls = AnnouncementControls(broadcaster)
             with self.assertRaises(ValueError):
-                controls.start({"not a valid room!"})
+                controls.start({"Αίθουσα\nΓ1"})
             self.assertFalse(controls.active)
         finally:
             broadcaster.close()
