@@ -11,6 +11,8 @@ import time
 HEARTBEAT = b"SIHB"
 HEARTBEAT_INTERVAL_SECONDS = 2.0
 HEARTBEAT_TIMEOUT_SECONDS = 6.0
+# Director → Client: μόνο σε μη επιλεγμένους παραλήπτες.
+KEEPALIVE_INTERVAL_SECONDS = 0.5
 
 
 def heartbeat_sender(connection: socket.socket, stop: threading.Event, *,
