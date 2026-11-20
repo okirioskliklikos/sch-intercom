@@ -72,7 +72,7 @@ def load_identity(path: Path, *, room_override: str | None = None) -> tuple[str,
         path.parent.mkdir(parents=True, exist_ok=True)
         temporary = path.with_name(path.name + ".tmp")
         try:
-            with temporary.open("x", encoding="utf-8") as output:
+            with temporary.open("w", encoding="utf-8") as output:
                 json.dump({"client_id": client_id, "room": room}, output, ensure_ascii=False, indent=2)
                 output.write("\n")
             os.replace(temporary, path)
