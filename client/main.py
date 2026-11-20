@@ -15,6 +15,8 @@ from shared.jitter import DelayTracker, JitterBuffer
 RECONNECT_DELAY_SECONDS = 3
 DEFAULT_BUFFER_MS = 250
 REPORT_EVERY_SECONDS = 5
+# 40 ms: δοκιμάστηκε από τον χρήστη σε Windows χωρίς κροτάλισμα (το "low" έδινε 100 ms).
+DEFAULT_LATENCY = 0.04
 
 
 def now_us() -> int:
@@ -66,7 +68,7 @@ def play_stream(
     *,
     device: int | None = None,
     buffer_ms: int = DEFAULT_BUFFER_MS,
-    latency: str | float = "low",
+    latency: str | float = DEFAULT_LATENCY,
 ) -> None:
     import sounddevice as sd
 
@@ -115,8 +117,8 @@ def main() -> None:
         help=f"Μέγιστος ήχος σε αναμονή πριν πεταχτούν παλιά blocks (default {DEFAULT_BUFFER_MS})",
     )
     parser.add_argument(
-        "--latency", type=parse_latency, default="low",
-        help="Καθυστέρηση κάρτας ήχου: low, high ή δευτερόλεπτα (π.χ. 0.04). Default low",
+        "--latency", type=parse_latency, default=DEFAULT_LATENCY,
+        help=f"Καθυστέρηση κάρτας ήχου: low, high ή δευτερόλεπτα. Default {DEFAULT_LATENCY}",
     )
     args = parser.parse_args()
 
