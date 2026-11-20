@@ -5,12 +5,14 @@
 """
 
 import argparse
+from pathlib import Path
 import queue
 import socket
 import threading
 import time
 
 from director.broadcast import AudioBroadcaster, MAX_CLIENTS
+from shared.discovery import announce, director_id, DISCOVERY_PORT
 from shared.identity import receive_hello
 from shared.audio import BLOCK_BYTES, BLOCK_SAMPLES, CHANNELS, DEFAULT_PORT, DTYPE, SAMPLE_RATE
 
@@ -211,6 +213,11 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="School Intercom — Director (πρωτότυπο)")
     parser.add_argument("--host", default="0.0.0.0", help="IP δέσμευσης (default 0.0.0.0)")
     parser.add_argument("--port", type=int, default=DEFAULT_PORT)
+    parser.add_argument("--discovery-port", type=int, default=DISCOVERY_PORT,
+                        help="UDP θύρα ανακάλυψης (default 50556)")
+    parser.add_argument("--director-id-file", type=Path,
+                        default=Path.home() / ".school-intercom" / "director.id",
+                        help="Αρχείο σταθερής ταυτότητας Director")
     parser.add_argument("--device", type=int, default=None, help="Αριθμός συσκευής εισόδου PortAudio")
     parser.add_argument("--latency", type=parse_latency, default="low",
                         help="Καθυστέρηση κάρτας ήχου: low, high ή δευτερόλεπτα")
@@ -219,11 +226,17 @@ def main() -> None:
     broadcaster = AudioBroadcaster(max_clients=MAX_CLIENTS, on_event=lambda s: print(s, flush=True))
     stop = threading.Event()
     stats = DirectorStats()
+    identifier = director_id(args.director_id_file)
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as server:
         server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         server.bind((args.host, args.port))
         server.listen(MAX_CLIENTS)
         print(f"Director ακούει στο {args.host}:{args.port} — έως {MAX_CLIENTS} Clients", flush=True)
+        beacon = threading.Thread(target=announce,
+                                  args=(stop, identifier, args.port),
+                                  kwargs={"udp_port": args.discovery_port},
+                                  daemon=True, name="director-discovery")
+        beacon.start()
         receiver = threading.Thread(target=accept_clients, args=(server, broadcaster, stop),
                                     daemon=True, name="accept-clients")
         receiver.start()
@@ -242,6 +255,7 @@ def main() -> None:
         finally:
             stop.set()
             receiver.join(timeout=1)
+            beacon.join(timeout=1)
             reporter.join(timeout=1)
             broadcaster.close()
 
