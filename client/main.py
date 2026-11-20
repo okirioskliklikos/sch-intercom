@@ -7,6 +7,7 @@
 import argparse
 from pathlib import Path
 import socket
+import threading
 import time
 from collections.abc import Callable
 
@@ -14,6 +15,7 @@ from shared.audio import BLOCK_BYTES, BLOCK_MS, BLOCK_SAMPLES, CHANNELS, DEFAULT
 from shared.jitter import DelayTracker, JitterBuffer
 from shared.identity import load_identity, send_hello
 from shared.discovery import discover, DISCOVERY_PORT
+from shared.control import heartbeat_sender
 
 RECONNECT_DELAY_SECONDS = 3
 # Ο Director στέλνει 50 πακέτα/s. Αν δεν έρθει τίποτα για 3 s, η σύνδεση θεωρείται
@@ -200,8 +202,16 @@ def main() -> None:
 
     def session(connection: socket.socket) -> None:
         send_hello(connection, client_id, room)
-        play_stream(connection, device=args.device,
-                    buffer_ms=args.buffer_ms, latency=args.latency)
+        heartbeat_stop = threading.Event()
+        sender = threading.Thread(target=heartbeat_sender, args=(connection, heartbeat_stop),
+                                  name="client-heartbeat", daemon=True)
+        sender.start()
+        try:
+            play_stream(connection, device=args.device,
+                        buffer_ms=args.buffer_ms, latency=args.latency)
+        finally:
+            heartbeat_stop.set()
+            sender.join(timeout=1)
 
     try:
         run_with_reconnect(args.host, args.port, session,

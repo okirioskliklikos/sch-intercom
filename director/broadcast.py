@@ -6,9 +6,11 @@
 import queue
 import socket
 import threading
+import time
 from collections.abc import Callable
 
 from shared.audio import BLOCK_BYTES, encode_frame
+from shared.control import HEARTBEAT_TIMEOUT_SECONDS, heartbeat_receiver
 from shared.identity import validate_identity
 
 MAX_CLIENTS = 32
@@ -19,7 +21,11 @@ SEND_TIMEOUT_SECONDS = 1.0
 class AudioBroadcaster:
     def __init__(self, *, max_clients: int = MAX_CLIENTS,
                  queue_blocks: int = MAX_CLIENT_PENDING_BLOCKS,
-                 on_event: Callable[[str], None] | None = None):
+                 on_event: Callable[[str], None] | None = None,
+                 heartbeat_timeout: float = HEARTBEAT_TIMEOUT_SECONDS):
+        if heartbeat_timeout <= 0:
+            raise ValueError("heartbeat_timeout πρέπει να είναι θετικό")
+        self.heartbeat_timeout = heartbeat_timeout
         if max_clients < 1 or queue_blocks < 1:
             raise ValueError("max_clients και queue_blocks πρέπει να είναι θετικά")
         self.max_clients = max_clients
@@ -27,6 +33,7 @@ class AudioBroadcaster:
         self.on_event = on_event or (lambda message: None)
         self._lock = threading.Lock()
         self._sessions: dict[str, _ClientSession] = {}
+        self._offline: dict[str, tuple[str, float]] = {}
         self._selected_rooms: frozenset[str] | None = None
         self._selected_clients: frozenset[str] | None = None
         self._sequence = 0
@@ -41,6 +48,22 @@ class AudioBroadcaster:
     def clients_snapshot(self) -> list[tuple[str, str]]:
         with self._lock:
             return sorted((key, item.room) for key, item in self._sessions.items())
+
+    def status_snapshot(self) -> list[tuple[str, str, bool, float]]:
+        """UUID, αίθουσα, online/offline, δευτερόλεπτα από τελευταία επικοινωνία."""
+        now = time.monotonic()
+        with self._lock:
+            result = [(key, item.room, True, max(0.0, now - item.last_heartbeat))
+                      for key, item in self._sessions.items()]
+            result.extend((key, room, False, max(0.0, now - last))
+                          for key, (room, last) in self._offline.items()
+                          if key not in self._sessions)
+        return sorted(result)
+
+    def _record_heartbeat(self, session: "_ClientSession", instant: float) -> None:
+        with self._lock:
+            if self._sessions.get(session.client_id) is session:
+                session.last_heartbeat = instant
 
     def set_targets(self, *, rooms: set[str] | None = None,
                     client_ids: set[str] | None = None) -> None:
@@ -68,8 +91,10 @@ class AudioBroadcaster:
                 connection.close()
                 return False
             session = _ClientSession(client_id, room, connection, address,
-                                     self.queue_blocks, self._remove_client)
+                                     self.queue_blocks, self._remove_client,
+                                     self._record_heartbeat, self.heartbeat_timeout)
             self._sessions[client_id] = session
+            self._offline.pop(client_id, None)
         if existing is not None:
             existing.stop()
         try:
@@ -118,6 +143,10 @@ class AudioBroadcaster:
             if self._sessions.get(session.client_id) is not session:
                 return
             del self._sessions[session.client_id]
+            self._offline[session.client_id] = (session.room, session.last_heartbeat)
+            if len(self._offline) > 128:
+                oldest = min(self._offline, key=lambda key: self._offline[key][1])
+                del self._offline[oldest]
         session.stop()
         self.on_event(f"[Director] {session.client_id} αποσυνδέθηκε — σύνολο {self.client_count}")
 
@@ -125,19 +154,27 @@ class AudioBroadcaster:
 class _ClientSession:
     def __init__(self, client_id: str, room: str, connection: socket.socket,
                  address: object, queue_blocks: int,
-                 on_disconnect: Callable[["_ClientSession"], None]):
+                 on_disconnect: Callable[["_ClientSession"], None],
+                 on_heartbeat: Callable[["_ClientSession", float], None] | None = None,
+                 heartbeat_timeout: float = HEARTBEAT_TIMEOUT_SECONDS):
         self.client_id = client_id
         self.room = room
         self.connection = connection
         self.address = address
         self.pending: queue.Queue[bytes] = queue.Queue(maxsize=queue_blocks)
         self.on_disconnect = on_disconnect
+        self.on_heartbeat = on_heartbeat or (lambda session, at: None)
+        self.heartbeat_timeout = heartbeat_timeout
+        self.last_heartbeat = time.monotonic()
         self.stopped = threading.Event()
         self.thread = threading.Thread(target=self._run, daemon=True,
                                        name=f"audio-client-{client_id[:8]}")
+        self.reader = threading.Thread(target=self._read_heartbeat, daemon=True,
+                                       name=f"heartbeat-client-{client_id[:8]}")
 
     def start(self) -> None:
         self.thread.start()
+        self.reader.start()
 
     def enqueue(self, frame: bytes) -> bool:
         if self.stopped.is_set():
@@ -165,8 +202,19 @@ class _ClientSession:
         self.connection.close()
 
     def join(self, *, timeout: float) -> None:
-        if self.thread.ident is not None and threading.current_thread() is not self.thread:
-            self.thread.join(timeout)
+        for thread in (self.thread, self.reader):
+            if thread.ident is not None and threading.current_thread() is not thread:
+                thread.join(timeout)
+
+    def _read_heartbeat(self) -> None:
+        try:
+            heartbeat_receiver(self.connection, self.stopped,
+                               lambda at: self.on_heartbeat(self, at),
+                               timeout=self.heartbeat_timeout)
+        except (OSError, EOFError, ValueError, TimeoutError):
+            pass
+        finally:
+            self.on_disconnect(self)
 
     def _run(self) -> None:
         try:
