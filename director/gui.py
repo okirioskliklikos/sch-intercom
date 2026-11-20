@@ -13,6 +13,33 @@ from director.broadcast import AudioBroadcaster, MAX_CLIENTS
 from shared.discovery import announce, director_id
 
 
+MIC_RETRY_SECONDS = 2.0
+
+
+def run_microphone(stream_microphone, broadcaster, *, stop: threading.Event,
+                   ready: threading.Event, set_error,
+                   retry_seconds: float = MIC_RETRY_SECONDS, **kwargs) -> None:
+    """Τρέχει το μικρόφωνο μέχρι το stop και ξαναδοκιμάζει μετά από σφάλμα.
+
+    Σφάλμα μικροφώνου ΔΕΝ σταματά discovery/accept: οι Clients συνεχίζουν να
+    βρίσκουν και να συνδέονται στον Director. Το GUI βλέπει το σφάλμα και
+    σταματά την ανακοίνωση· μόλις το μικρόφωνο ανοίξει ξανά, το σφάλμα σβήνει.
+    """
+    def on_ready() -> None:
+        set_error(None)
+        ready.set()
+
+    while not stop.is_set():
+        try:
+            stream_microphone(broadcaster, stop=stop, ready_callback=on_ready, **kwargs)
+        except Exception as exc:
+            ready.clear()
+            set_error(str(exc) or exc.__class__.__name__)
+        else:
+            ready.clear()
+        stop.wait(retry_seconds)
+
+
 class AnnouncementControls:
     """Ελάχιστος, ελέγξιμος χειρισμός στόχων και toggle χωρίς dependency GUI."""
 
@@ -74,14 +101,13 @@ def run_gui(args, *, accept_clients, stream_microphone) -> None:
         with peak_lock:
             peak[:] = [value, time.monotonic()]
 
+    def set_mic_error(message: str | None) -> None:
+        mic_error[0] = message
+
     def mic_worker() -> None:
-        try:
-            stream_microphone(broadcaster, device=args.device, latency=args.latency,
-                              stop=stop, level_callback=update_peak,
-                              ready_callback=mic_ready.set)
-        except Exception as exc:
-            mic_error[0] = str(exc)
-            stop.set()
+        run_microphone(stream_microphone, broadcaster, stop=stop, ready=mic_ready,
+                       set_error=set_mic_error, device=args.device,
+                       latency=args.latency, level_callback=update_peak)
 
     main = ttk.Frame(root, padding=20)
     main.pack(fill="both", expand=True)
@@ -214,7 +240,7 @@ def run_gui(args, *, accept_clients, stream_microphone) -> None:
             value = 0.0
         meter.configure(value=min(100, value * 100))
         if mic_error[0]:
-            meter_label.configure(text=f"Σφάλμα μικροφώνου: {mic_error[0]}")
+            meter_label.configure(text=f"Σφάλμα μικροφώνου: {mic_error[0]} — νέα προσπάθεια σε λίγο")
             if controls.active:
                 controls.stop()
                 redraw_state()
