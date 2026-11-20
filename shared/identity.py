@@ -15,7 +15,7 @@ from shared.audio import read_exact
 
 HELLO_MAGIC = b"SICH"
 MAX_HELLO_BYTES = 512
-ROOM_PATTERN = re.compile(r"^[^\\x00-\\x1f\\x7f]{1,64}$")
+ROOM_PATTERN = re.compile(r"^[^\x00-\x1f\x7f]{1,64}$")
 
 
 def validate_identity(client_id: str, room: str) -> tuple[str, str]:
