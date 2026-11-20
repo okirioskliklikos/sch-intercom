@@ -14,6 +14,7 @@ from shared.control import KEEPALIVE_INTERVAL_SECONDS
 from shared.identity import (CONNECTION_PROTOCOL, ProtocolMismatch, receive_hello,
                              receive_welcome, send_hello, WELCOME, WELCOME_MAGIC, WELCOME_OK)
 from shared.jitter import DelayTracker, JitterBuffer
+from director.broadcast import AudioBroadcaster
 
 
 def wait_until(check, timeout=2):
@@ -46,6 +47,35 @@ class ControlProtocolTests(unittest.TestCase):
         finally:
             sender.close()
             receiver.close()
+
+    def test_director_idle_bandwidth_and_stop_order(self):
+        server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        server.bind(("127.0.0.1", 0))
+        server.listen(1)
+        client = socket.create_connection(server.getsockname(), timeout=2)
+        incoming, _ = server.accept()
+        server.close()
+        client.settimeout(2)
+        director = AudioBroadcaster(heartbeat_timeout=4)
+        self.addCleanup(director.close)
+        self.addCleanup(client.close)
+        identity = str(uuid.uuid4())
+        self.assertTrue(director.add_client(incoming, identity, "C2627-Γ1"))
+        director.publish(pcm(1), 10)
+        self.assertEqual(receive_message(client).pcm, pcm(1))
+        director.set_targets(rooms=set(), client_ids=set())
+        stop = receive_message(client)
+        self.assertEqual(stop.kind, MESSAGE_STREAM_STOP)
+        start = time.monotonic()
+        for _ in range(3):
+            self.assertEqual(receive_message(client).kind, MESSAGE_KEEPALIVE)
+        elapsed = time.monotonic() - start
+        self.assertGreaterEqual(elapsed, 0.5)
+        # Σε αναμονή τα payload είναι 3×20 bytes, όχι 3×660.
+        self.assertEqual(3 * len(encode_control(MESSAGE_KEEPALIVE)), 60)
+        director.set_targets()
+        director.publish(pcm(2), 20)
+        self.assertEqual(receive_message(client).pcm, pcm(2))
 
     def test_partial_invalid_message_does_not_extend_timeout(self):
         sender, receiver = socket.socketpair()
