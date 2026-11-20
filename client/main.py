@@ -13,7 +13,7 @@ from shared.audio import BLOCK_BYTES, BLOCK_MS, BLOCK_SAMPLES, CHANNELS, DEFAULT
 from shared.jitter import DelayTracker, JitterBuffer
 
 RECONNECT_DELAY_SECONDS = 3
-DEFAULT_BUFFER_MS = 80
+DEFAULT_BUFFER_MS = 250
 REPORT_EVERY_SECONDS = 5
 
 
