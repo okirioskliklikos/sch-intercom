@@ -8,7 +8,7 @@ import socket
 import threading
 from collections.abc import Callable
 
-from shared.audio import encode_frame
+from shared.audio import BLOCK_BYTES, encode_frame
 from shared.identity import validate_identity
 
 MAX_CLIENTS = 32
@@ -90,15 +90,16 @@ class AudioBroadcaster:
             seq = self._sequence
             self._sequence = (seq + 1) & 0xFFFFFFFF
             rooms, ids = self._selected_rooms, self._selected_clients
-            sessions = tuple(
-                s for s in self._sessions.values()
-                if (rooms is None and ids is None)
-                or (rooms is not None and s.room in rooms)
-                or (ids is not None and s.client_id in ids)
-            )
-        frame = encode_frame(pcm, seq, timestamp_us)
+            sessions = tuple(self._sessions.values())
+        voice = encode_frame(pcm, seq, timestamp_us)
+        silence = encode_frame(bytes(BLOCK_BYTES), seq, timestamp_us)
         for session in sessions:
-            if session.enqueue(frame):
+            selected = ((rooms is None and ids is None)
+                        or (rooms is not None and session.room in rooms)
+                        or (ids is not None and session.client_id in ids))
+            # Συνεχής ροή σιωπής σε μη επιλεγμένους, ώστε το timeout λήψης
+            # του Client να μη θεωρήσει άδικα ότι χάθηκε η σύνδεση.
+            if session.enqueue(voice if selected else silence):
                 with self._lock:
                     self.dropped += 1
 
