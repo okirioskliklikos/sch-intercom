@@ -6,6 +6,7 @@ Type 0 = PCM (640 bytes), 1 = KEEPALIVE, 2 = STREAM_STOP (χωρίς payload).
 Η έκδοση σύνδεσης ελέγχεται χωριστά στο shared.identity.
 """
 
+import select
 import socket
 import struct
 import time
@@ -42,16 +43,16 @@ def read_exact(connection: socket.socket, count: int, *,
                deadline: float | None = None) -> bytes:
     """Διαβάζει ακριβώς count bytes ή εγείρει EOFError/timeout.
 
-    Με deadline, κάθε recv χρησιμοποιεί μόνο τον εναπομείναντα χρόνο.
-    Έτσι τμηματικά/άκυρα μηνύματα δεν ανανεώνουν τεχνητά το timeout.
+    Με deadline γίνεται select() πριν από κάθε recv, χωρίς αλλαγή του socket
+    timeout (χρησιμοποιείται και από το ανεξάρτητο νήμα heartbeat).
+    Τμηματικά/άκυρα μηνύματα δεν ανανεώνουν τεχνητά το timeout.
     """
     data = bytearray()
     while len(data) < count:
         if deadline is not None:
             remaining = deadline - time.monotonic()
-            if remaining <= 0:
+            if remaining <= 0 or not select.select([connection], [], [], remaining)[0]:
                 raise socket.timeout("Δεν ελήφθη πλήρες έγκυρο μήνυμα")
-            connection.settimeout(remaining)
         piece = connection.recv(count - len(data))
         if not piece:
             raise EOFError("Η σύνδεση τερματίστηκε")
