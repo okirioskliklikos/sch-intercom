@@ -63,6 +63,23 @@ class DirectorGuiControlTests(TestCase):
         self.assertEqual(summarize_rooms(status),
                          [("C2627-Γ1", 2, 1), ("C2627-Γ2", 0, 1)])
 
+    def test_real_broadcaster_stays_silent_until_toggle(self):
+        from director.broadcast import AudioBroadcaster
+        broadcaster = AudioBroadcaster()
+        try:
+            controls = AnnouncementControls(broadcaster)
+            client = SimpleNamespace(room="C2627-Γ1", client_id="test-client")
+            other = SimpleNamespace(room="C2627-Γ2", client_id="other-client")
+            self.assertFalse(broadcaster._is_selected(client))
+            self.assertFalse(broadcaster._is_selected(other))
+            controls.start({"C2627-Γ1"})
+            self.assertTrue(broadcaster._is_selected(client))
+            self.assertFalse(broadcaster._is_selected(other))
+            controls.stop()
+            self.assertFalse(broadcaster._is_selected(client))
+        finally:
+            broadcaster.close()
+
     def test_invalid_room_does_not_enable_announcement(self):
         from director.broadcast import AudioBroadcaster
         broadcaster = AudioBroadcaster()
