@@ -32,7 +32,8 @@ class FakeMaster:
 
 
 class FakeSession:
-    def __init__(self, name, pid, muted=False, mute_works=True, volume=1.0, volume_works=True):
+    def __init__(self, name, pid, muted=False, mute_works=True, volume=1.0, volume_works=True,
+                 active=True):
         self.name = name
         self.pid = pid
         self.muted = muted
@@ -40,6 +41,7 @@ class FakeSession:
         self.closed = False
         self.volume = volume
         self.volume_works = volume_works
+        self.active = active
         self.volume_history = []
 
     def get_mute(self):
@@ -55,6 +57,9 @@ class FakeSession:
 
     def get_volume(self):
         return self.volume
+
+    def is_active(self):
+        return self.active
 
     def set_volume(self, value):
         if self.closed:
@@ -268,11 +273,50 @@ class MediaPauseTests(unittest.TestCase):
         self.assertIn("ΔΕΝ δηλώνει δυνατότητα pause", joined)
         self.assertIn("δέχτηκε το pause αλλά", joined)
 
-    def test_unmatched_app_is_reported(self):
-        media = FakeMedia("308046B0AF4A39CB")
-        paused, notes = self.pause([media], [FakeSession("firefox.exe", 10)])
+    def test_unmatched_unknown_app_is_reported(self):
+        media = FakeMedia("A1B2C3D4E5F60718")
+        paused, notes = self.pause([media], [FakeSession("vlc.exe", 10)])
         self.assertEqual(len(paused), 1)
         self.assertIn("χωρίς σταδιακή μείωση", "\n".join(notes))
+
+    def test_firefox_fallback_fades_its_sessions(self):
+        ff1 = FakeSession("firefox.exe", 10, volume=0.7)
+        ff2 = FakeSession("firefox.exe", 11, volume=0.5)
+        chrome = FakeSession("chrome.exe", 20, volume=0.9)
+        firefox = FakeMedia("308046B0AF4A39CB")
+        paused, notes = self.pause([firefox], [ff1, ff2, chrome])
+        self.assertEqual(len(paused), 1)
+        self.assertEqual((ff1.volume, ff2.volume), (0.0, 0.0))
+        self.assertEqual(chrome.volume, 0.9)  # δεν αγγίζεται
+        self.assertIn("εφεδρική αντιστοίχιση", "\n".join(notes))
+        self.resume(paused)
+        self.assertAlmostEqual(ff1.volume, 0.7)
+        self.assertAlmostEqual(ff2.volume, 0.5)
+
+    def test_no_fallback_when_two_unmatched_media(self):
+        ff = FakeSession("firefox.exe", 10, volume=0.7)
+        paused, notes = self.pause([FakeMedia("308046B0AF4A39CB"), FakeMedia("ZZZZ1111")], [ff])
+        self.assertEqual(len(paused), 2)
+        self.assertEqual(ff.volume, 0.7)  # αμφίβολο: απλό pause
+        self.assertIn("δεν γίνεται εικασία", "\n".join(notes))
+
+    def test_no_fallback_for_inactive_firefox(self):
+        ff = FakeSession("firefox.exe", 10, volume=0.7, active=False)
+        _, notes = self.pause([FakeMedia("308046B0AF4A39CB")], [ff])
+        self.assertEqual(ff.volume, 0.7)
+        self.assertIn("καμία ενεργή συνεδρία", "\n".join(notes))
+
+    def test_named_match_not_used_as_fallback(self):
+        # Ο Chrome αντιστοιχίζεται κανονικά· ο firefox.exe μόνο στο άγνωστο media.
+        chrome_audio = FakeSession("chrome.exe", 20, volume=0.9)
+        ff = FakeSession("firefox.exe", 10, volume=0.7)
+        paused, _ = self.pause([FakeMedia("Chrome"), FakeMedia("308046B0AF4A39CB")],
+                               [chrome_audio, ff])
+        self.assertEqual(len(paused), 2)
+        self.assertEqual((chrome_audio.volume, ff.volume), (0.0, 0.0))
+        self.resume(paused)
+        self.assertAlmostEqual(chrome_audio.volume, 0.9)
+        self.assertAlmostEqual(ff.volume, 0.7)
 
 
 class RampTests(unittest.TestCase):

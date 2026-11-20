@@ -99,6 +99,7 @@ class AppSession(Protocol):
     def set_mute(self, muted: bool) -> None: ...
     def get_volume(self) -> float: ...
     def set_volume(self, value: float) -> None: ...
+    def is_active(self) -> bool: ...  # παίζει ήχο αυτή τη στιγμή
 
 
 class MediaSession(Protocol):
@@ -284,6 +285,44 @@ def match_audio_sessions(app_id: str, audio_sessions: Iterable[AppSession],
     return matches
 
 
+# Εφαρμογές που δηλώνουν στα Windows media με κωδικό αντί για όνομα (π.χ. ο
+# Firefox δίνει «308046B0AF4A39CB»). Χρησιμοποιούνται μόνο ως εφεδρεία.
+FALLBACK_APPS = ("firefox",)
+
+
+def fallback_audio_sessions(unmatched_playing: list[MediaSession],
+                            audio_sessions: Iterable[AppSession],
+                            claimed: Iterable[AppSession],
+                            own_pid: int = -1) -> tuple[list[AppSession], str]:
+    """Εφεδρική αντιστοίχιση για media χωρίς όνομα εφαρμογής (π.χ. Firefox).
+
+    Ασφαλής μόνο όταν δεν υπάρχει αμφιβολία: ακριβώς ένα media που παίζει
+    χωρίς αντιστοίχιση και ενεργές συνεδρίες ήχου από **μία** μόνο γνωστή
+    εφαρμογή (FALLBACK_APPS) που δεν ανήκουν σε άλλο media. Αλλιώς επιστρέφει
+    κενή λίστα και τον λόγο, ώστε να γίνει απλό pause.
+    """
+    if len(unmatched_playing) != 1:
+        return [], f"{len(unmatched_playing)} media χωρίς αντιστοίχιση, δεν γίνεται εικασία"
+    claimed_ids = {id(a) for a in claimed}
+    pool = []
+    for audio in audio_sessions:
+        if audio.pid in (0, own_pid) or id(audio) in claimed_ids:
+            continue
+        if _process_stem(audio.name) not in FALLBACK_APPS:
+            continue
+        try:
+            if audio.is_active():
+                pool.append(audio)
+        except Exception:  # noqa: BLE001
+            continue
+    apps = {_process_stem(a.name) for a in pool}
+    if not pool:
+        return [], "καμία ενεργή συνεδρία ήχου γνωστής εφαρμογής (π.χ. firefox.exe)"
+    if len(apps) != 1:
+        return [], "περισσότερες από μία πιθανές εφαρμογές: " + ", ".join(sorted(apps))
+    return pool, "εφεδρική αντιστοίχιση με " + ", ".join(sorted({a.name for a in pool}))
+
+
 @dataclass
 class PausedMedia:
     session: MediaSession
@@ -305,8 +344,31 @@ async def pause_playing_media(
     χαμηλώσαμε. Αν το pause αποτύχει, η ένταση επανέρχεται αμέσως.
     """
     audio_sessions = list(audio_sessions)
+    sessions = list(sessions)
     candidates: list[PausedMedia] = []
     notes: list[str] = []
+
+    # Αντιστοίχιση media → συνεδρίες ήχου: πρώτα με όνομα, μετά εφεδρικά.
+    matches: dict[int, list[AppSession]] = {}
+    claimed: list[AppSession] = []
+    unmatched_playing: list[MediaSession] = []
+    for session in sessions:
+        found = match_audio_sessions(session.app_id, audio_sessions, own_pid)
+        matches[id(session)] = found
+        claimed.extend(found)
+        try:
+            playing = session.status() == STATUS_PLAYING and session.can_pause()
+        except Exception:  # noqa: BLE001
+            playing = False
+        if not found and playing:
+            unmatched_playing.append(session)
+    fallback_note = ""
+    if unmatched_playing:
+        pool, fallback_note = fallback_audio_sessions(unmatched_playing, audio_sessions,
+                                                      claimed, own_pid)
+        if pool:
+            matches[id(unmatched_playing[0])] = pool
+
     for session in sessions:
         status = session.status()
         if status != STATUS_PLAYING:
@@ -316,9 +378,13 @@ async def pause_playing_media(
             notes.append(f"{session.app_id}: παίζει αλλά ΔΕΝ δηλώνει δυνατότητα pause")
             continue
         entry = PausedMedia(session)
-        matched = match_audio_sessions(session.app_id, audio_sessions, own_pid)
-        if not matched:
-            notes.append(f"{session.app_id}: δεν βρέθηκε συνεδρία ήχου, pause χωρίς σταδιακή μείωση")
+        matched = matches.get(id(session), [])
+        if session in unmatched_playing:
+            if matched:
+                notes.append(f"{session.app_id}: {fallback_note}")
+            else:
+                notes.append(f"{session.app_id}: δεν βρέθηκε συνεδρία ήχου ({fallback_note}), "
+                             "pause χωρίς σταδιακή μείωση")
         for audio in matched:
             hold, note = silence_session(audio, ramp_ms, sleep)
             notes.append(f"{session.app_id}: {note}")
@@ -465,6 +531,10 @@ class PycawSession:
 
     def get_volume(self) -> float:
         return float(self._volume.GetMasterVolume())
+
+    def is_active(self) -> bool:
+        # AudioSessionState: 0 = ανενεργή, 1 = ενεργή (παίζει), 2 = έληξε.
+        return int(getattr(self._session, "State", 1)) == 1
 
     def set_volume(self, value: float) -> None:
         self._volume.SetMasterVolume(float(value), None)
