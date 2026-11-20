@@ -15,6 +15,8 @@ from shared.windows_audio import ramp_volume, same_volume
 
 RAMP_MS = 150
 PLAYING, PAUSED = 4, 5
+PAUSE_TIMEOUT_S = 1.0  # συνολικό όριο για όλα τα pause μαζί (εκτελούνται παράλληλα)
+PLAY_TIMEOUT_S = 1.0
 
 
 class AppSession:
@@ -101,6 +103,10 @@ class ApplicationAudio:
         self.ramp_ms = ramp_ms
         self.sleep = sleep
         self.log = log
+        # Τα media που σταμάτησε *αυτή* η εκτέλεση, ως ζωντανά αντικείμενα.
+        # Το play γίνεται σε αυτά (όχι αναζήτηση με όνομα), ώστε να επανέρχονται
+        # και δύο media της ίδιας εφαρμογής (π.χ. δύο παράθυρα Chrome).
+        self._paused: list[tuple[object, dict]] = []
 
     def _ramp(self, session, start, end):
         if self.sleep is None:
@@ -109,6 +115,12 @@ class ApplicationAudio:
             ramp_volume(session.set_volume, start, end, self.ramp_ms, self.sleep)
 
     def begin(self, record: dict, save: Callable[[dict], None]) -> None:
+        """Εφαρμογές στο 0% και μετά pause (για χρήση χωρίς ένταση Windows)."""
+        self.fade_out_apps(record, save)
+        self.pause_media(record, save)
+
+    def fade_out_apps(self, record: dict, save: Callable[[dict], None]) -> None:
+        """Γρήγορο μέρος (~150 ms): όλες οι εφαρμογές μαζί στο 0%."""
         record.setdefault("apps", [])
         record.setdefault("media", [])
         sessions = self.sessions()
@@ -153,49 +165,79 @@ class ApplicationAudio:
                     item["stage"] = "zero"
             save(record)
 
-        # Τα media controls είναι προαιρετικά: αν λείπουν δεν πρέπει να
-        # εμποδίσουν την ανακοίνωση. Ακολουθεί pause ΜΕΤΑ το volume 0%.
+    def pause_media(self, record: dict, save: Callable[[dict], None]) -> None:
+        """Αργό μέρος: pause, αφού οι εφαρμογές είναι ήδη στο 0%.
+
+        Τα media controls είναι προαιρετικά: αν λείπουν δεν πρέπει να
+        εμποδίσουν την ανακοίνωση.
+        """
+        record.setdefault("media", [])
         try:
-            asyncio.run(self._pause_media(record, save, sessions))
+            asyncio.run(self._pause_media(record, save))
         except Exception as exc:
             self.log(f"[ήχος] Media Controls μη διαθέσιμα ({exc}); μόνο μείωση έντασης.")
 
-    async def _pause_media(self, record, save, sessions):
+    async def _pause_media(self, record, save):
         media = await self.media()
+        targets = []
         for entry in media:
             try:
-                if entry.status() != PLAYING or not entry.can_pause():
-                    continue
-                item = {"app_id": _media_key(entry), "intent": True}
-                record["media"].append(item)
-                save(record)
-                accepted = await asyncio.wait_for(entry.pause(), timeout=1.0)
-                paused = False
-                if accepted:
-                    # Το Windows Media status μπορεί να ενημερωθεί λίγο
-                    # αργότερα από την επιτυχή απόκριση του pause.
-                    for _ in range(6):
-                        if entry.status() == PAUSED:
-                            paused = True
-                            break
-                        await asyncio.sleep(0.1)
-                item["paused"] = paused
-                save(record)
-                if not item["paused"]:
-                    record["media"].remove(item)
-                    save(record)
+                if entry.status() == PLAYING and entry.can_pause():
+                    targets.append(entry)
+            except Exception as exc:
+                self.log(f"[ήχος] Αδυναμία ανάγνωσης media ({exc}).")
+        if not targets:
+            return
+        items = [{"app_id": _media_key(entry), "intent": True} for entry in targets]
+        record["media"].extend(items)
+        save(record)  # πρόθεση ΠΡΙΝ από το pause
+
+        async def pause_one(entry, item):
+            try:
+                if not await entry.pause():
+                    return
+                # Το Windows Media status μπορεί να ενημερωθεί λίγο αργότερα.
+                while entry.status() != PAUSED:
+                    await asyncio.sleep(0.05)
+                item["paused"] = True
             except Exception as exc:
                 self.log(f"[ήχος] Αποτυχία pause σε media ({exc}).")
 
-    def restore(self, record: dict, save: Callable[[dict], None]) -> bool:
-        """Δοκιμάζει media play, έπειτα επαναφορά session volume· ελέγχει identity."""
+        # Όλα τα pause παράλληλα, με ένα συνολικό όριο χρόνου.
+        tasks = [asyncio.ensure_future(pause_one(e, i)) for e, i in zip(targets, items)]
+        done, pending = await asyncio.wait(tasks, timeout=PAUSE_TIMEOUT_S)
+        for task in pending:
+            task.cancel()
+        for entry, item in zip(targets, items):
+            if item.get("paused") is True:
+                self._paused.append((entry, item))
+            else:
+                record["media"].remove(item)
+        save(record)
+
+    def restore(self, record: dict, save: Callable[[dict], None], *,
+                play_media: bool = True) -> bool:
+        """Media play (μία προσπάθεια), έπειτα επαναφορά session volume.
+
+        play_media=False στην ανάκαμψη μετά από crash: δεν ξέρουμε πόση ώρα
+        πέρασε, οπότε επανέρχονται μόνο οι εντάσεις και ποτέ δεν γίνεται play.
+        """
         ok = True
         if record.get("media"):
             try:
-                asyncio.run(self._resume_media(record, save))
+                if play_media:
+                    asyncio.run(self._resume_media(record))
             except Exception as exc:
                 self.log(f"[ήχος] Πρόβλημα επαναφοράς media: {exc}")
-                ok = False
+            # Μία μόνο προσπάθεια: ό,τι δεν επανήλθε δεν μένει στο journal,
+            # ώστε να μη «κολλήσει» η λειτουργία ούτε να γίνει play αργότερα
+            # σε media που ο χρήστης ίσως σταμάτησε ο ίδιος.
+            for item in record["media"]:
+                if not item.get("_resumed"):
+                    self.log(f"[ήχος] Χωρίς play για {item.get('app_id') or 'media'}.")
+            record["media"] = []
+            self._paused = []
+            save(record)
         if record.get("apps"):
             try:
                 sessions = self.sessions()
@@ -256,37 +298,39 @@ class ApplicationAudio:
                 save(record)
         return ok and not record.get("apps") and not record.get("media")
 
-    async def _resume_media(self, record, save):
-        try:
-            media = await self.media()
-        except Exception as exc:
-            self.log(f"[ήχος] Media Controls μη διαθέσιμα: {exc}")
-            return
-        for item in list(record["media"]):
-            matches = [m for m in media if m.app_id == item["app_id"]]
-            if len(matches) == 1:
-                try:
-                    # Μόνο όσα σταματήσαμε και παραμένουν σε pause.
-                    # Μόνο επιβεβαιωμένο pause από εμάς: ένα crash στο μικρό
-                    # διάστημα μεταξύ πρόθεσης και απόκρισης δεν δικαιολογεί
-                    # αυτόματο play ενός media που ίσως σταμάτησε ο χρήστης.
-                    if item.get("paused") is True and matches[0].status() == PAUSED:
-                        accepted = await asyncio.wait_for(matches[0].play(), timeout=1.0)
-                        if not accepted:
-                            self.log("[ήχος] Media αρνήθηκε το play· εκκρεμεί επαναφορά.")
-                            continue
-                except Exception as exc:
-                    self.log(f"[ήχος] Το play απέτυχε: {exc}")
-                    continue
-            record["media"].remove(item)
-            save(record)
+    async def _resume_media(self, record):
+        """Play μόνο στα ζωντανά media που σταματήσαμε και είναι ακόμη σε pause."""
+        in_record = {id(item) for item in record["media"]}
+
+        async def play_one(entry, item):
+            try:
+                if entry.status() != PAUSED:
+                    self.log("[ήχος] Το media άλλαξε κατάσταση από τον χρήστη· χωρίς play.")
+                    return
+                if await entry.play():
+                    item["_resumed"] = True
+                else:
+                    self.log("[ήχος] Το media αρνήθηκε το play.")
+            except Exception as exc:
+                self.log(f"[ήχος] Το play απέτυχε: {exc}")
+
+        tasks = [asyncio.ensure_future(play_one(entry, item))
+                 for entry, item in self._paused if id(item) in in_record]
+        if tasks:
+            done, pending = await asyncio.wait(tasks, timeout=PLAY_TIMEOUT_S)
+            for task in pending:
+                task.cancel()
 
 
 def restore_record_apps(record: dict, save: Callable[[dict], None],
-                        *, app_audio: ApplicationAudio | None = None) -> bool:
-    """Ανεξάρτητη επαναφορά και μετά από νέα εκκίνηση του Client."""
+                        *, app_audio: ApplicationAudio | None = None,
+                        play_media: bool = False) -> bool:
+    """Επαναφορά εφαρμογών/media. Χωρίς play εκτός αν ζητηθεί ρητά.
+
+    Η ανάκαμψη μετά από νέα εκκίνηση του Client καλεί με play_media=False.
+    """
     if not record.get("apps") and not record.get("media"):
         return True
     if sys.platform != "win32" and app_audio is None:
         return False
-    return (app_audio or ApplicationAudio()).restore(record, save)
+    return (app_audio or ApplicationAudio()).restore(record, save, play_media=play_media)

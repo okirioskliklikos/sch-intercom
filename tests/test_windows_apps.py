@@ -147,14 +147,16 @@ class ApplicationAudioTests(unittest.TestCase):
         self.assertTrue(self.make_engine([new]).restore(record, lambda _: None))
         self.assertEqual(new.volume, 0.3)
 
-    def test_recovery_same_session_and_media(self):
+    def test_recovery_restores_volume_but_never_plays(self):
+        # Μετά από crash δεν ξέρουμε πόση ώρα πέρασε: μόνο εντάσεις, χωρίς play.
         app, media = FakeApp(), FakeMedia()
         record = {}
         self.make_engine([app], [media]).begin(record, lambda _: None)
         self.assertTrue(restore_record_apps(record, lambda _: None,
                                            app_audio=self.make_engine([app], [media])))
         self.assertAlmostEqual(app.volume, 0.7)
-        self.assertEqual(media.plays, 1)
+        self.assertEqual(media.plays, 0)
+        self.assertEqual(record["media"], [])
 
     def test_single_journal_restores_master_sessions_and_media_after_crash(self):
         import json
@@ -183,10 +185,10 @@ class ApplicationAudioTests(unittest.TestCase):
             self.assertTrue(recovered.recover())
             self.assertAlmostEqual(master.volume, 0.2)
             self.assertAlmostEqual(app.volume, 0.7)
-            self.assertTrue(media.playing)
+            self.assertFalse(media.playing)  # ανάκαμψη: χωρίς play
             self.assertFalse(path.exists())
 
-    def test_missing_media_backend_keeps_journal(self):
+    def test_media_without_live_object_is_dropped_not_kept(self):
         app, media = FakeApp(), FakeMedia()
         record = {}
         self.make_engine([app], [media]).begin(record, lambda _: None)
@@ -195,8 +197,10 @@ class ApplicationAudioTests(unittest.TestCase):
         broken = ApplicationAudio(sessions=lambda: [app], media=unavailable,
                                   own_pid=1, sleep=lambda _: None,
                                   log=lambda _: None)
-        self.assertFalse(broken.restore(record, lambda _: None))
-        self.assertTrue(record["media"])
+        # Μία προσπάθεια: το journal δεν «κολλάει» σε media που δεν επανήλθε.
+        self.assertTrue(broken.restore(record, lambda _: None))
+        self.assertEqual(record["media"], [])
+        self.assertEqual(media.plays, 0)
         self.assertAlmostEqual(app.volume, 0.7)
 
 

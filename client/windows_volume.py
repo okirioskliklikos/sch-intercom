@@ -9,6 +9,7 @@ import json
 import os
 from pathlib import Path
 import sys
+import threading
 from typing import Callable
 
 from client.windows_apps import ApplicationAudio, restore_record_apps
@@ -83,9 +84,10 @@ class AnnouncementVolume:
             self.log("[ήχος] Εκκρεμεί ανάκαμψη σε διαφορετική έξοδο· "
                      "δεν αλλάζει η τρέχουσα συσκευή.")
             return False
-        return self._restore_record(record)
+        # Μετά από crash: μόνο εντάσεις, ποτέ play (άγνωστο πόση ώρα πέρασε).
+        return self._restore_record(record, play_media=False)
 
-    def _restore_record(self, record: dict) -> bool:
+    def _restore_record(self, record: dict, *, play_media: bool = False) -> bool:
         current = self.master.get_volume()
         original, target = record["original"], record["target"]
         # Σε crash κατά το ramp το journal μπορεί να γράφει pending. Επιτρέπεται
@@ -102,7 +104,8 @@ class AnnouncementVolume:
         if record.get("unmuted") and not self.master.get_mute():
             self.master.set_mute(True)
         # Το ίδιο αρχείο προστατεύει master volume, εφαρμογές και media.
-        if not restore_record_apps(record, self._write, app_audio=self.apps):
+        if not restore_record_apps(record, self._write, app_audio=self.apps,
+                                   play_media=play_media):
             self.log("[ήχος] Εκκρεμεί επαναφορά εφαρμογών· το journal διατηρείται.")
             return False
         self.path.unlink(missing_ok=True)
@@ -120,16 +123,20 @@ class AnnouncementVolume:
                   "stage": "pending", "unmuted": original_mute}
         self._write(record)  # ΠΡΙΝ από οποιαδήποτε αλλαγή Windows
         try:
+            # Σειρά: εφαρμογές στο 0% → ένταση Windows → pause (το αργό μέρος
+            # τελευταίο, όταν οι εφαρμογές είναι ήδη σιωπηλές).
             if self.apps is not None:
-                self.apps.begin(record, self._write)
+                self.apps.fade_out_apps(record, self._write)
             self._ramp(original, self.target)
             if original_mute:
                 self.master.set_mute(False)
             record["stage"] = "applied"
             self._write(record)
+            if self.apps is not None:
+                self.apps.pause_media(record, self._write)
         except Exception:
             try:
-                self._restore_record(record)
+                self._restore_record(record, play_media=True)
             except Exception:
                 self.log("[ήχος] Αποτυχία επαναφοράς· διατηρείται το αρχείο ανάκαμψης.")
             raise
@@ -143,7 +150,7 @@ class AnnouncementVolume:
             return
         record = self._saved
         try:
-            self._restore_record(record)
+            self._restore_record(record, play_media=True)
         finally:
             self.active = False
             self._saved = None
@@ -151,6 +158,104 @@ class AnnouncementVolume:
 
 def _console(line: str) -> None:
     print(line, flush=True)
+
+
+class AudioPolicyWorker:
+    """Εκτελεί τις αλλαγές ήχου Windows σε δικό του νήμα.
+
+    Το νήμα λήψης του Client καλεί begin()/end() που επιστρέφουν αμέσως, ώστε
+    η λήψη και η αναπαραγωγή να μη σταματούν όσο γίνονται fade, pause ή play
+    (αλλιώς χάνονται οι πρώτες λέξεις ή λήγει το όριο λήψης 3 s).
+
+    Ο controller δημιουργείται μέσα στο νήμα (factory), ώστε τα αντικείμενα COM
+    να ανήκουν σε αυτό. Αν ζητηθεί begin() πριν εκτελεστεί ένα εκκρεμές end(),
+    το end() ακυρώνεται: η επιθυμητή κατάσταση είναι μία σημαία.
+    """
+
+    def __init__(self, factory: Callable[[], object | None],
+                 log: Callable[[str], None] = _console, *, start: bool = True):
+        self._factory = factory
+        self._log = log
+        self._cond = threading.Condition()
+        self._want = False
+        self._applied = False
+        self._closed = False
+        self._thread = threading.Thread(target=self._run, name="client-audio-policy",
+                                        daemon=True)
+        if start:
+            self._thread.start()
+
+    @property
+    def active(self) -> bool:
+        """Η επιθυμητή κατάσταση (ανακοίνωση σε εξέλιξη ή εκκρεμής επαναφορά)."""
+        with self._cond:
+            return self._want
+
+    def begin(self) -> bool:
+        with self._cond:
+            self._want = True
+            self._cond.notify_all()
+        return True
+
+    def end(self) -> None:
+        with self._cond:
+            self._want = False
+            self._cond.notify_all()
+
+    def wait_idle(self, timeout: float = 5.0) -> bool:
+        """Μόνο για tests/τερματισμό: περιμένει να εφαρμοστεί η επιθυμητή κατάσταση."""
+        with self._cond:
+            return self._cond.wait_for(lambda: self._applied == self._want, timeout)
+
+    def close(self, timeout: float = 5.0) -> None:
+        """Επαναφορά (αν χρειάζεται) και τερματισμός του νήματος."""
+        with self._cond:
+            self._want = False
+            self._closed = True
+            self._cond.notify_all()
+        if self._thread.is_alive():
+            self._thread.join(timeout)
+
+    def _run(self) -> None:
+        com = _com_init()
+        try:
+            try:
+                controller = self._factory()
+            except Exception as exc:  # noqa: BLE001
+                self._log(f"[ήχος] Αδυναμία ελέγχου ήχου Windows ({exc}).")
+                controller = None
+            while True:
+                with self._cond:
+                    while not self._closed and self._want == self._applied:
+                        self._cond.wait()
+                    target = self._want
+                    if target == self._applied:  # κλείσιμο χωρίς εκκρεμότητα
+                        return
+                try:
+                    if controller is not None:
+                        controller.begin() if target else controller.end()
+                except Exception as exc:  # noqa: BLE001 - ο ήχος συνεχίζει
+                    self._log(f"[ήχος] Αποτυχία {'εφαρμογής' if target else 'επαναφοράς'} "
+                              f"ήχου Windows: {exc}")
+                with self._cond:
+                    self._applied = target
+                    self._cond.notify_all()
+        finally:
+            if com is not None:
+                com.CoUninitialize()
+
+
+def _com_init():
+    """Το νήμα που καλεί Core Audio χρειάζεται δική του αρχικοποίηση COM."""
+    if sys.platform != "win32":
+        return None
+    try:
+        import comtypes
+
+        comtypes.CoInitializeEx()
+        return comtypes
+    except Exception:  # noqa: BLE001
+        return None
 
 
 def create_volume_controller(percent: int, *, device: int | None,
