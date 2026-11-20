@@ -229,8 +229,14 @@ class ApplicationAudio:
             if len(matches) == 1:
                 try:
                     # Μόνο όσα σταματήσαμε και παραμένουν σε pause.
-                    if matches[0].status() == PAUSED:
-                        await asyncio.wait_for(matches[0].play(), timeout=1.0)
+                    # Μόνο επιβεβαιωμένο pause από εμάς: ένα crash στο μικρό
+                    # διάστημα μεταξύ πρόθεσης και απόκρισης δεν δικαιολογεί
+                    # αυτόματο play ενός media που ίσως σταμάτησε ο χρήστης.
+                    if item.get("paused") is True and matches[0].status() == PAUSED:
+                        accepted = await asyncio.wait_for(matches[0].play(), timeout=1.0)
+                        if not accepted:
+                            self.log("[ήχος] Media αρνήθηκε το play· εκκρεμεί επαναφορά.")
+                            continue
                 except Exception as exc:
                     self.log(f"[ήχος] Το play απέτυχε: {exc}")
                     continue
