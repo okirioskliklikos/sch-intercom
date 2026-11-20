@@ -11,19 +11,21 @@ import threading
 import time
 from collections.abc import Callable
 
-from shared.audio import BLOCK_BYTES, BLOCK_MS, BLOCK_SAMPLES, CHANNELS, DEFAULT_PORT, DTYPE, SAMPLE_RATE, receive_frame
+from shared.audio import (BLOCK_BYTES, BLOCK_MS, BLOCK_SAMPLES, CHANNELS, DEFAULT_PORT,
+                          DTYPE, SAMPLE_RATE, Frame, MESSAGE_STREAM_STOP,
+                          receive_message)
 from shared.jitter import DelayTracker, JitterBuffer
 from shared.identity import load_identity, receive_welcome, send_hello
 from shared.discovery import discover, DISCOVERY_PORT
 from shared.control import heartbeat_sender
 
 RECONNECT_DELAY_SECONDS = 3
-# Ο Director στέλνει 50 πακέτα/s. Αν δεν έρθει τίποτα για 3 s, η σύνδεση θεωρείται
-# νεκρή (π.χ. ο Director έχασε ρεύμα/Wi-Fi χωρίς να κλείσει το TCP) και ο Client
-# ξανασυνδέεται. Τα σύντομα κολλήματα Wi-Fi που μετρήθηκαν (0,4-0,6 s) δεν το αγγίζουν.
+# Έγκυρο PCM, KEEPALIVE ή STREAM_STOP ανανεώνει το όριο. Απώλεια όλων
+# των μηνυμάτων για 3 s ενεργοποιεί τον υπάρχοντα μηχανισμό επανασύνδεσης.
 RECEIVE_TIMEOUT_SECONDS = 3.0
 CONNECT_TIMEOUT_SECONDS = 5
 DEFAULT_BUFFER_MS = 250
+ANNOUNCEMENT_PREFILL_MS = 120
 REPORT_EVERY_SECONDS = 5
 # 40 ms: δοκιμάστηκε από τον χρήστη σε Windows χωρίς κροτάλισμα (το "low" έδινε 100 ms).
 DEFAULT_LATENCY = 0.04
@@ -33,7 +35,11 @@ def now_us() -> int:
     return time.monotonic_ns() // 1000
 
 
-def format_report(jitter: JitterBuffer, delay: DelayTracker, received: int) -> str:
+def format_report(jitter: JitterBuffer, delay: DelayTracker, received: int,
+                  *, mode: str = "ανακοίνωση") -> str:
+    if mode == "αναμονή":
+        return ("[Client] κατάσταση: αναμονή | blocks "
+                f"{received} | ουρά — | πεταμένα — | κενά — | δίκτυο —")
     levels = jitter.take_level_stats()
     net = delay.take_stats()
     queue_text = "—"
@@ -42,7 +48,8 @@ def format_report(jitter: JitterBuffer, delay: DelayTracker, received: int) -> s
         queue_text = f"{low * BLOCK_MS}/{avg * BLOCK_MS:.0f}/{high * BLOCK_MS} ms"
     net_text = "—" if net is None else f"{net[0]:.0f}/{net[1]:.0f} ms"
     return (
-        f"[Client] blocks {received} | ουρά min/μέση/max {queue_text} | "
+        f"[Client] κατάσταση: ανακοίνωση | blocks {received} | "
+        f"ουρά min/μέση/max {queue_text} | "
         f"πεταμένα {jitter.dropped} | κενά {jitter.underruns} | "
         f"επιπλέον καθυστέρηση δικτύου μέση/max {net_text}"
     )
@@ -57,20 +64,34 @@ def pump_frames(
     report: Callable[[str], None] | None = None,
     report_every_s: float = REPORT_EVERY_SECONDS,
 ) -> None:
-    """Διαβάζει συνεχώς πακέτα από το δίκτυο και τα βάζει στην ουρά.
-
-    Τρέχει μέχρι να κλείσει η σύνδεση (EOFError) ή να εμφανιστεί σφάλμα.
-    """
+    """PCM/έλεγχος στην ίδια κατεύθυνση TCP, χωρίς reconnect σε αναμονή."""
     received = 0
+    in_announcement = False
     next_report = time.monotonic() + report_every_s
+    timeout = connection.gettimeout()
+    last_valid = time.monotonic()
     while True:
-        frame = receive_frame(connection)
-        delay.record(frame.seq, frame.timestamp_us, clock_us())
-        jitter.push(frame.pcm)
-        received += 1
+        # Η προθεσμία δεν παρατείνεται από μισό/άκυρο πακέτο.
+        deadline = last_valid + timeout if timeout is not None and timeout > 0 else None
+        message = receive_message(connection, deadline=deadline)
+        last_valid = time.monotonic()
+        if isinstance(message, Frame):
+            if not in_announcement:
+                jitter.begin_announcement()
+                delay.reset()
+                in_announcement = True
+            delay.record(message.seq, message.timestamp_us, clock_us())
+            jitter.push(message.pcm)
+            received += 1
+        elif message.kind == MESSAGE_STREAM_STOP:
+            if in_announcement:
+                jitter.finish_announcement()
+                in_announcement = False
+        # KEEPALIVE: μόνο επιβεβαίωση ζωντανής σύνδεσης· όχι PCM/underrun.
         if report and time.monotonic() >= next_report:
-            report(format_report(jitter, delay, received))
-            next_report += report_every_s
+            mode = "ανακοίνωση" if in_announcement or jitter.mode == "ανακοίνωση" else "αναμονή"
+            report(format_report(jitter, delay, received, mode=mode))
+            next_report = time.monotonic() + report_every_s
 
 
 def play_stream(
@@ -82,7 +103,9 @@ def play_stream(
 ) -> None:
     import sounddevice as sd
 
-    jitter = JitterBuffer(max(1, buffer_ms // BLOCK_MS), BLOCK_BYTES)
+    jitter = JitterBuffer(max(1, buffer_ms // BLOCK_MS), BLOCK_BYTES,
+                          prefill_blocks=max(1, ANNOUNCEMENT_PREFILL_MS // BLOCK_MS))
+    jitter.standby()
     delay = DelayTracker()
 
     def on_audio(outdata, frames, timestamp, status):
@@ -167,7 +190,7 @@ def run_with_reconnect(
             with open_connection(target_host, target_port, receive_timeout=receive_timeout) as connection:
                 session(connection)
         except socket.timeout:
-            log(f"Δεν ήρθε ήχος από τον Director για {receive_timeout:g}s· "
+            log(f"Δεν ήρθε έγκυρο μήνυμα από τον Director για {receive_timeout:g}s· "
                 f"η σύνδεση θεωρείται χαμένη. Νέα προσπάθεια σε {reconnect_delay:g}s.")
         except (OSError, EOFError, ValueError) as exc:
             log(f"Η σύνδεση διακόπηκε: {exc}. Νέα προσπάθεια σε {reconnect_delay:g}s.")
