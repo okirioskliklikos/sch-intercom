@@ -170,9 +170,16 @@ class ApplicationAudio:
                 record["media"].append(item)
                 save(record)
                 accepted = await asyncio.wait_for(entry.pause(), timeout=1.0)
+                paused = False
                 if accepted:
-                    await asyncio.sleep(0.1)
-                item["paused"] = accepted and entry.status() == PAUSED
+                    # Το Windows Media status μπορεί να ενημερωθεί λίγο
+                    # αργότερα από την επιτυχή απόκριση του pause.
+                    for _ in range(6):
+                        if entry.status() == PAUSED:
+                            paused = True
+                            break
+                        await asyncio.sleep(0.1)
+                item["paused"] = paused
                 save(record)
                 if not item["paused"]:
                     record["media"].remove(item)
