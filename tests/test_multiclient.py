@@ -1,0 +1,130 @@
+"""Πραγματικά TCP loopback sockets, χωρίς μικρόφωνο/ηχεία."""
+
+import socket
+import threading
+import time
+import unittest
+
+from director.broadcast import AudioBroadcaster, _ClientSession
+from director.main import accept_clients
+from shared.audio import BLOCK_BYTES, receive_frame
+
+
+def pcm(n):
+    return bytes([n % 256]) * BLOCK_BYTES
+
+
+class MultiClientTests(unittest.TestCase):
+    def setUp(self):
+        self.broadcast = AudioBroadcaster(queue_blocks=5)
+        self.server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.server.bind(("127.0.0.1", 0))
+        self.server.listen(32)
+        self.stop = threading.Event()
+        self.listener = threading.Thread(target=accept_clients,
+                                         args=(self.server, self.broadcast, self.stop),
+                                         daemon=True)
+        self.listener.start()
+        self.clients = []
+
+    def tearDown(self):
+        self.stop.set()
+        self.listener.join(timeout=1)
+        self.broadcast.close()
+        for s in self.clients:
+            s.close()
+        self.server.close()
+
+    def connect_clients(self, number):
+        for _ in range(number - len(self.clients)):
+            s = socket.create_connection(self.server.getsockname(), timeout=2)
+            s.settimeout(3)
+            self.clients.append(s)
+        end = time.monotonic() + 3
+        while self.broadcast.client_count != number and time.monotonic() < end:
+            time.sleep(0.01)
+        self.assertEqual(self.broadcast.client_count, number)
+
+    def test_2_5_10_15_20_clients_receive_identical_frames(self):
+        for count in (2, 5, 10, 15, 20):
+            with self.subTest(clients=count):
+                self.connect_clients(count)
+                received = [None] * count
+                errors = []
+
+                def read(index):
+                    try:
+                        received[index] = receive_frame(self.clients[index])
+                    except Exception as exc:
+                        errors.append(exc)
+
+                threads = [threading.Thread(target=read, args=(i,)) for i in range(count)]
+                for thread in threads:
+                    thread.start()
+                self.broadcast.publish(pcm(count), count * 1000)
+                for thread in threads:
+                    thread.join(timeout=3)
+                self.assertFalse(errors, str(errors))
+                self.assertTrue(all(not thread.is_alive() for thread in threads))
+                self.assertEqual([x.pcm for x in received], [pcm(count)] * count)
+                self.assertEqual(len({x.seq for x in received}), 1)
+
+    def test_15_clients_receive_continuous_stream(self):
+        self.connect_clients(15)
+        received = [[] for _ in self.clients]
+        errors = []
+
+        def collect(i):
+            try:
+                for _ in range(25):
+                    received[i].append(receive_frame(self.clients[i]))
+            except Exception as exc:
+                errors.append(exc)
+
+        readers = [threading.Thread(target=collect, args=(i,)) for i in range(15)]
+        for reader in readers:
+            reader.start()
+        for n in range(25):
+            self.broadcast.publish(pcm(n), n * 20_000)
+            time.sleep(0.02)
+        for reader in readers:
+            reader.join(timeout=3)
+        self.assertFalse(errors, str(errors))
+        self.assertTrue(all(not reader.is_alive() for reader in readers))
+        for frames in received:
+            self.assertEqual([f.seq for f in frames], list(range(25)))
+            self.assertEqual([f.pcm for f in frames], [pcm(n) for n in range(25)])
+
+    def test_disconnect_does_not_block_healthy_client(self):
+        self.connect_clients(2)
+        self.clients[0].shutdown(socket.SHUT_RDWR)
+        self.clients[0].close()
+        self.broadcast.publish(pcm(42), 123)
+        frame = receive_frame(self.clients[1])
+        self.assertEqual(frame.pcm, pcm(42))
+
+    def test_slow_client_queue_bounded(self):
+        sender, receiver = socket.socketpair()
+        try:
+            # Χωρίς εκκίνηση sender thread: προσομοίωση Client που δεν διαβάζει.
+            session = _ClientSession(1, sender, "slow", 5, lambda _: None)
+            dropped = sum(session.enqueue(pcm(n)) for n in range(100))
+            self.assertEqual(session.pending.qsize(), 5)
+            self.assertEqual(dropped, 95)
+            self.assertEqual(list(session.pending.queue), [pcm(n) for n in range(95, 100)])
+            session.stop()
+        finally:
+            receiver.close()
+
+    def test_max_clients(self):
+        self.broadcast.max_clients = 2
+        self.connect_clients(2)
+        extra = socket.create_connection(self.server.getsockname(), timeout=2)
+        extra.settimeout(2)
+        self.clients.append(extra)
+        self.assertEqual(extra.recv(1), b"")
+        self.assertEqual(self.broadcast.client_count, 2)
+
+
+if __name__ == "__main__":
+    unittest.main()
