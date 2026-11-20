@@ -13,6 +13,11 @@ from shared.audio import BLOCK_BYTES, BLOCK_MS, BLOCK_SAMPLES, CHANNELS, DEFAULT
 from shared.jitter import DelayTracker, JitterBuffer
 
 RECONNECT_DELAY_SECONDS = 3
+# Ο Director στέλνει 50 πακέτα/s. Αν δεν έρθει τίποτα για 3 s, η σύνδεση θεωρείται
+# νεκρή (π.χ. ο Director έχασε ρεύμα/Wi-Fi χωρίς να κλείσει το TCP) και ο Client
+# ξανασυνδέεται. Τα σύντομα κολλήματα Wi-Fi που μετρήθηκαν (0,4-0,6 s) δεν το αγγίζουν.
+RECEIVE_TIMEOUT_SECONDS = 3.0
+CONNECT_TIMEOUT_SECONDS = 5
 DEFAULT_BUFFER_MS = 250
 REPORT_EVERY_SECONDS = 5
 # 40 ms: δοκιμάστηκε από τον χρήστη σε Windows χωρίς κροτάλισμα (το "low" έδινε 100 ms).
@@ -107,6 +112,51 @@ def parse_latency(value: str) -> str | float:
     return float(value)
 
 
+def open_connection(host: str, port: int, *,
+                    receive_timeout: float = RECEIVE_TIMEOUT_SECONDS) -> socket.socket:
+    """Συνδέεται στον Director με όριο αναμονής για κάθε λήψη."""
+    connection = socket.create_connection((host, port), timeout=CONNECT_TIMEOUT_SECONDS)
+    try:
+        connection.settimeout(receive_timeout)
+        connection.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+    except OSError:
+        connection.close()
+        raise
+    return connection
+
+
+def run_with_reconnect(
+    host: str,
+    port: int,
+    session: Callable[[socket.socket], None],
+    *,
+    receive_timeout: float = RECEIVE_TIMEOUT_SECONDS,
+    reconnect_delay: float = RECONNECT_DELAY_SECONDS,
+    max_sessions: int | None = None,
+    log: Callable[[str], None] = lambda line: print(line, flush=True),
+    sleep: Callable[[float], None] = time.sleep,
+) -> None:
+    """Τρέχει session(connection) και ξανασυνδέεται όταν η σύνδεση χαθεί.
+
+    Η παλιά σύνδεση κλείνει πάντα πριν από τη νέα προσπάθεια.
+    max_sessions υπάρχει μόνο για τα tests (None = για πάντα).
+    """
+    attempts = 0
+    while max_sessions is None or attempts < max_sessions:
+        attempts += 1
+        try:
+            log(f"Σύνδεση στον Director {host}:{port}...")
+            with open_connection(host, port, receive_timeout=receive_timeout) as connection:
+                session(connection)
+        except socket.timeout:
+            log(f"Δεν ήρθε ήχος από τον Director για {receive_timeout:g}s· "
+                f"η σύνδεση θεωρείται χαμένη. Νέα προσπάθεια σε {reconnect_delay:g}s.")
+        except (OSError, EOFError, ValueError) as exc:
+            log(f"Η σύνδεση διακόπηκε: {exc}. Νέα προσπάθεια σε {reconnect_delay:g}s.")
+        if max_sessions is None or attempts < max_sessions:
+            sleep(reconnect_delay)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="School Intercom — Classroom Client (πρωτότυπο)")
     parser.add_argument("--host", required=True, help="IP υπολογιστή Director")
@@ -123,16 +173,11 @@ def main() -> None:
     args = parser.parse_args()
 
     try:
-        while True:
-            try:
-                print(f"Σύνδεση στον Director {args.host}:{args.port}...", flush=True)
-                with socket.create_connection((args.host, args.port), timeout=5) as connection:
-                    connection.settimeout(None)
-                    connection.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-                    play_stream(connection, device=args.device, buffer_ms=args.buffer_ms, latency=args.latency)
-            except (OSError, EOFError, ValueError) as exc:
-                print(f"Η σύνδεση διακόπηκε: {exc}. Νέα προσπάθεια σε {RECONNECT_DELAY_SECONDS}s.", flush=True)
-                time.sleep(RECONNECT_DELAY_SECONDS)
+        run_with_reconnect(
+            args.host, args.port,
+            lambda connection: play_stream(connection, device=args.device,
+                                           buffer_ms=args.buffer_ms, latency=args.latency),
+        )
     except KeyboardInterrupt:
         print("\nΟ Client τερματίστηκε.", flush=True)
 
