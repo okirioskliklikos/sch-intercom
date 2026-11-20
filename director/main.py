@@ -11,6 +11,7 @@ import threading
 import time
 
 from director.broadcast import AudioBroadcaster, MAX_CLIENTS
+from shared.identity import receive_hello
 from shared.audio import BLOCK_BYTES, BLOCK_SAMPLES, CHANNELS, DEFAULT_PORT, DTYPE, SAMPLE_RATE
 
 # Κοινή ουρά λήψης του μικροφώνου (5 x 20 ms = 100 ms).
@@ -85,8 +86,52 @@ def accept_clients(server: socket.socket, broadcaster: AudioBroadcaster,
             if not stop.is_set():
                 raise
             break
-        if not broadcaster.add_client(connection, address):
+        # Πειραματική δήλωση Client: μη πιστοποιημένα στοιχεία.
+        connection.settimeout(2.0)
+        try:
+            client_id, room = receive_hello(connection)
+        except (OSError, EOFError, ValueError) as exc:
+            print(f"[Director] Μη αποδεκτή δήλωση {address}: {exc}", flush=True)
+            connection.close()
+            continue
+        if not broadcaster.add_client(connection, client_id, room, address):
             print(f"[Director] Απόρριψη Client {address}: όριο {broadcaster.max_clients}", flush=True)
+
+
+def command_loop(broadcaster: AudioBroadcaster, stop: threading.Event) -> None:
+    """Προσωρινός έλεγχος παραληπτών από το τερματικό του Director."""
+    print("Εντολές: status | all | none | room <όνομα> [όνομα...] | client <UUID> [UUID...]",
+          flush=True)
+    while not stop.is_set():
+        try:
+            line = input("Director> ").strip()
+        except (EOFError, OSError):
+            return
+        if not line:
+            continue
+        command, *values = line.split()
+        try:
+            if command == "status" and not values:
+                clients = broadcaster.clients_snapshot()
+                print("Συνδεδεμένοι Clients:", len(clients), flush=True)
+                for client_id, room in clients:
+                    print(f"  {client_id} | {room}", flush=True)
+            elif command == "all" and not values:
+                broadcaster.set_targets()
+                print("Μετάδοση σε όλους τους Clients", flush=True)
+            elif command == "none" and not values:
+                broadcaster.set_targets(rooms=set(), client_ids=set())
+                print("Παύση ομιλίας προς όλους (σιωπηλά blocks)", flush=True)
+            elif command == "room" and values:
+                broadcaster.set_targets(rooms=set(values), client_ids=set())
+                print("Επιλεγμένες αίθουσες:", ", ".join(values), flush=True)
+            elif command == "client" and values:
+                broadcaster.set_targets(rooms=set(), client_ids=set(values))
+                print("Επιλεγμένοι Clients:", ", ".join(values), flush=True)
+            else:
+                print("Άγνωστη εντολή. status | all | none | room ΟΝΟΜΑ | client UUID", flush=True)
+        except ValueError as exc:
+            print(f"Μη έγκυρη επιλογή: {exc}", flush=True)
 
 
 def parse_latency(value: str) -> str | float:
@@ -114,6 +159,9 @@ def main() -> None:
         receiver = threading.Thread(target=accept_clients, args=(server, broadcaster, stop),
                                     daemon=True, name="accept-clients")
         receiver.start()
+        commands = threading.Thread(target=command_loop, args=(broadcaster, stop),
+                                    daemon=True, name="director-commands")
+        commands.start()
         try:
             stream_microphone(broadcaster, device=args.device, latency=args.latency, stop=stop)
         except KeyboardInterrupt:
