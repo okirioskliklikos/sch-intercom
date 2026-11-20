@@ -87,7 +87,7 @@
 ### Πώς συνεχίζεται η εργασία σε νέα συζήτηση
 
 1. Άνοιγμα του `project_instructions.md` από `dev`, έπειτα `docs/requirements.md`, `docs/architecture.md`, αυτού του αρχείου και των `docs/prototype.md` / `docs/latency.md`.
-2. Έλεγχος `dev`, `gpt-dev`, `ai-dev` και εκκρεμών PR. Συγχρονισμός του `gpt-dev` μετά από merges μόνο με ασφαλή διατήρηση ιστορικού.
+2. Έλεγχος `dev`, `gpt-dev`, `ai-dev` και εκκρεμών PR. Επειδή ο χρήστης συγχωνεύει με **squash and merge**, μετά από κάθε merge το branch ανάπτυξης ευθυγραμμίζεται με το `dev` (`git reset --hard origin/dev` και `git push --force-with-lease`). Αυτό γίνεται μόνο όταν δεν υπάρχει ανοιχτό PR από αυτό το branch και αφού επιβεβαιωθεί ότι δεν έχει commits που λείπουν από το `dev`· σε κάθε άλλη περίπτωση ρωτάμε πρώτα τον χρήστη.
 3. Σύντομη πρόταση για το επόμενο βήμα και **έγκριση του χρήστη πριν από αλλαγές κώδικα**.
 4. Μικρές αλλαγές αποκλειστικά στο `gpt-dev`, αυτοματοποιημένοι έλεγχοι χωρίς εγκατάσταση σε σχολικούς υπολογιστές και PR προς `dev` χωρίς αυτόματο merge.
 5. Για ελέγχους στο Linux: `.venv/bin/python -m unittest discover -s tests -v`. Για χειροκίνητες εντολές Director/Client: `docs/prototype.md`.
