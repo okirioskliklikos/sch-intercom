@@ -37,9 +37,18 @@ import time
 from dataclasses import dataclass, field
 from typing import Callable, Iterable, Protocol
 
-VOLUME_TOLERANCE = 0.01  # 1 % ανοχή στη σύγκριση έντασης (στρογγυλοποιήσεις Windows)
-DEFAULT_RAMP_MS = 150  # σταδιακή αλλαγή έντασης αντί για απότομο βήμα («κλικ»)
-RAMP_STEP_MS = 10
+if __package__ in (None, ""):
+    # Εκτέλεση ως «py tools\\windows_audio_check.py»: πρόσβαση στο shared/.
+    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from shared.windows_audio import (  # noqa: E402
+    DEFAULT_RAMP_MS,
+    RAMP_STEP_MS,
+    VOLUME_TOLERANCE,
+    PycawMaster,
+    ramp_volume,
+    same_volume as _same_volume,
+)
 
 # Τιμές του GlobalSystemMediaTransportControlsSessionPlaybackStatus.
 PLAYBACK_STATUS_NAMES = {
@@ -120,28 +129,11 @@ class MediaSession(Protocol):
 Sleep = Callable[[float], None]
 
 
-def ramp_volume(set_volume: Callable[[float], None], start: float, end: float,
-                ramp_ms: float, sleep: Sleep = time.sleep) -> None:
-    """Αλλάζει την ένταση σταδιακά από start σε end μέσα σε ramp_ms.
-
-    Με ramp_ms <= 0 η αλλαγή γίνεται με ένα βήμα (όπως στην αρχική έκδοση).
-    """
-    steps = max(1, int(ramp_ms // RAMP_STEP_MS)) if ramp_ms > 0 else 1
-    for i in range(1, steps + 1):
-        set_volume(end if i == steps else start + (end - start) * i / steps)
-        if i < steps:
-            sleep(ramp_ms / steps / 1000)
-
-
 def pick_test_volume(current: float, requested: float) -> float:
     """Επιλέγει δοκιμαστική ένταση αισθητά διαφορετική από την τρέχουσα."""
     if abs(current - requested) >= 0.10:
         return requested
     return 0.60 if current < 0.45 else 0.20
-
-
-def _same_volume(a: float, b: float) -> bool:
-    return abs(a - b) <= VOLUME_TOLERANCE
 
 
 @dataclass
@@ -469,42 +461,6 @@ def session_label(session: AppSession) -> str:
 # ---------------------------------------------------------------------------
 # Υλοποιήσεις Windows (εισάγονται μόνο σε Windows)
 # ---------------------------------------------------------------------------
-
-
-class PycawMaster:
-    def __init__(self) -> None:
-        from pycaw.pycaw import AudioUtilities
-
-        speakers = AudioUtilities.GetSpeakers()
-        self.device_name = getattr(speakers, "FriendlyName", None)
-        endpoint = getattr(speakers, "EndpointVolume", None)
-        if endpoint is None:
-            # Παλαιότερες εκδόσεις pycaw: το GetSpeakers επιστρέφει IMMDevice.
-            from ctypes import POINTER, cast
-
-            from comtypes import CLSCTX_ALL
-            from pycaw.pycaw import IAudioEndpointVolume
-
-            interface = speakers.Activate(IAudioEndpointVolume._iid_, CLSCTX_ALL, None)
-            endpoint = cast(interface, POINTER(IAudioEndpointVolume))
-            if self.device_name is None:
-                try:
-                    self.device_name = AudioUtilities.CreateDevice(speakers).FriendlyName
-                except Exception:  # noqa: BLE001
-                    self.device_name = "(άγνωστο όνομα)"
-        self._endpoint = endpoint
-
-    def get_volume(self) -> float:
-        return float(self._endpoint.GetMasterVolumeLevelScalar())
-
-    def set_volume(self, value: float) -> None:
-        self._endpoint.SetMasterVolumeLevelScalar(float(value), None)
-
-    def get_mute(self) -> bool:
-        return bool(self._endpoint.GetMute())
-
-    def set_mute(self, muted: bool) -> None:
-        self._endpoint.SetMute(1 if muted else 0, None)
 
 
 class PycawSession:

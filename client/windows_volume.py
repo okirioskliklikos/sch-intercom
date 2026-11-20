@@ -11,7 +11,7 @@ from pathlib import Path
 import sys
 from typing import Callable
 
-from tools.windows_audio_check import PycawMaster, ramp_volume, _same_volume
+from shared.windows_audio import PycawMaster, ramp_volume, same_volume as _same_volume
 
 RAMP_MS = 150
 
@@ -139,21 +139,69 @@ class AnnouncementVolume:
             self._saved = None
 
 
+def _console(line: str) -> None:
+    print(line, flush=True)
+
+
 def create_volume_controller(percent: int, *, device: int | None,
-                             recovery_path: Path) -> AnnouncementVolume | None:
-    """Αλλαγή μόνο της *προεπιλεγμένης* εξόδου (όπως στο Windows test script)."""
+                             recovery_path: Path,
+                             master_factory: Callable[[], object] | None = None,
+                             log: Callable[[str], None] = _console,
+                             ) -> AnnouncementVolume | None:
+    """Αλλαγή μόνο της *προεπιλεγμένης* εξόδου (όπως στο Windows test script).
+
+    Δεν εγείρει ποτέ σφάλμα: η ένταση είναι βοηθητική λειτουργία και δεν πρέπει
+    να εμποδίζει την εκκίνηση ή την επανασύνδεση του Client. Σε πρόβλημα
+    γράφεται προειδοποίηση και επιστρέφεται None (ο Client παίζει χωρίς αλλαγή
+    έντασης Windows).
+    """
     if not 0 <= percent <= 100:
-        raise ValueError("--announcement-volume: επιτρέπεται τιμή 0–100")
-    if sys.platform != "win32":
-        print("[ήχος] Η ένταση Windows δεν υποστηρίζεται εδώ· παραμένει ανενεργή.",
-              flush=True)
+        log("[ήχος] --announcement-volume εκτός 0–100· η ένταση Windows δεν αλλάζει.")
+        return None
+    if master_factory is None and sys.platform != "win32":
+        log("[ήχος] Η ένταση Windows δεν υποστηρίζεται εδώ· παραμένει ανενεργή.")
         return None
     if device is not None:
-        raise ValueError("Η προσωρινή ένταση Windows δεν υποστηρίζει ακόμη --device: "
-                         "θα μπορούσε να αλλάξει λάθος συσκευή εξόδου.")
-    controller = AnnouncementVolume(PycawMaster(), recovery_path,
-                                    target_percent=percent,
-                                    log=lambda line: print(line, flush=True))
-    if not controller.recover():
-        raise RuntimeError("Υπάρχει ανεπίλυτο αρχείο ανάκαμψης για διαφορετική έξοδο.")
-    return controller
+        log("[ήχος] Η προσωρινή ένταση Windows δεν υποστηρίζει ακόμη --device "
+            "(θα μπορούσε να αλλάξει λάθος συσκευή εξόδου)· παραμένει ανενεργή.")
+        return None
+    try:
+        controller = AnnouncementVolume((master_factory or PycawMaster)(), recovery_path,
+                                        target_percent=percent, log=log)
+        if not controller.recover():
+            # Ανάκαμψη για άλλη έξοδο: δεν αλλάζουμε την τρέχουσα. Το begin()
+            # ξαναδοκιμάζει την ανάκαμψη και δεν αλλάζει ένταση όσο εκκρεμεί.
+            log("[ήχος] Η προσωρινή ένταση μένει ανενεργή μέχρι να επιλυθεί η ανάκαμψη "
+                f"({recovery_path}).")
+        return controller
+    except Exception as exc:  # noqa: BLE001 - ποτέ εμπόδιο για τον ήχο ανακοίνωσης
+        log(f"[ήχος] Αδυναμία ελέγχου έντασης Windows ({exc}); συνέχεια χωρίς αυτήν.")
+        return None
+
+
+def recover_pending_volume(recovery_path: Path, *, device: int | None,
+                           master_factory: Callable[[], object] | None = None,
+                           log: Callable[[str], None] = _console) -> None:
+    """Ανάκαμψη στην εκκίνηση όταν υπάρχει αρχείο από προηγούμενο crash.
+
+    Καλείται και χωρίς --announcement-volume. Δεν εγείρει ποτέ σφάλμα.
+    """
+    try:
+        if not Path(recovery_path).exists():
+            return
+    except OSError:
+        return
+    if device is not None:
+        log("[ήχος] Υπάρχει αρχείο ανάκαμψης έντασης, αλλά με --device δεν γίνεται "
+            "αυτόματη επαναφορά (άγνωστη αντιστοίχιση συσκευής).")
+        return
+    if master_factory is None and sys.platform != "win32":
+        return
+    try:
+        controller = AnnouncementVolume((master_factory or PycawMaster)(), recovery_path,
+                                        target_percent=0, log=log)
+        if not controller.recover():
+            log(f"[ήχος] Το αρχείο ανάκαμψης ({recovery_path}) αφορά άλλη έξοδο ήχου· "
+                "διατηρείται για την επόμενη φορά. Ο Client συνεχίζει κανονικά.")
+    except Exception as exc:  # noqa: BLE001
+        log(f"[ήχος] Αποτυχία ανάκαμψης έντασης ({exc}); ο Client συνεχίζει κανονικά.")

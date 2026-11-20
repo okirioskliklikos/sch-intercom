@@ -7,7 +7,6 @@
 import argparse
 from pathlib import Path
 import socket
-import sys
 import threading
 import time
 from collections.abc import Callable
@@ -19,7 +18,8 @@ from shared.jitter import DelayTracker, JitterBuffer
 from shared.identity import load_identity, receive_welcome, send_hello
 from shared.discovery import discover, DISCOVERY_PORT
 from shared.control import heartbeat_sender
-from client.windows_volume import create_volume_controller, AnnouncementVolume
+from client.windows_volume import (AnnouncementVolume, create_volume_controller,
+                                   recover_pending_volume)
 
 RECONNECT_DELAY_SECONDS = 3
 # Έγκυρο PCM, KEEPALIVE ή STREAM_STOP ανανεώνει το όριο. Απώλεια όλων
@@ -108,7 +108,10 @@ def pump_frames(
                 and stop_received_at is not None
                 and time.monotonic() - stop_received_at >= 0.1
                 and jitter.mode == "αναμονή"):
-            volume.end()
+            try:
+                volume.end()
+            except Exception as exc:  # noqa: BLE001 - ο ήχος συνεχίζει κανονικά
+                print(f"[ήχος] Αποτυχία επαναφοράς έντασης: {exc}", flush=True)
         # KEEPALIVE: μόνο επιβεβαίωση ζωντανής σύνδεσης· όχι PCM/underrun.
         if report and time.monotonic() >= next_report:
             mode = "ανακοίνωση" if in_announcement or jitter.mode == "ανακοίνωση" else "αναμονή"
@@ -144,8 +147,9 @@ def play_stream(
     journal = recovery_path or Path.home() / ".school-intercom" / "volume-recovery.json"
     # Αν προηγούμενος Client έπεσε, ανάκαμψη και χωρίς νέα ενεργοποίηση
     # της λειτουργίας από CLI. Δεν επιχειρούμε αλλαγές σε Linux.
-    if announcement_volume is None and sys.platform == "win32" and journal.exists():
-        create_volume_controller(0, device=device, recovery_path=journal)
+    # Κανένα πρόβλημα έντασης/ανάκαμψης δεν σταματά τον Client: μόνο προειδοποίηση.
+    if announcement_volume is None:
+        recover_pending_volume(journal, device=device)
     volume = (create_volume_controller(
         announcement_volume, device=device, recovery_path=journal)
         if announcement_volume is not None else None)
@@ -180,7 +184,12 @@ def play_stream(
             if volume is not None:
                 # Δίκτυο/τερματισμός: καλύτερα αποκατάσταση παρά παραμονή σε
                 # αυξημένη ένταση. Το κανονικό STOP περιμένει πρώτα το drain.
-                volume.end()
+                # Σφάλμα εδώ δεν πρέπει να κρύψει το αρχικό ούτε να σταματήσει
+                # την επανασύνδεση· το αρχείο ανάκαμψης μένει για την επόμενη φορά.
+                try:
+                    volume.end()
+                except Exception as exc:  # noqa: BLE001
+                    print(f"[ήχος] Αποτυχία επαναφοράς έντασης: {exc}", flush=True)
 
 
 def parse_latency(value: str) -> str | float:
