@@ -75,7 +75,12 @@ class ControlProtocolTests(unittest.TestCase):
         self.assertEqual(3 * len(encode_control(MESSAGE_KEEPALIVE)), 60)
         director.set_targets()
         director.publish(pcm(2), 20)
-        self.assertEqual(receive_message(client).pcm, pcm(2))
+        # Πιθανό keepalive ήδη στο TCP πριν από τη νέα επιλογή.
+        message = receive_message(client)
+        while not isinstance(message, Frame):
+            self.assertEqual(message.kind, MESSAGE_KEEPALIVE)
+            message = receive_message(client)
+        self.assertEqual(message.pcm, pcm(2))
 
     def test_partial_invalid_message_does_not_extend_timeout(self):
         sender, receiver = socket.socketpair()
