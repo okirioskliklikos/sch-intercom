@@ -81,7 +81,8 @@ def show_help() -> str:
 
 def stream_microphone(broadcaster: AudioBroadcaster, *, device: int | None = None,
                       latency: str | float = "low", stop: threading.Event | None = None,
-                      stats: DirectorStats | None = None) -> None:
+                      stats: DirectorStats | None = None,
+                      level_callback=None, ready_callback=None) -> None:
     import sounddevice as sd
 
     pending: queue.Queue[tuple[int, bytes]] = queue.Queue(maxsize=MAX_PENDING_BLOCKS)
@@ -94,6 +95,12 @@ def stream_microphone(broadcaster: AudioBroadcaster, *, device: int | None = Non
         if frames != BLOCK_SAMPLES:
             return
         block = bytes(indata)
+        if level_callback is not None:
+            # Η στάθμη είναι ένδειξη λήψης μικροφώνου, όχι επιβεβαίωση
+            # ότι ακούστηκε η ανακοίνωση σε κάποιον Client.
+            samples = memoryview(block).cast("h")
+            peak = max((abs(sample) for sample in samples), default=0) / 32768
+            level_callback(min(1.0, peak))
         if len(block) != BLOCK_BYTES:
             return
         item = (time.monotonic_ns() // 1000, block)
@@ -112,6 +119,8 @@ def stream_microphone(broadcaster: AudioBroadcaster, *, device: int | None = Non
         samplerate=SAMPLE_RATE, channels=CHANNELS, dtype=DTYPE,
         blocksize=BLOCK_SAMPLES, device=device, latency=latency, callback=on_audio,
     ) as microphone:
+        if ready_callback is not None:
+            ready_callback()
         print(
             f"Μικρόφωνο ενεργό — μιλήστε. Ctrl+C για τερματισμό. "
             f"Καθυστέρηση κάρτας ήχου {microphone.latency * 1000:.0f} ms",
@@ -234,7 +243,13 @@ def main() -> None:
     parser.add_argument("--device", type=int, default=None, help="Αριθμός συσκευής εισόδου PortAudio")
     parser.add_argument("--latency", type=parse_latency, default="low",
                         help="Καθυστέρηση κάρτας ήχου: low, high ή δευτερόλεπτα")
+    parser.add_argument("--gui", action="store_true",
+                        help="Προσωρινό γραφικό περιβάλλον δοκιμών (tkinter)")
     args = parser.parse_args()
+    if args.gui:
+        from director.gui import run_gui
+        run_gui(args, accept_clients=accept_clients, stream_microphone=stream_microphone)
+        return
 
     broadcaster = AudioBroadcaster(max_clients=MAX_CLIENTS, on_event=lambda s: print(s, flush=True))
     stop = threading.Event()
