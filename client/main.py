@@ -13,6 +13,7 @@ from collections.abc import Callable
 from shared.audio import BLOCK_BYTES, BLOCK_MS, BLOCK_SAMPLES, CHANNELS, DEFAULT_PORT, DTYPE, SAMPLE_RATE, receive_frame
 from shared.jitter import DelayTracker, JitterBuffer
 from shared.identity import load_identity, send_hello
+from shared.discovery import discover, DISCOVERY_PORT
 
 RECONNECT_DELAY_SECONDS = 3
 # Ο Director στέλνει 50 πακέτα/s. Αν δεν έρθει τίποτα για 3 s, η σύνδεση θεωρείται
@@ -128,12 +129,14 @@ def open_connection(host: str, port: int, *,
 
 
 def run_with_reconnect(
-    host: str,
+    host: str | None,
     port: int,
     session: Callable[[socket.socket], None],
     *,
     receive_timeout: float = RECEIVE_TIMEOUT_SECONDS,
     reconnect_delay: float = RECONNECT_DELAY_SECONDS,
+    discovery_port: int = DISCOVERY_PORT,
+    discovery: Callable[..., tuple[str, int, str] | None] = discover,
     max_sessions: int | None = None,
     log: Callable[[str], None] = lambda line: print(line, flush=True),
     sleep: Callable[[float], None] = time.sleep,
@@ -144,11 +147,22 @@ def run_with_reconnect(
     max_sessions υπάρχει μόνο για τα tests (None = για πάντα).
     """
     attempts = 0
+    preferred_id: str | None = None
     while max_sessions is None or attempts < max_sessions:
         attempts += 1
         try:
-            log(f"Σύνδεση στον Director {host}:{port}...")
-            with open_connection(host, port, receive_timeout=receive_timeout) as connection:
+            target_host, target_port = host, port
+            if host is None:
+                result = discovery(udp_port=discovery_port, preferred_id=preferred_id)
+                if result is None:
+                    log("Δεν εντοπίστηκε Director στο LAN· επανάληψη ανακάλυψης.")
+                    raise ConnectionError("Ο Director δεν είναι διαθέσιμος")
+                target_host, target_port, found_id = result
+                if preferred_id is None:
+                    preferred_id = found_id
+                log(f"Discovery: Director {target_host}:{target_port} ({found_id})")
+            log(f"Σύνδεση στον Director {target_host}:{target_port}...")
+            with open_connection(target_host, target_port, receive_timeout=receive_timeout) as connection:
                 session(connection)
         except socket.timeout:
             log(f"Δεν ήρθε ήχος από τον Director για {receive_timeout:g}s· "
@@ -161,7 +175,10 @@ def run_with_reconnect(
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="School Intercom — Classroom Client (πρωτότυπο)")
-    parser.add_argument("--host", required=True, help="IP υπολογιστή Director")
+    parser.add_argument("--host", default=None,
+                        help="Προαιρετική IP Director (παρακάμπτει το UDP discovery)")
+    parser.add_argument("--discovery-port", type=int, default=DISCOVERY_PORT,
+                        help="UDP θύρα Discovery (default 50556)")
     parser.add_argument("--room", default=None, help="Αίθουσα, π.χ. C2627-Γ1 (αποθηκεύεται)")
     parser.add_argument("--identity-file", type=Path,
                         default=Path.home() / ".school-intercom" / "client.json",
@@ -187,7 +204,8 @@ def main() -> None:
                     buffer_ms=args.buffer_ms, latency=args.latency)
 
     try:
-        run_with_reconnect(args.host, args.port, session)
+        run_with_reconnect(args.host, args.port, session,
+                           discovery_port=args.discovery_port)
     except KeyboardInterrupt:
         print("\nΟ Client τερματίστηκε.", flush=True)
 
