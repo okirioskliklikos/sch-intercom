@@ -5,9 +5,11 @@
 
 1. να διαβάσουμε/ρυθμίσουμε την ένταση και το mute της προεπιλεγμένης εξόδου
    (Core Audio μέσω ``pycaw``)·
-2. να σιγάσουμε/ξεσιγάσουμε τις συνεδρίες ήχου άλλων εφαρμογών·
+2. να «σιγάσουμε» τις άλλες εφαρμογές χαμηλώνοντας σταδιακά την ένταση της
+   συνεδρίας τους στο 0% και να την επαναφέρουμε σταδιακά·
 3. να κάνουμε pause/play στα media που παίζουν (Windows System Media
-   Transport Controls μέσω ``winrt``/``winsdk``).
+   Transport Controls μέσω ``winrt``/``winsdk``): πρώτα ένταση στο 0% και μετά
+   pause· στο τέλος πρώτα play και μετά σταδιακή επαναφορά της έντασης.
 
 Κανόνας επαναφοράς: επαναφέρουμε **μόνο** ό,τι αλλάξαμε εμείς και βρίσκεται
 ακόμη στην τιμή που ορίσαμε. Αν κάτι άλλαξε χειροκίνητα στο μεταξύ, δεν το
@@ -185,82 +187,125 @@ def restore_master(master: MasterVolume, change: MasterChange, ramp_ms: float = 
     return notes
 
 
-def fade_mute(session: AppSession, ramp_ms: float, sleep: Sleep = time.sleep) -> None:
-    """Χαμηλώνει σταδιακά στο 0, κάνει mute και ξαναβάζει την αρχική ένταση.
+@dataclass
+class VolumeHold:
+    """Συνεδρία ήχου που χαμηλώσαμε εμείς στο 0% και η ένταση που είχε πριν."""
 
-    Η ένταση της εφαρμογής μένει όπως ήταν· αλλάζει μόνο το mute. Έτσι, αν ο
-    χρήστης την ξεσιγάσει χειροκίνητα, δεν τη βρίσκει «κολλημένη» στο 0.
-    """
-    if ramp_ms <= 0:
-        session.set_mute(True)
-        return
+    session: AppSession
+    original: float
+
+
+def fade_out_session(session: AppSession, ramp_ms: float,
+                     sleep: Sleep = time.sleep) -> VolumeHold:
+    """Χαμηλώνει σταδιακά την ένταση της εφαρμογής στο 0% (χωρίς σημαία mute)."""
     original = session.get_volume()
     ramp_volume(session.set_volume, original, 0.0, ramp_ms, sleep)
-    session.set_mute(True)
-    session.set_volume(original)
+    return VolumeHold(session, original)
 
 
-def fade_unmute(session: AppSession, ramp_ms: float, sleep: Sleep = time.sleep) -> None:
-    """Αντίστροφα: ένταση 0 όσο είναι σε mute, unmute και σταδιακή άνοδος."""
-    if ramp_ms <= 0:
-        session.set_mute(False)
-        return
-    original = session.get_volume()
-    session.set_volume(0.0)
-    session.set_mute(False)
-    ramp_volume(session.set_volume, 0.0, original, ramp_ms, sleep)
+def fade_in_session(hold: VolumeHold, ramp_ms: float, sleep: Sleep = time.sleep) -> str:
+    """Επαναφέρει σταδιακά την ένταση μόνο αν είναι ακόμη στο 0% που ορίσαμε."""
+    label = session_label(hold.session)
+    try:
+        current = hold.session.get_volume()
+        if not _same_volume(current, 0.0):
+            return f"{label}: ένταση {pct(current)} (χειροκίνητη αλλαγή), δεν αγγίζεται"
+        ramp_volume(hold.session.set_volume, 0.0, hold.original, ramp_ms, sleep)
+        return f"{label}: επαναφορά έντασης σε {pct(hold.original)} OK"
+    except Exception as exc:  # noqa: BLE001 - π.χ. η εφαρμογή έκλεισε
+        return f"{label}: ΣΦΑΛΜΑ επαναφοράς (ίσως έκλεισε): {exc!r}"
+
+
+def silence_session(session: AppSession, ramp_ms: float,
+                    sleep: Sleep = time.sleep) -> tuple[VolumeHold | None, str]:
+    """Φέρνει μία συνεδρία στο 0%, εκτός αν είναι ήδη σε mute ή στο 0%."""
+    label = session_label(session)
+    try:
+        if session.get_mute():
+            return None, f"{label}: ήταν ήδη σε mute, δεν αγγίζεται"
+        if _same_volume(session.get_volume(), 0.0):
+            return None, f"{label}: ήταν ήδη στο 0%, δεν αγγίζεται"
+        hold = fade_out_session(session, ramp_ms, sleep)
+        if _same_volume(session.get_volume(), 0.0):
+            return hold, f"{label}: {pct(hold.original)} → 0% OK"
+        return None, f"{label}: η μείωση στο 0% δεν έπιασε"
+    except Exception as exc:  # noqa: BLE001 - η αναφορά πρέπει να συνεχίσει
+        return None, f"{label}: ΣΦΑΛΜΑ μείωσης έντασης: {exc!r}"
 
 
 def mute_other_sessions(sessions: Iterable[AppSession], own_pid: int, ramp_ms: float = 0,
-                        sleep: Sleep = time.sleep) -> tuple[list[AppSession], list[str]]:
-    """Σιγάζει όσες συνεδρίες δεν είναι ήδη σιγασμένες, εκτός από τη δική μας.
+                        sleep: Sleep = time.sleep) -> tuple[list[VolumeHold], list[str]]:
+    """«Σίγαση» = σταδιακή μείωση της έντασης κάθε άλλης εφαρμογής στο 0%.
 
-    Επιστρέφει τις συνεδρίες που σιγάσαμε εμείς και σημειώσεις για την αναφορά.
+    Δεν χρησιμοποιείται η σημαία mute, ώστε η επαναφορά να γίνεται επίσης
+    σταδιακά. Επιστρέφει τις συνεδρίες που χαμηλώσαμε εμείς.
     """
-    muted_by_us: list[AppSession] = []
+    holds: list[VolumeHold] = []
     notes: list[str] = []
     for session in sessions:
-        label = session_label(session)
         if session.pid == own_pid:
-            notes.append(f"{label}: παραλείπεται (το ίδιο το script)")
+            notes.append(f"{session_label(session)}: παραλείπεται (το ίδιο το script)")
             continue
-        try:
-            if session.get_mute():
-                notes.append(f"{label}: ήταν ήδη σε mute, δεν αγγίζεται")
-                continue
-            fade_mute(session, ramp_ms, sleep)
-            if session.get_mute():
-                muted_by_us.append(session)
-                notes.append(f"{label}: σίγαση OK")
-            else:
-                notes.append(f"{label}: η σίγαση δεν έπιασε")
-        except Exception as exc:  # noqa: BLE001 - η αναφορά πρέπει να συνεχίσει
-            notes.append(f"{label}: ΣΦΑΛΜΑ σίγασης: {exc!r}")
-    return muted_by_us, notes
+        hold, note = silence_session(session, ramp_ms, sleep)
+        notes.append(note)
+        if hold is not None:
+            holds.append(hold)
+    return holds, notes
 
 
-def unmute_our_sessions(muted_by_us: Iterable[AppSession], ramp_ms: float = 0,
+def unmute_our_sessions(holds: Iterable[VolumeHold], ramp_ms: float = 0,
                         sleep: Sleep = time.sleep) -> list[str]:
-    """Ξεσιγάζει μόνο όσες σιγάσαμε εμείς και είναι ακόμη σιγασμένες."""
-    notes: list[str] = []
-    for session in muted_by_us:
-        label = session_label(session)
-        try:
-            if not session.get_mute():
-                notes.append(f"{label}: ήδη χωρίς mute (χειροκίνητη αλλαγή), δεν αγγίζεται")
-                continue
-            fade_unmute(session, ramp_ms, sleep)
-            notes.append(f"{label}: επαναφορά OK")
-        except Exception as exc:  # noqa: BLE001 - π.χ. η εφαρμογή έκλεισε
-            notes.append(f"{label}: ΣΦΑΛΜΑ επαναφοράς (ίσως έκλεισε): {exc!r}")
-    return notes
+    """Επαναφέρει σταδιακά μόνο όσες χαμηλώσαμε εμείς και είναι ακόμη στο 0%."""
+    return [fade_in_session(hold, ramp_ms, sleep) for hold in holds]
+
+
+def _process_stem(name: str) -> str:
+    name = name.lower()
+    return name[:-4] if name.endswith(".exe") else name
+
+
+def match_audio_sessions(app_id: str, audio_sessions: Iterable[AppSession],
+                         own_pid: int = -1) -> list[AppSession]:
+    """Βρίσκει τις συνεδρίες ήχου της εφαρμογής ενός media session.
+
+    Το Windows δίνει για τα media ένα AppUserModelID (π.χ. «Chrome», «MSEdge»,
+    «Spotify.exe»), όχι PID. Ταιριάζουμε με το όνομα διεργασίας χωρίς «.exe».
+    Ορισμένες εφαρμογές (π.χ. Firefox) δίνουν κωδικό που δεν ταιριάζει· τότε
+    γίνεται pause χωρίς σταδιακή μείωση και καταγράφεται στην αναφορά.
+    """
+    target = app_id.lower()
+    matches = []
+    for session in audio_sessions:
+        if session.pid in (0, own_pid):
+            continue
+        stem = _process_stem(session.name)
+        if len(stem) >= 3 and stem in target:
+            matches.append(session)
+    return matches
+
+
+@dataclass
+class PausedMedia:
+    session: MediaSession
+    holds: list[VolumeHold] = field(default_factory=list)
 
 
 async def pause_playing_media(
-    sessions: Iterable[MediaSession], settle_seconds: float = 1.0
-) -> tuple[list[MediaSession], list[str]]:
-    """Κάνει pause όσα παίζουν και επιστρέφει όσα πέρασαν πράγματι σε Paused."""
-    candidates: list[MediaSession] = []
+    sessions: Iterable[MediaSession],
+    audio_sessions: Iterable[AppSession] = (),
+    *,
+    own_pid: int = -1,
+    ramp_ms: float = 0,
+    sleep: Sleep = time.sleep,
+    settle_seconds: float = 1.0,
+) -> tuple[list[PausedMedia], list[str]]:
+    """Για κάθε media που παίζει: σταδιακά στο 0%, μετά pause.
+
+    Επιστρέφει όσα πέρασαν πράγματι σε Paused, μαζί με τις εντάσεις που
+    χαμηλώσαμε. Αν το pause αποτύχει, η ένταση επανέρχεται αμέσως.
+    """
+    audio_sessions = list(audio_sessions)
+    candidates: list[PausedMedia] = []
     notes: list[str] = []
     for session in sessions:
         status = session.status()
@@ -270,47 +315,67 @@ async def pause_playing_media(
         if not session.can_pause():
             notes.append(f"{session.app_id}: παίζει αλλά ΔΕΝ δηλώνει δυνατότητα pause")
             continue
+        entry = PausedMedia(session)
+        matched = match_audio_sessions(session.app_id, audio_sessions, own_pid)
+        if not matched:
+            notes.append(f"{session.app_id}: δεν βρέθηκε συνεδρία ήχου, pause χωρίς σταδιακή μείωση")
+        for audio in matched:
+            hold, note = silence_session(audio, ramp_ms, sleep)
+            notes.append(f"{session.app_id}: {note}")
+            if hold is not None:
+                entry.holds.append(hold)
         try:
             accepted = await session.pause()
         except Exception as exc:  # noqa: BLE001
             notes.append(f"{session.app_id}: ΣΦΑΛΜΑ pause: {exc!r}")
-            continue
+            accepted = False
         if not accepted:
-            notes.append(f"{session.app_id}: το pause απορρίφθηκε")
+            notes.append(f"{session.app_id}: το pause απέτυχε, επαναφορά έντασης")
+            notes.extend(unmute_our_sessions(entry.holds, ramp_ms, sleep))
             continue
-        candidates.append(session)
+        candidates.append(entry)
 
     if candidates and settle_seconds > 0:
         await asyncio.sleep(settle_seconds)
 
-    paused_by_us: list[MediaSession] = []
-    for session in candidates:
-        status = session.status()
+    paused_by_us: list[PausedMedia] = []
+    for entry in candidates:
+        status = entry.session.status()
         if status == STATUS_PAUSED:
-            paused_by_us.append(session)
-            notes.append(f"{session.app_id}: pause OK")
+            paused_by_us.append(entry)
+            notes.append(f"{entry.session.app_id}: pause OK")
         else:
             notes.append(
-                f"{session.app_id}: δέχτηκε το pause αλλά η κατάσταση είναι {status_name(status)}"
+                f"{entry.session.app_id}: δέχτηκε το pause αλλά η κατάσταση είναι "
+                f"{status_name(status)}, επαναφορά έντασης"
             )
+            notes.extend(unmute_our_sessions(entry.holds, ramp_ms, sleep))
     return paused_by_us, notes
 
 
-async def resume_our_media(paused_by_us: Iterable[MediaSession]) -> list[str]:
-    """Κάνει play μόνο όσα σταματήσαμε εμείς και είναι ακόμη σε Paused."""
+async def resume_our_media(paused_by_us: Iterable[PausedMedia], *, ramp_ms: float = 0,
+                           sleep: Sleep = time.sleep) -> list[str]:
+    """Play αμέσως (με ένταση ακόμη 0%) και μετά σταδιακή επαναφορά της έντασης.
+
+    Play γίνεται μόνο σε όσα σταματήσαμε εμείς και είναι ακόμη σε Paused. Η
+    ένταση επανέρχεται σε κάθε περίπτωση αν είναι ακόμη στο 0% που ορίσαμε,
+    ώστε να ακούγεται και όταν ο χρήστης πάτησε play μόνος του.
+    """
     notes: list[str] = []
-    for session in paused_by_us:
+    for entry in paused_by_us:
+        app_id = entry.session.app_id
         try:
-            status = session.status()
+            status = entry.session.status()
             if status != STATUS_PAUSED:
                 notes.append(
-                    f"{session.app_id}: κατάσταση {status_name(status)} (χειροκίνητη αλλαγή), δεν αγγίζεται"
+                    f"{app_id}: κατάσταση {status_name(status)} (χειροκίνητη αλλαγή), χωρίς play"
                 )
-                continue
-            accepted = await session.play()
-            notes.append(f"{session.app_id}: play {'OK' if accepted else 'απορρίφθηκε'}")
+            else:
+                accepted = await entry.session.play()
+                notes.append(f"{app_id}: play {'OK' if accepted else 'απορρίφθηκε'}")
         except Exception as exc:  # noqa: BLE001 - π.χ. το tab έκλεισε
-            notes.append(f"{session.app_id}: ΣΦΑΛΜΑ play (ίσως έκλεισε): {exc!r}")
+            notes.append(f"{app_id}: ΣΦΑΛΜΑ play (ίσως έκλεισε): {exc!r}")
+        notes.extend(f"{app_id}: {note}" for note in unmute_our_sessions(entry.holds, ramp_ms, sleep))
     return notes
 
 
@@ -528,7 +593,7 @@ def check_master(report: Report, args, wait: Callable[[str], None]) -> None:
 
 
 def check_sessions(report: Report, args, wait: Callable[[str], None]) -> None:
-    report.section("2. Συνεδρίες ήχου εφαρμογών (σίγαση ανά εφαρμογή)")
+    report.section("2. Συνεδρίες ήχου εφαρμογών (σταδιακά στο 0% και πίσω)")
     try:
         sessions = load_pycaw_sessions()
     except Exception as exc:  # noqa: BLE001
@@ -546,14 +611,14 @@ def check_sessions(report: Report, args, wait: Callable[[str], None]) -> None:
         report.add("(dry-run: χωρίς αλλαγές)")
         return
 
-    muted_by_us: list[AppSession] = []
+    holds: list[VolumeHold] = []
     try:
-        muted_by_us, notes = mute_other_sessions(sessions, os.getpid(), args.ramp_ms)
+        holds, notes = mute_other_sessions(sessions, os.getpid(), args.ramp_ms)
         for note in notes:
             report.add(f"Σίγαση: {note}")
         wait("Σταμάτησε να ακούγεται ο ήχος των εφαρμογών;")
     finally:
-        for note in unmute_our_sessions(muted_by_us, args.ramp_ms):
+        for note in unmute_our_sessions(holds, args.ramp_ms):
             report.add(f"Επαναφορά: {note}")
 
 
@@ -583,9 +648,16 @@ def check_media(report: Report, args, wait: Callable[[str], None]) -> None:
             report.add("(dry-run: χωρίς αλλαγές)")
             return
 
-        paused_by_us: list[MediaSession] = []
         try:
-            paused_by_us, notes = await pause_playing_media(sessions)
+            audio_sessions = load_pycaw_sessions()
+        except Exception as exc:  # noqa: BLE001
+            report.add(f"Χωρίς συνεδρίες ήχου ({exc!r}): pause χωρίς σταδιακή μείωση")
+            audio_sessions = []
+
+        paused_by_us: list[PausedMedia] = []
+        try:
+            paused_by_us, notes = await pause_playing_media(
+                sessions, audio_sessions, own_pid=os.getpid(), ramp_ms=args.ramp_ms)
             for note in notes:
                 report.add(f"Pause: {note}")
             if not paused_by_us:
@@ -595,7 +667,7 @@ def check_media(report: Report, args, wait: Callable[[str], None]) -> None:
             # μεταξύ, και έτσι το Ctrl+C φτάνει αμέσως στο finally.
             wait("Σταμάτησαν (pause) τα media που έπαιζαν;")
         finally:
-            for note in await resume_our_media(paused_by_us):
+            for note in await resume_our_media(paused_by_us, ramp_ms=args.ramp_ms):
                 report.add(f"Συνέχιση: {note}")
 
     try:

@@ -32,13 +32,14 @@ class FakeMaster:
 
 
 class FakeSession:
-    def __init__(self, name, pid, muted=False, mute_works=True):
+    def __init__(self, name, pid, muted=False, mute_works=True, volume=1.0, volume_works=True):
         self.name = name
         self.pid = pid
         self.muted = muted
         self.mute_works = mute_works
         self.closed = False
-        self.volume = 1.0
+        self.volume = volume
+        self.volume_works = volume_works
         self.volume_history = []
 
     def get_mute(self):
@@ -58,7 +59,8 @@ class FakeSession:
     def set_volume(self, value):
         if self.closed:
             raise OSError("session closed")
-        self.volume = value
+        if self.volume_works:
+            self.volume = value
         self.volume_history.append(value)
 
 
@@ -126,72 +128,151 @@ class MasterVolumeTests(unittest.TestCase):
         self.assertEqual(master.volume, 0.8)
 
 
-class SessionMuteTests(unittest.TestCase):
-    def test_mutes_others_and_restores_only_ours(self):
-        own = FakeSession("python.exe", 100)
-        chrome = FakeSession("chrome.exe", 200)
-        already = FakeSession("spotify.exe", 300, muted=True)
-        muted, _ = wac.mute_other_sessions([own, chrome, already], own_pid=100)
-        self.assertEqual(muted, [chrome])
-        self.assertFalse(own.muted)
-        self.assertTrue(chrome.muted)
-        wac.unmute_our_sessions(muted)
-        self.assertFalse(chrome.muted)
-        self.assertTrue(already.muted)  # ήταν σε mute πριν, μένει σε mute
+NO_SLEEP = {"sleep": lambda _: None}
 
-    def test_manual_unmute_is_respected(self):
-        chrome = FakeSession("chrome.exe", 200)
-        muted, _ = wac.mute_other_sessions([chrome], own_pid=1)
-        chrome.muted = False  # ο χρήστης το ξεσίγασε
-        chrome.mute_works = False  # αν το αγγίζαμε, θα φαινόταν
-        notes = wac.unmute_our_sessions(muted)
+
+class SessionVolumeTests(unittest.TestCase):
+    def test_ramps_others_to_zero_and_back(self):
+        own = FakeSession("python.exe", 100)
+        chrome = FakeSession("chrome.exe", 200, volume=0.7)
+        already = FakeSession("spotify.exe", 300, muted=True)
+        holds, _ = wac.mute_other_sessions([own, chrome, already], own_pid=100, ramp_ms=150, **NO_SLEEP)
+        self.assertEqual([h.session for h in holds], [chrome])
+        self.assertEqual(chrome.volume, 0.0)
+        self.assertFalse(chrome.muted)  # δεν χρησιμοποιείται η σημαία mute
+        self.assertEqual(own.volume_history, [])
+        self.assertEqual(already.volume_history, [])
+        self.assertGreater(len(chrome.volume_history), 10)  # σταδιακά, όχι με ένα βήμα
+        wac.unmute_our_sessions(holds, ramp_ms=150, **NO_SLEEP)
+        self.assertAlmostEqual(chrome.volume, 0.7)
+        self.assertTrue(already.muted)
+
+    def test_already_zero_is_untouched(self):
+        silent = FakeSession("game.exe", 1, volume=0.0)
+        holds, notes = wac.mute_other_sessions([silent], own_pid=99, **NO_SLEEP)
+        self.assertEqual(holds, [])
+        self.assertIn("ήδη στο 0%", notes[0])
+
+    def test_manual_volume_change_is_respected(self):
+        chrome = FakeSession("chrome.exe", 200, volume=0.7)
+        holds, _ = wac.mute_other_sessions([chrome], own_pid=1, **NO_SLEEP)
+        chrome.volume = 0.4  # ο χρήστης ανέβασε την ένταση της εφαρμογής
+        notes = wac.unmute_our_sessions(holds, **NO_SLEEP)
+        self.assertEqual(chrome.volume, 0.4)
         self.assertIn("δεν αγγίζεται", notes[0])
 
-    def test_failed_mute_not_tracked(self):
-        stubborn = FakeSession("game.exe", 400, mute_works=False)
-        muted, notes = wac.mute_other_sessions([stubborn], own_pid=1)
-        self.assertEqual(muted, [])
+    def test_failed_volume_change_not_tracked(self):
+        stubborn = FakeSession("game.exe", 400, volume_works=False)
+        holds, notes = wac.mute_other_sessions([stubborn], own_pid=1, **NO_SLEEP)
+        self.assertEqual(holds, [])
         self.assertIn("δεν έπιασε", notes[0])
 
     def test_closed_session_does_not_abort_restore(self):
-        a = FakeSession("a.exe", 1)
-        b = FakeSession("b.exe", 2)
-        muted, _ = wac.mute_other_sessions([a, b], own_pid=99)
+        a = FakeSession("a.exe", 1, volume=0.5)
+        b = FakeSession("b.exe", 2, volume=0.5)
+        holds, _ = wac.mute_other_sessions([a, b], own_pid=99, **NO_SLEEP)
         a.closed = True
-        notes = wac.unmute_our_sessions(muted)
+        notes = wac.unmute_our_sessions(holds, **NO_SLEEP)
         self.assertIn("ΣΦΑΛΜΑ", notes[0])
-        self.assertFalse(b.muted)
+        self.assertAlmostEqual(b.volume, 0.5)
+
+
+class MatchTests(unittest.TestCase):
+    def test_matches_by_process_name(self):
+        chrome = FakeSession("chrome.exe", 10)
+        edge = FakeSession("msedge.exe", 11)
+        spotify = FakeSession("Spotify.exe", 12)
+        system = FakeSession("Ήχοι συστήματος", 0)
+        audio = [chrome, edge, spotify, system]
+        self.assertEqual(wac.match_audio_sessions("Chrome", audio), [chrome])
+        self.assertEqual(wac.match_audio_sessions("MSEdge", audio), [edge])
+        self.assertEqual(wac.match_audio_sessions("Spotify.exe", audio), [spotify])
+        self.assertEqual(
+            wac.match_audio_sessions("SpotifyAB.SpotifyMusic_zpdnekdrzrea0!Spotify", audio), [spotify])
+        self.assertEqual(wac.match_audio_sessions("308046B0AF4A39CB", audio), [])
 
 
 class MediaPauseTests(unittest.TestCase):
     def run_async(self, coro):
         return asyncio.run(coro)
 
+    def pause(self, media, audio=(), **kw):
+        return self.run_async(wac.pause_playing_media(
+            media, audio, ramp_ms=150, settle_seconds=0, **NO_SLEEP, **kw))
+
+    def resume(self, paused):
+        return self.run_async(wac.resume_our_media(paused, ramp_ms=150, **NO_SLEEP))
+
+    def test_volume_to_zero_then_pause_then_play_then_volume(self):
+        events = []
+        chrome_audio = FakeSession("chrome.exe", 10, volume=0.8)
+        chrome_audio.set_volume = lambda v: (events.append(("vol", round(v, 3))),
+                                             setattr(chrome_audio, "volume", v))
+        media = FakeMedia("Chrome")
+        orig_pause, orig_play = media.pause, media.play
+
+        async def pause():
+            events.append(("pause", chrome_audio.volume))
+            return await orig_pause()
+
+        async def play():
+            events.append(("play", chrome_audio.volume))
+            return await orig_play()
+
+        media.pause, media.play = pause, play
+        paused, _ = self.pause([media], [chrome_audio])
+        self.assertEqual([p.session for p in paused], [media])
+        self.assertEqual(events[-1], ("pause", 0.0))  # pause μόνο αφού έφτασε στο 0
+        self.assertGreater(len(events), 10)  # σταδιακή μείωση πριν το pause
+        self.assertEqual(chrome_audio.volume, 0.0)  # μένει στο 0 όσο είναι σε pause
+        events.clear()
+        self.resume(paused)
+        self.assertEqual(events[0], ("play", 0.0))  # play αμέσως, με ένταση 0
+        self.assertEqual(events[-1], ("vol", 0.8))  # μετά σταδιακά στην αρχική
+        self.assertEqual(media.status(), wac.STATUS_PLAYING)
+
     def test_pauses_playing_and_resumes_only_ours(self):
         playing = FakeMedia("Spotify.exe")
         paused_before = FakeMedia("Chrome", status=wac.STATUS_PAUSED)
-        paused, _ = self.run_async(wac.pause_playing_media([playing, paused_before], settle_seconds=0))
-        self.assertEqual(paused, [playing])
-        self.run_async(wac.resume_our_media(paused))
+        paused, _ = self.pause([playing, paused_before])
+        self.assertEqual([p.session for p in paused], [playing])
+        self.resume(paused)
         self.assertEqual(playing.status(), wac.STATUS_PLAYING)
-        self.assertEqual(paused_before.status(), wac.STATUS_PAUSED)
         self.assertEqual(paused_before.play_calls, 0)
 
-    def test_manual_resume_or_stop_is_respected(self):
-        playing = FakeMedia("MSEdge")
-        paused, _ = self.run_async(wac.pause_playing_media([playing], settle_seconds=0))
-        playing._status = 3  # Stopped
-        self.run_async(wac.resume_our_media(paused))
-        self.assertEqual(playing.play_calls, 0)
+    def test_manual_play_still_restores_volume(self):
+        audio = FakeSession("msedge.exe", 10, volume=0.6)
+        media = FakeMedia("MSEdge")
+        paused, _ = self.pause([media], [audio])
+        media._status = wac.STATUS_PLAYING  # ο χρήστης πάτησε play μόνος του
+        notes = self.resume(paused)
+        self.assertEqual(media.play_calls, 0)
+        self.assertAlmostEqual(audio.volume, 0.6)  # αλλιώς θα έπαιζε χωρίς ήχο
+        self.assertIn("χωρίς play", "\n".join(notes))
 
-    def test_reports_apps_without_pause(self):
-        no_pause = FakeMedia("Radio", pause_enabled=False)
+    def test_manual_stop_is_respected(self):
+        media = FakeMedia("MSEdge")
+        paused, _ = self.pause([media])
+        media._status = 3  # Stopped
+        self.resume(paused)
+        self.assertEqual(media.play_calls, 0)
+
+    def test_failed_pause_restores_volume(self):
+        audio = FakeSession("weird.exe", 10, volume=0.9)
         ignores = FakeMedia("Weird", obeys=False)
-        paused, notes = self.run_async(wac.pause_playing_media([no_pause, ignores], settle_seconds=0))
+        no_pause = FakeMedia("Radio", pause_enabled=False)
+        paused, notes = self.pause([no_pause, ignores], [audio])
         self.assertEqual(paused, [])
+        self.assertAlmostEqual(audio.volume, 0.9)
         joined = "\n".join(notes)
         self.assertIn("ΔΕΝ δηλώνει δυνατότητα pause", joined)
         self.assertIn("δέχτηκε το pause αλλά", joined)
+
+    def test_unmatched_app_is_reported(self):
+        media = FakeMedia("308046B0AF4A39CB")
+        paused, notes = self.pause([media], [FakeSession("firefox.exe", 10)])
+        self.assertEqual(len(paused), 1)
+        self.assertIn("χωρίς σταδιακή μείωση", "\n".join(notes))
 
 
 class RampTests(unittest.TestCase):
@@ -211,28 +292,10 @@ class RampTests(unittest.TestCase):
 
     def test_master_with_ramp_restores(self):
         master = FakeMaster(0.8)
-        change = wac.apply_master(master, 0.3, ramp_ms=150, sleep=lambda _: None)
+        change = wac.apply_master(master, 0.3, ramp_ms=150, **NO_SLEEP)
         self.assertAlmostEqual(master.volume, 0.3)
-        wac.restore_master(master, change, ramp_ms=150, sleep=lambda _: None)
+        wac.restore_master(master, change, ramp_ms=150, **NO_SLEEP)
         self.assertAlmostEqual(master.volume, 0.8)
-
-    def test_fade_mute_keeps_app_volume(self):
-        chrome = FakeSession("chrome.exe", 200)
-        chrome.volume = 0.7
-        muted, _ = wac.mute_other_sessions([chrome], own_pid=1, ramp_ms=150, sleep=lambda _: None)
-        self.assertTrue(chrome.muted)
-        self.assertEqual(chrome.volume, 0.7)  # μένει η αρχική ένταση
-        self.assertEqual(min(chrome.volume_history), 0.0)  # χαμήλωσε σταδιακά πριν το mute
-        wac.unmute_our_sessions(muted, ramp_ms=150, sleep=lambda _: None)
-        self.assertFalse(chrome.muted)
-        self.assertAlmostEqual(chrome.volume, 0.7)
-
-    def test_manual_unmute_with_ramp_not_stuck_at_zero(self):
-        chrome = FakeSession("chrome.exe", 200)
-        muted, _ = wac.mute_other_sessions([chrome], own_pid=1, ramp_ms=150, sleep=lambda _: None)
-        chrome.muted = False  # ο χρήστης ξεσίγασε
-        wac.unmute_our_sessions(muted, ramp_ms=150, sleep=lambda _: None)
-        self.assertEqual(chrome.volume, 1.0)
 
 
 class GuardTests(unittest.TestCase):
