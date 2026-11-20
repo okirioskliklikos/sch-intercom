@@ -9,8 +9,10 @@ import threading
 import time
 from collections.abc import Callable
 
-from shared.audio import BLOCK_BYTES, encode_frame
-from shared.control import HEARTBEAT_TIMEOUT_SECONDS, heartbeat_receiver
+from shared.audio import (encode_frame, encode_control, MESSAGE_KEEPALIVE,
+                          MESSAGE_STREAM_STOP)
+from shared.control import (HEARTBEAT_TIMEOUT_SECONDS, KEEPALIVE_INTERVAL_SECONDS,
+                            heartbeat_receiver)
 from shared.identity import validate_identity
 
 MAX_CLIENTS = 32
@@ -80,6 +82,14 @@ class AudioBroadcaster:
         with self._lock:
             self._selected_rooms = None if rooms is None else frozenset(rooms)
             self._selected_clients = None if client_ids is None else frozenset(client_ids)
+            for session in self._sessions.values():
+                session.set_selected(self._is_selected(session))
+
+    def _is_selected(self, session: "_ClientSession") -> bool:
+        rooms, ids = self._selected_rooms, self._selected_clients
+        return ((rooms is None and ids is None)
+                or (rooms is not None and session.room in rooms)
+                or (ids is not None and session.client_id in ids))
 
     def add_client(self, connection: socket.socket, client_id: str, room: str,
                    address: object = "local") -> bool:
@@ -93,6 +103,7 @@ class AudioBroadcaster:
             session = _ClientSession(client_id, room, connection, address,
                                      self.queue_blocks, self._remove_client,
                                      self._record_heartbeat, self.heartbeat_timeout)
+            session.selected = self._is_selected(session)
             self._sessions[client_id] = session
             self._offline.pop(client_id, None)
         if existing is not None:
@@ -109,23 +120,18 @@ class AudioBroadcaster:
         return True
 
     def publish(self, pcm: bytes, timestamp_us: int) -> None:
+        """Μόνο επιλεγμένοι λαμβάνουν PCM· οι άλλοι λαμβάνουν keepalive από το sender."""
         with self._lock:
             if self._closed:
                 return
             seq = self._sequence
             self._sequence = (seq + 1) & 0xFFFFFFFF
-            rooms, ids = self._selected_rooms, self._selected_clients
             sessions = tuple(self._sessions.values())
-        voice = encode_frame(pcm, seq, timestamp_us)
-        silence = encode_frame(bytes(BLOCK_BYTES), seq, timestamp_us)
-        for session in sessions:
-            selected = ((rooms is None and ids is None)
-                        or (rooms is not None and session.room in rooms)
-                        or (ids is not None and session.client_id in ids))
-            # Συνεχής ροή σιωπής σε μη επιλεγμένους, ώστε το timeout λήψης
-            # του Client να μη θεωρήσει άδικα ότι χάθηκε η σύνδεση.
-            if session.enqueue(voice if selected else silence):
-                with self._lock:
+            # Μετάβαση και enqueue γίνονται με ένα lock: δεν περνά PCM μετά το STOP.
+            voice = encode_frame(pcm, seq, timestamp_us)
+            for session in sessions:
+                session.set_selected(self._is_selected(session))
+                if session.selected and session.enqueue(voice):
                     self.dropped += 1
 
     def close(self) -> None:
@@ -166,6 +172,8 @@ class _ClientSession:
         self.on_heartbeat = on_heartbeat or (lambda session, at: None)
         self.heartbeat_timeout = heartbeat_timeout
         self.last_heartbeat = time.monotonic()
+        self.selected = True
+        self.bytes_sent = 0
         self.stopped = threading.Event()
         self.thread = threading.Thread(target=self._run, daemon=True,
                                        name=f"audio-client-{client_id[:8]}")
@@ -193,6 +201,12 @@ class _ClientSession:
                 pass
             return True
 
+    def set_selected(self, selected: bool) -> None:
+        """Οριοθετεί μία ανακοίνωση στην ίδια FIFO ουρά με τα PCM."""
+        if self.selected and not selected:
+            self.enqueue(encode_control(MESSAGE_STREAM_STOP))
+        self.selected = selected
+
     def stop(self) -> None:
         self.stopped.set()
         try:
@@ -217,13 +231,18 @@ class _ClientSession:
             self.on_disconnect(self)
 
     def _run(self) -> None:
+        last_keepalive = time.monotonic()
         try:
             while not self.stopped.is_set():
                 try:
                     frame = self.pending.get(timeout=0.1)
                 except queue.Empty:
-                    continue
+                    if self.selected or time.monotonic() - last_keepalive < KEEPALIVE_INTERVAL_SECONDS:
+                        continue
+                    frame = encode_control(MESSAGE_KEEPALIVE)
+                    last_keepalive = time.monotonic()
                 self.connection.sendall(frame)
+                self.bytes_sent += len(frame)
         except OSError:
             pass
         finally:
