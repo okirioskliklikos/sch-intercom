@@ -66,7 +66,7 @@ def periodic_stats(stats: DirectorStats, broadcaster: AudioBroadcaster,
 def show_help() -> str:
     return """Διαθέσιμες εντολές:
   help, ?       Εμφάνιση διαθέσιμων εντολών
-  status        Συνδεδεμένοι Clients και αίθουσες
+  status        Online/Offline Clients, αίθουσες και τελευταίο heartbeat
   stats         Εμφάνιση στατιστικών μία φορά
   stats on      Στατιστικά κάθε 5 δευτερόλεπτα
   stats off     Διακοπή περιοδικών στατιστικών (προεπιλογή)
@@ -181,10 +181,12 @@ def command_loop(broadcaster: AudioBroadcaster, stop: threading.Event,
                 print("Τερματισμός Director...", flush=True)
                 return
             elif command == "status" and not values:
-                clients = broadcaster.clients_snapshot()
-                print("Συνδεδεμένοι Clients:", len(clients), flush=True)
-                for client_id, room in clients:
-                    print(f"  {client_id} | {room}", flush=True)
+                clients = broadcaster.status_snapshot()
+                online = sum(1 for _, _, active, _ in clients if active)
+                print(f"Clients online: {online} | offline: {len(clients) - online}", flush=True)
+                for client_id, room, active, age in clients:
+                    state = "Online" if active else "Offline"
+                    print(f"  {client_id} | {room} | {state} | τελευταίο heartbeat πριν {age:.1f}s", flush=True)
             elif command == "all" and not values:
                 broadcaster.set_targets()
                 print("Μετάδοση σε όλους τους Clients", flush=True)
