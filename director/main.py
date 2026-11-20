@@ -13,7 +13,7 @@ import time
 
 from director.broadcast import AudioBroadcaster, MAX_CLIENTS
 from shared.discovery import announce, director_id, DISCOVERY_PORT
-from shared.identity import receive_hello
+from shared.identity import ProtocolMismatch, receive_hello, send_welcome
 from shared.audio import BLOCK_BYTES, BLOCK_SAMPLES, CHANNELS, DEFAULT_PORT, DTYPE, SAMPLE_RATE
 
 # Κοινή ουρά λήψης του μικροφώνου (5 x 20 ms = 100 ms).
@@ -145,6 +145,17 @@ def accept_clients(server: socket.socket, broadcaster: AudioBroadcaster,
         connection.settimeout(2.0)
         try:
             client_id, room = receive_hello(connection)
+            send_welcome(connection, accepted=True)
+        except ProtocolMismatch as exc:
+            print(f"[Director] Απόρριψη {address}: {exc}", flush=True)
+            if exc.client_version is not None:
+                # Ο νεότερος/διαφορετικός Client καταλαβαίνει την απάντηση· ο παλιός όχι.
+                try:
+                    send_welcome(connection, accepted=False)
+                except OSError:
+                    pass
+            connection.close()
+            continue
         except (OSError, EOFError, ValueError) as exc:
             print(f"[Director] Μη αποδεκτή δήλωση {address}: {exc}", flush=True)
             connection.close()

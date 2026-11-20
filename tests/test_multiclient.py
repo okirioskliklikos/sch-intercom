@@ -9,7 +9,7 @@ import uuid
 from director.broadcast import AudioBroadcaster, _ClientSession
 from director.main import accept_clients
 from shared.audio import BLOCK_BYTES, receive_frame
-from shared.identity import send_hello
+from shared.identity import receive_welcome, send_hello
 
 
 def pcm(n):
@@ -46,6 +46,7 @@ class MultiClientTests(unittest.TestCase):
             client_id = str(uuid.UUID(int=index + 1))
             room = "C2627-Γ1" if index % 2 == 0 else "C2627-Γ2"
             send_hello(s, client_id, room)
+            receive_welcome(s)
             self.clients.append(s)
             self.identities.append((client_id, room))
         end = time.monotonic() + 3
@@ -148,6 +149,7 @@ class MultiClientTests(unittest.TestCase):
         new = socket.create_connection(self.server.getsockname(), timeout=2)
         new.settimeout(2)
         send_hello(new, *self.identities[0])
+        receive_welcome(new)
         self.clients.append(new)
         end = time.monotonic() + 2
         while time.monotonic() < end:
@@ -169,6 +171,7 @@ class MultiClientTests(unittest.TestCase):
         extra.settimeout(2)
         self.clients.append(extra)
         send_hello(extra, str(uuid.UUID(int=200)), "C2627-Γ3")
+        receive_welcome(extra)
         self.assertEqual(extra.recv(1), b"")
         self.assertEqual(self.broadcast.client_count, 2)
 

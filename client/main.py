@@ -13,7 +13,7 @@ from collections.abc import Callable
 
 from shared.audio import BLOCK_BYTES, BLOCK_MS, BLOCK_SAMPLES, CHANNELS, DEFAULT_PORT, DTYPE, SAMPLE_RATE, receive_frame
 from shared.jitter import DelayTracker, JitterBuffer
-from shared.identity import load_identity, send_hello
+from shared.identity import load_identity, receive_welcome, send_hello
 from shared.discovery import discover, DISCOVERY_PORT
 from shared.control import heartbeat_sender
 
@@ -202,6 +202,7 @@ def main() -> None:
 
     def session(connection: socket.socket) -> None:
         send_hello(connection, client_id, room)
+        receive_welcome(connection)
         heartbeat_stop = threading.Event()
         sender = threading.Thread(target=heartbeat_sender, args=(connection, heartbeat_stop),
                                   name="client-heartbeat", daemon=True)
