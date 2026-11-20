@@ -5,12 +5,14 @@
 """
 
 import argparse
+from pathlib import Path
 import socket
 import time
 from collections.abc import Callable
 
 from shared.audio import BLOCK_BYTES, BLOCK_MS, BLOCK_SAMPLES, CHANNELS, DEFAULT_PORT, DTYPE, SAMPLE_RATE, receive_frame
 from shared.jitter import DelayTracker, JitterBuffer
+from shared.identity import load_identity, send_hello
 
 RECONNECT_DELAY_SECONDS = 3
 # Ο Director στέλνει 50 πακέτα/s. Αν δεν έρθει τίποτα για 3 s, η σύνδεση θεωρείται
@@ -160,6 +162,10 @@ def run_with_reconnect(
 def main() -> None:
     parser = argparse.ArgumentParser(description="School Intercom — Classroom Client (πρωτότυπο)")
     parser.add_argument("--host", required=True, help="IP υπολογιστή Director")
+    parser.add_argument("--room", default=None, help="Αίθουσα, π.χ. C2627-Γ1 (αποθηκεύεται)")
+    parser.add_argument("--identity-file", type=Path,
+                        default=Path.home() / ".school-intercom" / "client.json",
+                        help="Τοπικό αρχείο σταθερής ταυτότητας")
     parser.add_argument("--port", type=int, default=DEFAULT_PORT)
     parser.add_argument("--device", type=int, default=None, help="Αριθμός συσκευής εξόδου PortAudio")
     parser.add_argument(
@@ -172,12 +178,16 @@ def main() -> None:
     )
     args = parser.parse_args()
 
+    client_id, room = load_identity(args.identity_file, room_override=args.room)
+    print(f"Client ID: {client_id} | Αίθουσα: {room}", flush=True)
+
+    def session(connection: socket.socket) -> None:
+        send_hello(connection, client_id, room)
+        play_stream(connection, device=args.device,
+                    buffer_ms=args.buffer_ms, latency=args.latency)
+
     try:
-        run_with_reconnect(
-            args.host, args.port,
-            lambda connection: play_stream(connection, device=args.device,
-                                           buffer_ms=args.buffer_ms, latency=args.latency),
-        )
+        run_with_reconnect(args.host, args.port, session)
     except KeyboardInterrupt:
         print("\nΟ Client τερματίστηκε.", flush=True)
 
