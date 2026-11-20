@@ -178,7 +178,10 @@ class PumpIntegrationTests(unittest.TestCase):
             Frame(0, 0, bytes(640)),
             ControlMessage(MESSAGE_STREAM_STOP),
             ControlMessage(MESSAGE_KEEPALIVE),
+            ControlMessage(MESSAGE_KEEPALIVE),
         ])
+
+        keepalives = [0]
 
         def receive(*_args, **_kwargs):
             try:
@@ -186,10 +189,14 @@ class PumpIntegrationTests(unittest.TestCase):
             except StopIteration:
                 raise EOFError("end of synthetic stream")
             if isinstance(message, ControlMessage) and message.kind == MESSAGE_KEEPALIVE:
-                self.assertTrue(volume.active)  # STOP alone does not restore
-                jitter.pop()  # last PCM
-                jitter.pop()  # callback enters standby
-                time.sleep(0.11)  # simulated minimum hardware drain allowance
+                keepalives[0] += 1
+                if keepalives[0] == 1:
+                    self.assertTrue(volume.active)  # STOP alone does not restore
+                    jitter.pop()  # last PCM
+                    jitter.pop()  # callback enters standby
+                else:
+                    self.assertTrue(volume.active)  # not restored immediately on drain
+                    time.sleep(1.55)  # grace measured *after* drain is observed
             return message
 
         with patch("client.main.receive_message", side_effect=receive):

@@ -20,6 +20,7 @@ from shared.discovery import discover, DISCOVERY_PORT
 from shared.control import heartbeat_sender
 from client.windows_volume import (AnnouncementVolume, create_volume_controller,
                                    recover_pending_volume)
+from client.windows_apps import ApplicationAudio
 
 RECONNECT_DELAY_SECONDS = 3
 # Έγκυρο PCM, KEEPALIVE ή STREAM_STOP ανανεώνει το όριο. Απώλεια όλων
@@ -33,6 +34,7 @@ ANNOUNCEMENT_PREFILL_MS = 120
 DEFAULT_FADE_MS = 150
 DEFAULT_RESUME_FADE_MS = 20
 REPORT_EVERY_SECONDS = 5
+AUDIO_RESTORE_GRACE_SECONDS = 1.5
 # 40 ms: δοκιμάστηκε από τον χρήστη σε Windows χωρίς κροτάλισμα (το "low" έδινε 100 ms).
 DEFAULT_LATENCY = 0.04
 
@@ -75,6 +77,7 @@ def pump_frames(
     received = 0
     in_announcement = False
     stop_received_at: float | None = None
+    drained_at: float | None = None
     next_report = time.monotonic() + report_every_s
     timeout = connection.gettimeout()
     last_valid = time.monotonic()
@@ -92,6 +95,7 @@ def pump_frames(
                         print(f"[ήχος] Αδυναμία προσωρινής έντασης: {exc}", flush=True)
                 jitter.begin_announcement()
                 stop_received_at = None
+                drained_at = None
                 delay.reset()
                 in_announcement = True
             delay.record(message.seq, message.timestamp_us, clock_us())
@@ -102,16 +106,18 @@ def pump_frames(
                 jitter.finish_announcement()
                 in_announcement = False
                 stop_received_at = time.monotonic()
+                drained_at = None
         # Μετά το STREAM_STOP περιμένουμε να αδειάσει η ουρά από το callback.
         # Τα KEEPALIVE ανά 0,5 s δίνουν περιθώριο και για τη latency της κάρτας.
-        if (volume is not None and volume.active and not in_announcement
-                and stop_received_at is not None
-                and time.monotonic() - stop_received_at >= 0.1
-                and jitter.mode == "αναμονή"):
-            try:
-                volume.end()
-            except Exception as exc:  # noqa: BLE001 - ο ήχος συνεχίζει κανονικά
-                print(f"[ήχος] Αποτυχία επαναφοράς έντασης: {exc}", flush=True)
+        if volume is not None and volume.active and not in_announcement:
+            if stop_received_at is not None and jitter.mode == "αναμονή":
+                if drained_at is None:
+                    drained_at = time.monotonic()
+                if time.monotonic() - drained_at >= AUDIO_RESTORE_GRACE_SECONDS:
+                    try:
+                        volume.end()
+                    except Exception as exc:  # noqa: BLE001
+                        print(f"[ήχος] Αποτυχία επαναφοράς ήχου: {exc}", flush=True)
         # KEEPALIVE: μόνο επιβεβαίωση ζωντανής σύνδεσης· όχι PCM/underrun.
         if report and time.monotonic() >= next_report:
             mode = "ανακοίνωση" if in_announcement or jitter.mode == "ανακοίνωση" else "αναμονή"
@@ -137,6 +143,7 @@ def play_stream(
     fade_ms: int = DEFAULT_FADE_MS,
     resume_fade_ms: int = DEFAULT_RESUME_FADE_MS,
     announcement_volume: int | None = None,
+    mute_others: bool = False,
     recovery_path: Path | None = None,
 ) -> None:
     import sounddevice as sd
@@ -151,7 +158,8 @@ def play_stream(
     if announcement_volume is None:
         recover_pending_volume(journal, device=device)
     volume = (create_volume_controller(
-        announcement_volume, device=device, recovery_path=journal)
+        announcement_volume, device=device, recovery_path=journal,
+        apps=ApplicationAudio(log=lambda msg: print(msg, flush=True)) if mute_others else None)
         if announcement_volume is not None else None)
 
     def on_audio(outdata, frames, timestamp, status):
@@ -289,7 +297,14 @@ def main() -> None:
         help="Προαιρετική προσωρινή ένταση εξόδου Windows κατά την ανακοίνωση "
              "(αν παραλειφθεί, καμία αλλαγή στην ένταση του λειτουργικού)",
     )
+    parser.add_argument(
+        "--mute-others", action="store_true",
+        help="Πειραματικό: μειώνει προσωρινά τις άλλες εφαρμογές στο 0% και "
+             "κάνει pause στα διαθέσιμα media (απαιτεί --announcement-volume)",
+    )
     args = parser.parse_args()
+    if args.mute_others and args.announcement_volume is None:
+        parser.error("--mute-others απαιτεί --announcement-volume")
     if args.announcement_volume is not None and not 0 <= args.announcement_volume <= 100:
         parser.error("--announcement-volume: επιτρέπεται τιμή 0–100")
     if args.announcement_volume is not None and args.device is not None:
@@ -309,7 +324,8 @@ def main() -> None:
             play_stream(connection, device=args.device,
                         buffer_ms=args.buffer_ms, latency=args.latency,
                         fade_ms=args.fade_ms, resume_fade_ms=args.resume_fade_ms,
-                        announcement_volume=args.announcement_volume)
+                        announcement_volume=args.announcement_volume,
+                        mute_others=args.mute_others)
         finally:
             heartbeat_stop.set()
             sender.join(timeout=1)

@@ -11,6 +11,8 @@ from pathlib import Path
 import sys
 from typing import Callable
 
+from client.windows_apps import ApplicationAudio, restore_record_apps
+
 from shared.windows_audio import PycawMaster, ramp_volume, same_volume as _same_volume
 
 RAMP_MS = 150
@@ -21,7 +23,8 @@ class AnnouncementVolume:
 
     def __init__(self, master, recovery_path: Path, *, target_percent: int,
                  ramp_ms: float = RAMP_MS, sleep: Callable | None = None,
-                 log: Callable[[str], None] = print):
+                 log: Callable[[str], None] = print,
+                 apps: ApplicationAudio | None = None):
         if not 0 <= target_percent <= 100:
             raise ValueError("Η ένταση ανακοίνωσης πρέπει να είναι 0–100%")
         self.master = master
@@ -32,6 +35,7 @@ class AnnouncementVolume:
         self.log = log
         self.active = False
         self._saved = None
+        self.apps = apps
 
     def _ramp(self, start: float, end: float) -> None:
         if self.sleep is None:
@@ -58,7 +62,7 @@ class AnnouncementVolume:
     def _read(self) -> dict | None:
         if not self.path.exists():
             return None
-        if self.path.stat().st_size > 4096:
+        if self.path.stat().st_size > 65536:
             raise ValueError("Το αρχείο ανάκαμψης είναι υπερβολικά μεγάλο")
         record = json.loads(self.path.read_text(encoding="utf-8"))
         if (not isinstance(record, dict) or record.get("version") != 1
@@ -97,6 +101,10 @@ class AnnouncementVolume:
         # Το flag 'unmuted' καταχωρείται πριν από το SetMute ώστε να καλύπτει crash.
         if record.get("unmuted") and not self.master.get_mute():
             self.master.set_mute(True)
+        # Το ίδιο αρχείο προστατεύει master volume, εφαρμογές και media.
+        if not restore_record_apps(record, self._write, app_audio=self.apps):
+            self.log("[ήχος] Εκκρεμεί επαναφορά εφαρμογών· το journal διατηρείται.")
+            return False
         self.path.unlink(missing_ok=True)
         return True
 
@@ -112,6 +120,8 @@ class AnnouncementVolume:
                   "stage": "pending", "unmuted": original_mute}
         self._write(record)  # ΠΡΙΝ από οποιαδήποτε αλλαγή Windows
         try:
+            if self.apps is not None:
+                self.apps.begin(record, self._write)
             self._ramp(original, self.target)
             if original_mute:
                 self.master.set_mute(False)
@@ -147,6 +157,7 @@ def create_volume_controller(percent: int, *, device: int | None,
                              recovery_path: Path,
                              master_factory: Callable[[], object] | None = None,
                              log: Callable[[str], None] = _console,
+                             apps: ApplicationAudio | None = None,
                              ) -> AnnouncementVolume | None:
     """Αλλαγή μόνο της *προεπιλεγμένης* εξόδου (όπως στο Windows test script).
 
@@ -167,7 +178,7 @@ def create_volume_controller(percent: int, *, device: int | None,
         return None
     try:
         controller = AnnouncementVolume((master_factory or PycawMaster)(), recovery_path,
-                                        target_percent=percent, log=log)
+                                        target_percent=percent, log=log, apps=apps)
         if not controller.recover():
             # Ανάκαμψη για άλλη έξοδο: δεν αλλάζουμε την τρέχουσα. Το begin()
             # ξαναδοκιμάζει την ανάκαμψη και δεν αλλάζει ένταση όσο εκκρεμεί.
