@@ -132,7 +132,10 @@ class AnnouncementVolumeTests(unittest.TestCase):
                              "pending")
             original_set(value)
         self.master.set_volume = check_record
-        manager.begin()
+        try:
+            manager.begin()
+        finally:
+            self.master.set_volume = original_set
         manager.end()
 
     def test_failure_during_ramp_attempts_restore(self):
