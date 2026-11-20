@@ -248,7 +248,7 @@ def main() -> None:
     args = parser.parse_args()
     if args.gui:
         from director.gui import run_gui
-        run_gui(args)
+        run_gui(args, accept_clients=accept_clients, stream_microphone=stream_microphone)
         return
 
     broadcaster = AudioBroadcaster(max_clients=MAX_CLIENTS, on_event=lambda s: print(s, flush=True))
