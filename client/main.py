@@ -7,6 +7,7 @@
 import argparse
 from pathlib import Path
 import socket
+import sys
 import threading
 import time
 from collections.abc import Callable
@@ -18,6 +19,7 @@ from shared.jitter import DelayTracker, JitterBuffer
 from shared.identity import load_identity, receive_welcome, send_hello
 from shared.discovery import discover, DISCOVERY_PORT
 from shared.control import heartbeat_sender
+from client.windows_volume import create_volume_controller, AnnouncementVolume
 
 RECONNECT_DELAY_SECONDS = 3
 # Έγκυρο PCM, KEEPALIVE ή STREAM_STOP ανανεώνει το όριο. Απώλεια όλων
@@ -67,10 +69,12 @@ def pump_frames(
     clock_us: Callable[[], int] = now_us,
     report: Callable[[str], None] | None = None,
     report_every_s: float = REPORT_EVERY_SECONDS,
+    volume: AnnouncementVolume | None = None,
 ) -> None:
     """PCM/έλεγχος στην ίδια κατεύθυνση TCP, χωρίς reconnect σε αναμονή."""
     received = 0
     in_announcement = False
+    stop_received_at: float | None = None
     next_report = time.monotonic() + report_every_s
     timeout = connection.gettimeout()
     last_valid = time.monotonic()
@@ -81,7 +85,13 @@ def pump_frames(
         last_valid = time.monotonic()
         if isinstance(message, Frame):
             if not in_announcement:
+                if volume is not None:
+                    try:
+                        volume.begin()  # προετοιμασία πριν αρχίσει το prefill/η αναπαραγωγή
+                    except Exception as exc:
+                        print(f"[ήχος] Αδυναμία προσωρινής έντασης: {exc}", flush=True)
                 jitter.begin_announcement()
+                stop_received_at = None
                 delay.reset()
                 in_announcement = True
             delay.record(message.seq, message.timestamp_us, clock_us())
@@ -91,6 +101,14 @@ def pump_frames(
             if in_announcement:
                 jitter.finish_announcement()
                 in_announcement = False
+                stop_received_at = time.monotonic()
+        # Μετά το STREAM_STOP περιμένουμε να αδειάσει η ουρά από το callback.
+        # Τα KEEPALIVE ανά 0,5 s δίνουν περιθώριο και για τη latency της κάρτας.
+        if (volume is not None and volume.active and not in_announcement
+                and stop_received_at is not None
+                and time.monotonic() - stop_received_at >= 0.1
+                and jitter.mode == "αναμονή"):
+            volume.end()
         # KEEPALIVE: μόνο επιβεβαίωση ζωντανής σύνδεσης· όχι PCM/underrun.
         if report and time.monotonic() >= next_report:
             mode = "ανακοίνωση" if in_announcement or jitter.mode == "ανακοίνωση" else "αναμονή"
@@ -115,12 +133,22 @@ def play_stream(
     latency: str | float = DEFAULT_LATENCY,
     fade_ms: int = DEFAULT_FADE_MS,
     resume_fade_ms: int = DEFAULT_RESUME_FADE_MS,
+    announcement_volume: int | None = None,
+    recovery_path: Path | None = None,
 ) -> None:
     import sounddevice as sd
 
     jitter = make_jitter_buffer(buffer_ms, fade_ms, resume_fade_ms)
     jitter.standby()
     delay = DelayTracker()
+    journal = recovery_path or Path.home() / ".school-intercom" / "volume-recovery.json"
+    # Αν προηγούμενος Client έπεσε, ανάκαμψη και χωρίς νέα ενεργοποίηση
+    # της λειτουργίας από CLI. Δεν επιχειρούμε αλλαγές σε Linux.
+    if announcement_volume is None and sys.platform == "win32" and journal.exists():
+        create_volume_controller(0, device=device, recovery_path=journal)
+    volume = (create_volume_controller(
+        announcement_volume, device=device, recovery_path=journal)
+        if announcement_volume is not None else None)
 
     def on_audio(outdata, frames, timestamp, status):
         if status:
@@ -145,7 +173,14 @@ def play_stream(
             f"καθυστέρηση κάρτας ήχου {output.latency * 1000:.0f} ms",
             flush=True,
         )
-        pump_frames(connection, jitter, delay, report=lambda line: print(line, flush=True))
+        try:
+            pump_frames(connection, jitter, delay,
+                        report=lambda line: print(line, flush=True), volume=volume)
+        finally:
+            if volume is not None:
+                # Δίκτυο/τερματισμός: καλύτερα αποκατάσταση παρά παραμονή σε
+                # αυξημένη ένταση. Το κανονικό STOP περιμένει πρώτα το drain.
+                volume.end()
 
 
 def parse_latency(value: str) -> str | float:
@@ -240,7 +275,16 @@ def main() -> None:
         "--resume-fade-ms", type=int, default=DEFAULT_RESUME_FADE_MS,
         help=f"Fade-in μετά από κενό δικτύου σε ms (default {DEFAULT_RESUME_FADE_MS})",
     )
+    parser.add_argument(
+        "--announcement-volume", type=int, default=None, metavar="0-100",
+        help="Προαιρετική προσωρινή ένταση εξόδου Windows κατά την ανακοίνωση "
+             "(αν παραλειφθεί, καμία αλλαγή στην ένταση του λειτουργικού)",
+    )
     args = parser.parse_args()
+    if args.announcement_volume is not None and not 0 <= args.announcement_volume <= 100:
+        parser.error("--announcement-volume: επιτρέπεται τιμή 0–100")
+    if args.announcement_volume is not None and args.device is not None:
+        parser.error("--announcement-volume δεν συνδυάζεται ακόμη με --device")
 
     client_id, room = load_identity(args.identity_file, room_override=args.room)
     print(f"Client ID: {client_id} | Αίθουσα: {room}", flush=True)
@@ -255,7 +299,8 @@ def main() -> None:
         try:
             play_stream(connection, device=args.device,
                         buffer_ms=args.buffer_ms, latency=args.latency,
-                        fade_ms=args.fade_ms, resume_fade_ms=args.resume_fade_ms)
+                        fade_ms=args.fade_ms, resume_fade_ms=args.resume_fade_ms,
+                        announcement_volume=args.announcement_volume)
         finally:
             heartbeat_stop.set()
             sender.join(timeout=1)
