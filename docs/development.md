@@ -144,6 +144,8 @@
 4. Πρωτόκολλο σύνδεσης v4: ο Director ορίζει την κοινή ένταση και ο Client αναφέρει στο heartbeat την κατάσταση ήχου (εφαρμόστηκε / απέτυχε / έξοδος σε mute).
 5. Ειδοποιήσεις στον Director.
 
+**Βήμα 1 σε εξέλιξη:** διαγνωστικό script `tools/windows_audio_check.py` (οδηγίες: `docs/windows-audio-check.md`). Ελέγχει ένταση/mute εξόδου, σίγαση ανά εφαρμογή και, κατόπιν αιτήματος του χρήστη, **pause/play των media** που παίζουν (Windows System Media Transport Controls), με επαναφορά μόνο όσων άλλαξε το script. Αναμένεται αναφορά από πραγματική εκτέλεση σε Windows 11.
+
 ### Πώς συνεχίζεται η εργασία σε νέα συζήτηση
 
 1. Άνοιγμα του `project_instructions.md` από `dev`, έπειτα `docs/requirements.md`, `docs/architecture.md`, αυτού του αρχείου και των `docs/prototype.md` / `docs/latency.md`.
