@@ -90,19 +90,6 @@ def _media_key(media):
     return media.app_id
 
 
-def _candidate(media, apps):
-    """Συντηρητική αντιστοίχιση media → session από το δοκιμασμένο script."""
-    target = media.app_id.lower()
-    matching = [s for s in apps if len(s.name) >= 3
-                and s.name.lower().removesuffix(".exe") in target]
-    if matching:
-        return matching
-    # Firefox με μη αναγνωρίσιμο app id: επιτρέπεται μόνο χωρίς αμφισημία.
-    firefox = [s for s in apps if s.name.lower() == "firefox.exe"]
-    other = [s for s in apps if s.name.lower() != "firefox.exe"]
-    return firefox if firefox and not other else []
-
-
 class ApplicationAudio:
     def __init__(self, *, sessions: Callable = load_sessions,
                  media: Callable = load_media, own_pid: int | None = None,
@@ -125,8 +112,11 @@ class ApplicationAudio:
         record.setdefault("apps", [])
         record.setdefault("media", [])
         sessions = self.sessions()
-        # Καταγράφουμε πριν από κάθε αλλαγή, ακόμη και αν συμβεί crash στο ramp.
-        for session in sessions:
+        changes = []
+        # Ένα journal write για ΟΛΕΣ τις συνεδρίες ΠΡΙΝ από οποιαδήποτε
+        # αλλαγή. Η μείωση εκτελείται παράλληλα ανά βήμα (~150 ms συνολικά),
+        # όχι 150 ms * αριθμό εφαρμογών (αλλιώς χάνονται αρχικές συλλαβές).
+        for session in sessions[:64]:
             try:
                 if session.pid in (0, self.own_pid) or session.get_mute():
                     continue
@@ -137,14 +127,31 @@ class ApplicationAudio:
                         "session_id": session.session_id, "started": session.started,
                         "original": original, "stage": "pending"}
                 record["apps"].append(item)
-                save(record)
-                self._ramp(session, original, 0.0)
-                item["stage"] = "zero"
-                save(record)
+                changes.append((session, item))
             except Exception as exc:
-                self.log(f"[ήχος] Αποτυχία μείωσης εφαρμογής: {exc}")
-                # H εκκρεμής εγγραφή θα επιτρέψει αποκατάσταση στο τέλος.
-                continue
+                self.log(f"[ήχος] Αδυναμία ανάγνωσης έντασης εφαρμογής: {exc}")
+        if changes:
+            save(record)
+            import time
+            steps = max(1, int(self.ramp_ms // 10))
+            failed = set()
+            for index in range(1, steps + 1):
+                for session, item in changes:
+                    if id(item) in failed:
+                        continue
+                    try:
+                        session.set_volume(item["original"] * (1 - index / steps))
+                    except Exception as exc:
+                        failed.add(id(item))
+                        self.log(f"[ήχος] Αποτυχία μείωσης εφαρμογής: {exc}")
+                if index < steps and self.sleep is None:
+                    time.sleep(self.ramp_ms / steps / 1000)
+                elif index < steps:
+                    self.sleep(self.ramp_ms / steps / 1000)
+            for session, item in changes:
+                if id(item) not in failed:
+                    item["stage"] = "zero"
+            save(record)
 
         # Τα media controls είναι προαιρετικά: αν λείπουν δεν πρέπει να
         # εμποδίσουν την ανακοίνωση. Ακολουθεί pause ΜΕΤΑ το volume 0%.
@@ -159,9 +166,6 @@ class ApplicationAudio:
             try:
                 if entry.status() != PLAYING or not entry.can_pause():
                     continue
-                matches = _candidate(entry, sessions)
-                # Η αμφίβολη αντιστοίχιση δεν μας εμποδίζει να κάνουμε pause.
-                # Το pause σε κάθε περίπτωση αφορά μόνο media που έπαιζε.
                 item = {"app_id": _media_key(entry), "intent": True}
                 record["media"].append(item)
                 save(record)
