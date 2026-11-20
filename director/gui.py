@@ -10,7 +10,6 @@ import threading
 import time
 
 from director.broadcast import AudioBroadcaster, MAX_CLIENTS
-from director.main import accept_clients, stream_microphone
 from shared.discovery import announce, director_id
 
 
@@ -51,7 +50,7 @@ def summarize_rooms(status):
     return [(room, online, offline) for room, (online, offline) in sorted(rooms.items())]
 
 
-def run_gui(args) -> None:
+def run_gui(args, *, accept_clients, stream_microphone) -> None:
     import tkinter as tk
     from tkinter import ttk, messagebox
 
