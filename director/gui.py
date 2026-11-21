@@ -87,19 +87,20 @@ def choose_targets(mode: str, checked: set[str], status) -> set[str] | None:
     return set(checked)
 
 
-def room_rows_per_column(count: int, rows_fit: int) -> int:
-    """Γραμμές ανά στήλη στην κάρτα αιθουσών (2 στήλες, ui-style.md §5).
+def room_grid_shape(count: int, rows_fit: int, max_columns: int) -> tuple[int, int]:
+    """(γραμμές ανά στήλη, στήλες) στην κάρτα αιθουσών (ui-style.md §5).
 
-    Η πρώτη στήλη γεμίζει όσο χωρά στο ύψος (`rows_fit`) και μόνο τα υπόλοιπα
-    πάνε στη δεύτερη. Αν δεν χωρούν ούτε σε δύο γεμάτες στήλες, μοιράζονται
-    ισόποσα και η λίστα κυλά κατακόρυφα.
+    Κάθε στήλη γεμίζει όσο χωρά στο ύψος (`rows_fit`) και μόνο τα υπόλοιπα
+    πάνε στην επόμενη, έως `max_columns` στήλες (όσες χωρούν στο πλάτος).
+    Αν δεν χωρούν ούτε τότε, μοιράζονται ισόποσα και η λίστα κυλά κατακόρυφα.
     """
     if count <= 0:
-        return 0
+        return 0, 0
     rows_fit = max(1, rows_fit)
-    if count <= 2 * rows_fit:
-        return min(count, rows_fit)
-    return -(-count // 2)
+    max_columns = max(1, max_columns)
+    if count <= rows_fit * max_columns:
+        return min(count, rows_fit), -(-count // rows_fit)
+    return -(-count // max_columns), max_columns
 
 
 def meter_fraction(peak: float) -> float:

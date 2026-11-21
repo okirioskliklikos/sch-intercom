@@ -22,7 +22,7 @@ from PySide6.QtWidgets import (QAbstractButton, QApplication, QButtonGroup, QChe
 
 from director.broadcast import AudioBroadcaster, MAX_CLIENTS
 from director.gui import (MODE_ALL, MODE_ROOMS, DirectorMicrophone, choose_targets,
-                          meter_fraction, room_rows_per_column,
+                          meter_fraction, room_grid_shape,
                           room_states)
 from shared.discovery import announce, director_id
 from shared.ui import icons, theme
@@ -371,6 +371,8 @@ class DirectorWindow(QMainWindow):
         self.room_rows: dict[str, RoomRow] = {}
         self._room_rows_per_column: int | None = None
         self._room_columns = 0
+        self._room_shape: tuple[int, int] | None = None
+        self.page: QWidget | None = None
         self.notice: tuple[str, float] | None = None
 
         self.setWindowTitle(WINDOW_TITLE)
@@ -443,8 +445,10 @@ class DirectorWindow(QMainWindow):
         return sidebar
 
     def _build_page(self) -> QWidget:
-        page = QWidget()
+        # Αλλαγή πλάτους σελίδας μπορεί να χωρά ή να αφαιρεί στήλη αιθουσών.
+        page = _ResizeNotifier(self._layout_rooms)
         page.setObjectName("page")
+        self.page = page
         layout = QVBoxLayout(page)
         layout.setContentsMargins(px(18), px(14), px(18), px(16))
         layout.setSpacing(px(theme.CARD_SPACING))
@@ -458,8 +462,9 @@ class DirectorWindow(QMainWindow):
         self.connection_label = QLabel("Συνδεδεμένος")
         self.connection_label.setObjectName("connection")
         header.setSpacing(px(6))
-        header.addWidget(self.connection_dot)
+        # «Συνδεδεμένος ●»: η κουκκίδα μετά τη λέξη (ui-style.md §4).
         header.addWidget(self.connection_label)
+        header.addWidget(self.connection_dot, 0, Qt.AlignmentFlag.AlignVCenter)
         layout.addLayout(header)
 
         # Επάνω σειρά: κάρτες ανακοίνωσης και αιθουσών με ίδιο ύψος.
@@ -737,14 +742,30 @@ class DirectorWindow(QMainWindow):
         # Οι επιλογές αιθουσών που χάθηκαν εντελώς δεν κρατιούνται.
         self.checked &= set(names)
         self._room_rows_per_column = None
+        self._room_shape = None
         self._layout_rooms()
 
     def _room_column_width(self) -> int:
         """Σταθερό πλάτος στήλης αιθουσών, κλιμακωμένο (ui-style.md §5)."""
         return px(theme.ROOM_COLUMN_WIDTH)
 
+    def _max_room_columns(self, column_width: int) -> int:
+        """Πόσες στήλες αιθουσών χωρούν αφήνοντας στην «Ανακοίνωση» το ελάχιστο."""
+        if self.page is None or not self.page.isVisible():
+            return 2
+        margins = self.page.layout().contentsMargins()
+        card = self.rooms_card_layout.contentsMargins()
+        announce = max(px(theme.ANNOUNCE_MIN_WIDTH),
+                       self.announcement_card.minimumSizeHint().width())
+        available = (self.page.width() - margins.left() - margins.right()
+                     - px(theme.CARD_SPACING) - announce
+                     - card.left() - card.right() - 2
+                     - px(theme.SCROLLBAR) - px(6))
+        spacing = self.room_grid.horizontalSpacing()
+        return max(2, (available + spacing) // (column_width + spacing))
+
     def _layout_rooms(self) -> None:
-        """Πρώτη στήλη ως το διαθέσιμο ύψος, μετά δεύτερη (ui-style.md §5)."""
+        """Κάθε στήλη ως το διαθέσιμο ύψος, μετά η επόμενη όσο χωρά (ui-style.md §5)."""
         if not self.room_rows:
             return
         row_height = px(theme.ROW_HEIGHT)
@@ -754,11 +775,11 @@ class DirectorWindow(QMainWindow):
         available = self.rooms_area.height() - chrome
         rows_fit = max(1, available // row_height)
         names = list(self.room_rows)
-        rows = room_rows_per_column(len(names), rows_fit)
         width = self._room_column_width()
-        columns = 1 if len(names) <= rows else 2
+        rows, columns = room_grid_shape(len(names), rows_fit, self._max_room_columns(width))
         self._room_columns = columns
-        if rows != self._room_rows_per_column:
+        if (rows, columns) != self._room_shape:
+            self._room_shape = (rows, columns)
             self._room_rows_per_column = rows
             for row in self.room_rows.values():
                 self.room_grid.removeWidget(row)

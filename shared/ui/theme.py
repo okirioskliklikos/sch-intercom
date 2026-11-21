@@ -116,6 +116,7 @@ ROOM_COLUMN_WIDTH = 200     # στήλη αιθουσών· το όνομα κό
 ROOM_DOT_GAP = 9
 SIDEBAR_WIDTH = 200
 LEFT_COLUMN_WIDTH = 290
+ANNOUNCE_MIN_WIDTH = 290    # ελάχιστο πλάτος κάρτας «Ανακοίνωση» όταν ανοίγουν στήλες αιθουσών
 ANNOUNCE_RING = 176
 ANNOUNCE_CIRCLE = 140
 ANNOUNCE_ICON = 60
@@ -134,7 +135,7 @@ BRAND_ICON = 22
 DOT = 8
 METER_BAR = 6
 METER_GAP = 4
-SCROLLBAR = 10              # πλάτος scroll bar, χωρίς βελάκια
+SCROLLBAR = 8               # πλάτος scroll bar, χωρίς βελάκια
 SCROLLBAR_HANDLE_MIN = 32   # ελάχιστο μήκος λαβής
 
 

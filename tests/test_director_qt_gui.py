@@ -214,6 +214,39 @@ class DirectorWindowTests(TestCase):
         self.assertIn("QScrollBar::handle:vertical", qss)
         self.assertIn(theme.PRIMARY_DARK, qss)
 
+    def test_third_column_opens_and_announcement_narrows(self):
+        status = [(f"id-{i}", f"Αίθουσα {i:02d}", True, 0.1) for i in range(30)]
+        window = self.make(status)
+        m = current_metrics()
+        window.setMinimumSize(m.px(1350), m.px(640))
+        window.resize(m.px(1350), m.px(640))
+        window.show()
+        QApplication.processEvents()
+        window._layout_rooms()
+        QApplication.processEvents()
+        self.assertGreaterEqual(window._room_columns, 3)
+        bar = window.room_scroll.verticalScrollBar()
+        self.assertFalse(bar.isVisible())         # χωρά σε στήλες, χωρίς κύλιση
+        self.assertGreaterEqual(window.announcement_card.width(),
+                                m.px(theme.ANNOUNCE_MIN_WIDTH))
+        # Στενότερο παράθυρο: λιγότερες στήλες και κύλιση.
+        window.setMinimumSize(m.px(860), m.px(640))
+        window.resize(m.px(900), m.px(640))
+        QApplication.processEvents()
+        window._layout_rooms()
+        QApplication.processEvents()
+        self.assertEqual(window._room_columns, 2)
+        self.assertTrue(bar.isVisible())
+        self.assertGreaterEqual(window.announcement_card.width(),
+                                m.px(theme.ANNOUNCE_MIN_WIDTH))
+
+    def test_connection_dot_after_label(self):
+        window = self.make(self.STATUS)
+        window.show()
+        QApplication.processEvents()
+        self.assertGreater(window.connection_dot.x(),
+                           window.connection_label.x() + window.connection_label.width() - 1)
+
     def test_room_columns_have_fixed_scaled_width(self):
         window = self.make(self.STATUS)
         window.show()
