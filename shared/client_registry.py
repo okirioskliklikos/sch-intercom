@@ -162,16 +162,18 @@ class SignedClientRegistry:
         with self.lock:
             return json.loads(json.dumps(self._document["registry"]))
 
-    def _persist(self) -> None:
-        _atomic_write(self.path, json.dumps(self._document, sort_keys=True,
-                                            ensure_ascii=False, indent=2).encode("utf-8") + b"\n")
+    def _persist(self, document: dict | None = None) -> None:
+        data = self._document if document is None else document
+        _atomic_write(self.path, json.dumps(data, sort_keys=True,
+                                            ensure_ascii=False, indent=2).encode("utf-8") + b"\\n")
 
     def _commit(self, newer: dict) -> None:
         older = self._document["registry"]
         newer["history"] = older["history"] + [digest(older)]
         newer["registry_version"] = older["registry_version"] + 1
-        self._document = _wrap(newer, self._signing_key)
-        self._persist()
+        document = _wrap(newer, self._signing_key)
+        self._persist(document)  # No in-memory commit if disk write failed.
+        self._document = document
 
     def approve(self, client_id: str, room: str, cert_pem: bytes, *, name: str = "") -> None:
         """CLI-first approval. A revoked key cannot be approved a second time."""
