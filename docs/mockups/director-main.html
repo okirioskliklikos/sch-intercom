@@ -1,0 +1,101 @@
+<!doctype html>
+<html lang="el"><head><meta charset="utf-8">
+<title>Director mockup</title>
+<style>
+:root{--blue:#1d5a99;--blue-l:#dde7f4;--bg:#f3f5f9;--side:#e6ebf3;--card-b:#dde3ec;--text:#1f2937;--muted:#5b6575;--green:#2e9e4f;--conn:#2e8b57;--red:#c62828;--red-l:#f6d5d5;--grey:#8a96a6;--teal:#0e7490}
+*{box-sizing:border-box}
+body{margin:0;font-family:"Segoe UI","Noto Sans",Arial,sans-serif;color:var(--text);background:#c9ced6;padding:20px}
+.win{width:960px;background:var(--bg);border:1px solid #b9c0cb;border-radius:8px;overflow:hidden;box-shadow:0 4px 18px rgba(0,0,0,.12)}
+.titlebar{height:34px;background:#fff;border-bottom:1px solid var(--card-b);display:flex;align-items:center;gap:8px;padding:0 10px;font-size:13px}
+.titlebar .ctl{margin-left:auto;display:flex;gap:18px;color:var(--muted);font-size:13px}
+.layout{display:flex;min-height:640px}
+.side{width:200px;background:var(--side);padding:14px 10px;border-right:1px solid var(--card-b)}
+.brand{display:flex;align-items:center;gap:8px;font-weight:600;font-size:15px;margin:2px 4px 18px;white-space:nowrap}
+.nav{display:flex;align-items:center;gap:10px;padding:8px 10px;margin-bottom:4px;border-radius:6px;font-size:14px;color:var(--text);border:1px solid transparent}
+.nav svg{width:16px;height:16px;stroke:currentColor;fill:none;stroke-width:1.8}
+.nav.sel{background:var(--blue-l);border-color:var(--blue);color:var(--blue);font-weight:600}
+.nav.off{color:#7a8494}
+.main{flex:1;padding:16px 18px}
+.head{display:flex;align-items:center;margin-bottom:14px}
+.head h1{font-size:18px;font-weight:600;margin:0}
+.conn{margin-left:auto;display:flex;align-items:center;gap:6px;color:var(--conn);font-size:13px;font-weight:600}
+.conn i{width:8px;height:8px;border-radius:50%;background:var(--conn);display:inline-block}
+.cols{display:flex;gap:14px;align-items:flex-start}
+.left{width:290px;display:flex;flex-direction:column;gap:14px}
+.card{background:#fff;border:1px solid var(--card-b);border-radius:8px;padding:12px 14px}
+.card h2{font-size:15px;font-weight:600;margin:0 0 10px}
+.micwrap{display:flex;flex-direction:column;align-items:center;padding:6px 0 4px}
+.ring{width:176px;height:176px;border-radius:50%;background:var(--blue-l);display:flex;align-items:center;justify-content:center}
+.ring.live{background:var(--red-l)}
+.btn{width:140px;height:140px;border-radius:50%;background:var(--blue);display:flex;align-items:center;justify-content:center}
+.btn.live{background:var(--red)}
+.btn svg{width:60px;height:60px;stroke:#fff;fill:none;stroke-width:2.2;stroke-linecap:round}
+.state{font-size:12.5px;color:var(--muted);margin-top:8px;height:16px}
+.state.live{color:var(--red);font-weight:700;letter-spacing:.3px}
+.lvl-h{display:flex;align-items:center;width:100%;margin-top:10px;font-size:12.5px;color:var(--muted)}
+.prev{margin-left:auto;font-size:12px;border:1px solid var(--grey);border-radius:12px;padding:2px 9px;color:var(--text);background:#fff}
+.meter{display:flex;gap:4px;width:100%;margin-top:6px}
+.meter b{flex:1;height:6px;border-radius:3px;background:#e3e7ee}
+.meter b.on{background:var(--green)}
+.mute{margin-top:12px;display:flex;align-items:center;gap:8px;border:1px solid var(--grey);border-radius:18px;padding:6px 14px;font-size:13px;background:#fff}
+.mute svg{width:16px;height:16px;stroke:var(--text);fill:none;stroke-width:1.8;stroke-linecap:round}
+.opt{display:flex;align-items:center;gap:9px;font-size:13.5px;padding:6px 0}
+.radio{width:16px;height:16px;border-radius:50%;border:1.5px solid var(--grey);background:#fff;display:inline-flex;align-items:center;justify-content:center}
+.radio.on{background:var(--blue);border-color:var(--blue)}
+.radio.on::after{content:"";width:6px;height:6px;border-radius:50%;background:#fff}
+.right{flex:1}
+.rooms{display:grid;grid-template-columns:1fr 1fr;column-gap:16px}
+.room{white-space:nowrap;display:flex;align-items:center;gap:9px;font-size:13.5px;padding:7px 2px;border-bottom:1px solid #eef1f5}
+.cb{width:16px;height:16px;border-radius:3px;border:1.5px solid var(--grey);background:#fff;display:inline-flex;align-items:center;justify-content:center;flex:none}
+.cb.on{background:var(--blue);border-color:var(--blue)}
+.cb.on svg{width:11px;height:11px;stroke:#fff;fill:none;stroke-width:3;stroke-linecap:round;stroke-linejoin:round}
+.dot{margin-left:auto;width:8px;height:8px;border-radius:50%;background:var(--green);flex:none}
+.dot.part{background:#e0a100}.dot.off{background:#c3c9d2}
+.count{color:var(--green);font-weight:600}
+</style></head><body>
+<div class="win">
+ <div class="titlebar"><span id="ico1"></span>School Intercom — Διεύθυνση<span class="ctl"><span>—</span><span>☐</span><span>✕</span></span></div>
+ <div class="layout">
+  <div class="side">
+   <div class="brand"><span id="ico2"></span>School Intercom</div>
+   <div class="nav sel"><svg viewBox="0 0 24 24"><path d="M3 11l9-7 9 7v9a1 1 0 0 1-1 1h-5v-6H9v6H4a1 1 0 0 1-1-1z"/></svg>Κεντρική</div>
+   <div class="nav off"><svg viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></svg>Αίθουσες</div>
+   <div class="nav off"><svg viewBox="0 0 24 24"><path d="M3 10v4h4l7 5V5L7 10z"/><path d="M18 8a5 5 0 0 1 0 8"/></svg>Ανακοινώσεις</div>
+   <div class="nav off"><svg viewBox="0 0 24 24"><path d="M4 6h16M4 12h16M4 18h10"/></svg>Σενάρια</div>
+   <div class="nav off"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>Καταγραφές</div>
+   <div class="nav off"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M4.9 19.1L7 17M17 7l2.1-2.1"/></svg>Ρυθμίσεις</div>
+  </div>
+  <div class="main">
+   <div class="head"><h1>Κεντρική λειτουργία</h1><span class="conn"><i></i>Συνδεδεμένος</span></div>
+   <div class="cols">
+    <div class="left">
+     <div class="card"><h2>Ανακοίνωση</h2>
+      <div class="micwrap">
+       <div class="ring" id="ring"><div class="btn" id="btn"><svg viewBox="0 0 24 24"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5.5 11a6.5 6.5 0 0 0 13 0M12 17.5V21M8.5 21h7"/></svg></div></div>
+       <div class="state" id="state">Πατήστε για έναρξη</div>
+       <div class="lvl-h">Στάθμη μικροφώνου<span class="prev" id="prev">Προεπισκόπηση</span></div>
+       <div class="meter" id="meter"></div>
+       <div class="mute"><svg viewBox="0 0 24 24"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5.5 11a6.5 6.5 0 0 0 13 0M12 17.5V21"/><path d="M20 3L4 21"/></svg>Σίγαση μικροφώνου</div>
+      </div>
+     </div>
+     <div class="card"><h2>Επιλογή αιθουσών</h2>
+      <div class="opt"><span class="radio on"></span>Όλες οι αίθουσες (17)</div>
+      <div class="opt"><span class="radio"></span>Συγκεκριμένες αίθουσες</div>
+      <div class="opt" style="color:#7a8494"><span class="radio"></span>Ομάδα / Σενάριο</div>
+     </div>
+    </div>
+    <div class="right"><div class="card"><h2>Αίθουσες <span class="count">(17/17 online)</span></h2><div class="rooms" id="rooms"></div></div></div>
+   </div>
+  </div>
+ </div>
+</div>
+<script>
+const icon=s=>`<svg width="${s}" height="${s}" viewBox="0 0 24 24"><rect width="24" height="24" rx="6" fill="#0e7490"/><circle cx="12" cy="12" r="2.2" fill="#fff"/><circle cx="12" cy="12" r="5.2" fill="none" stroke="#fff" stroke-width="1.6" opacity=".8"/><circle cx="12" cy="12" r="8.2" fill="none" stroke="#fff" stroke-width="1.6" opacity=".5"/></svg>`;
+ico1.innerHTML=icon(18);ico2.innerHTML=icon(22);
+const names=["Α1","Α2","Β1","Β2","Γ1","Γ2","Δ1","Δ2","Ε1","Ε2","Στ1","Στ2","Τμ. Ένταξης 1","Τμ. Ένταξης 2","Τμήμα Υποδοχής","Εργ. Υπολογιστών","Κεντρική Αίθουσα"];
+const tick='<svg viewBox="0 0 12 12"><path d="M2.5 6.2l2.3 2.3 4.7-5"/></svg>';
+const live=location.hash==="#live";
+rooms.innerHTML=names.map(n=>`<div class="room"><span class="cb on">${tick}</span>${n}<span class="dot"></span></div>`).join("");
+const lv=live?7:0;meter.innerHTML=Array.from({length:12},(_,i)=>`<b class="${i<lv?'on':''}"></b>`).join("");
+if(live){ring.classList.add("live");btn.classList.add("live");state.classList.add("live");state.textContent="ΖΩΝΤΑΝΑ · πατήστε για λήξη";prev.style.opacity=.45;}
+</script></body></html>
