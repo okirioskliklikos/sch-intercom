@@ -165,7 +165,7 @@ class SignedClientRegistry:
     def _persist(self, document: dict | None = None) -> None:
         data = self._document if document is None else document
         _atomic_write(self.path, json.dumps(data, sort_keys=True,
-                                            ensure_ascii=False, indent=2).encode("utf-8") + b"\\n")
+                                            ensure_ascii=False, indent=2).encode("utf-8") + bytes([10]))
 
     def _commit(self, newer: dict) -> None:
         older = self._document["registry"]
