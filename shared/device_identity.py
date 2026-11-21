@@ -38,6 +38,18 @@ def _dpapi(data: bytes, *, unprotect: bool) -> bytes:
     from ctypes import windll
     incoming, keep_alive = _blob(data)
     outgoing = _DataBlob()
+    # Explicit pointer signatures: ctypes defaults truncate 64-bit pointers on Windows.
+    blob_ptr = ctypes.POINTER(_DataBlob)
+    if unprotect:
+        windll.crypt32.CryptUnprotectData.argtypes = [blob_ptr, ctypes.c_void_p,
+            ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p, wintypes.DWORD, blob_ptr]
+        windll.crypt32.CryptUnprotectData.restype = wintypes.BOOL
+    else:
+        windll.crypt32.CryptProtectData.argtypes = [blob_ptr, ctypes.c_wchar_p,
+            ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p, wintypes.DWORD, blob_ptr]
+        windll.crypt32.CryptProtectData.restype = wintypes.BOOL
+    windll.kernel32.LocalFree.argtypes = [ctypes.c_void_p]
+    windll.kernel32.LocalFree.restype = ctypes.c_void_p
     flags = 0x01  # CRYPTPROTECT_UI_FORBIDDEN
     if unprotect:
         ok = windll.crypt32.CryptUnprotectData(
