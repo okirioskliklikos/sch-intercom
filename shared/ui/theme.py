@@ -188,9 +188,10 @@ QMainWindow, #page {{
 #muted, #announceHint {{
     color: {TEXT_MUTED};
 }}
-#announceHint[state="live"] {{
+#liveBadge {{
     color: {LIVE};
-    font-weight: 700;
+    font-weight: 600;
+    font-size: {m.font_pt(FONT_CARD_TITLE)}pt;
 }}
 #announceHint[state="error"] {{
     color: {LIVE};

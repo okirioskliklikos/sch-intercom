@@ -9,6 +9,7 @@ from unittest import TestCase
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 try:
+    from PySide6.QtGui import QFont
     from PySide6.QtWidgets import QApplication
     from director.qt_gui import (HINT_IDLE, HINT_LIVE, HINT_LIVE_MUTED, HINT_MUTED,
                                  DirectorWindow, create_application, current_metrics,
@@ -189,7 +190,9 @@ class DirectorWindowTests(TestCase):
         self.assertTrue(window.announce_button.live)
         self.assertEqual(self.broadcaster.targets[-1], (None, None))
         self.assertEqual(window.hint.text(), HINT_LIVE)
-        self.assertEqual(window.hint.property("state"), "live")
+        self.assertNotIn("ΖΩΝΤΑΝΑ", window.hint.text())
+        self.assertTrue(window.live_badge.isVisibleTo(window))
+        self.assertEqual(window.live_label.text(), "Live")
         self.assertFalse(window.radio_rooms.isEnabled())
         self.assertFalse(window.room_rows["Γ1"].checkbox.isEnabled())
         self.assertFalse(window.preview_button.isEnabled())
@@ -197,6 +200,22 @@ class DirectorWindowTests(TestCase):
         self.assertFalse(self.mic.live)
         self.assertEqual(self.broadcaster.targets[-1], (set(), set()))
         self.assertEqual(window.hint.text(), HINT_IDLE)
+        self.assertFalse(window.live_badge.isVisibleTo(window))
+
+    def test_live_badge_keeps_circle_in_place(self):
+        window = self.make(self.STATUS)
+        window.show()
+        QApplication.processEvents()
+        button = window.announce_button
+        before = button.mapTo(window, button.rect().topLeft())
+        self.assertFalse(window.live_badge.isVisible())
+        window.announce_button.click()
+        QApplication.processEvents()
+        self.assertTrue(window.live_badge.isVisible())
+        self.assertEqual(button.mapTo(window, button.rect().topLeft()), before)
+        badge = window.live_badge
+        self.assertLess(badge.mapTo(window, badge.rect().bottomLeft()).y(), before.y() + 1)
+        self.assertEqual(window.live_label.font().weight(), QFont.Weight.DemiBold)
 
     def test_unchecking_room_switches_to_specific_rooms(self):
         window = self.make(self.STATUS)
@@ -232,6 +251,8 @@ class DirectorWindowTests(TestCase):
         self.assertTrue(self.mic.live)
         self.assertTrue(window.announce_button.isEnabled())  # λήξη πάντα διαθέσιμη
         self.assertEqual(window.hint.text(), HINT_LIVE_MUTED)
+        self.assertTrue(window.announce_button.muted)   # μικρόφωνο με γραμμή
+        self.assertTrue(window.live_badge.isVisibleTo(window))
         window.announce_button.click()
         self.assertFalse(self.mic.live)
         self.assertFalse(window.announce_button.isEnabled())

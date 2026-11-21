@@ -31,8 +31,9 @@ REFRESH_MS = 100
 NOTICE_SECONDS = 4.0
 
 HINT_IDLE = "Πατήστε για έναρξη"
-HINT_LIVE = "ΖΩΝΤΑΝΑ · πατήστε για λήξη"
-HINT_LIVE_MUTED = "ΖΩΝΤΑΝΑ · σίγαση · πατήστε για λήξη"
+HINT_LIVE = "Πατήστε για λήξη"
+HINT_LIVE_MUTED = "Σίγαση · πατήστε για λήξη"
+LIVE_BADGE = "Live"
 HINT_MUTED = "Σίγαση ενεργή · άρση σίγασης για έναρξη"
 HINT_PREVIEW = "Προεπισκόπηση · δεν μεταδίδεται"
 
@@ -74,6 +75,7 @@ class AnnounceButton(QAbstractButton):
         self.RING = px(theme.ANNOUNCE_RING)
         self.CIRCLE = px(theme.ANNOUNCE_CIRCLE)
         self.live = False
+        self.muted = False
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.setFixedSize(self.RING + 4, self.RING + 4)
         self.setAccessibleName("Ανακοίνωση")
@@ -81,6 +83,12 @@ class AnnounceButton(QAbstractButton):
     def set_live(self, live: bool) -> None:
         if live != self.live:
             self.live = live
+            self.update()
+
+    def set_muted(self, muted: bool) -> None:
+        """Σίγαση: λευκό μικρόφωνο με διαγώνια γραμμή (ui-style.md §4)."""
+        if muted != self.muted:
+            self.muted = muted
             self.update()
 
     def sizeHint(self) -> QSize:
@@ -102,7 +110,7 @@ class AnnounceButton(QAbstractButton):
         painter.setBrush(QColor(fill))
         painter.drawEllipse(center, self.CIRCLE / 2, self.CIRCLE / 2)
         size = px(theme.ANNOUNCE_ICON)
-        icons.render(painter, "mic", theme.WHITE,
+        icons.render(painter, "mic_off" if self.muted else "mic", theme.WHITE,
                      QRectF(center.x() - size / 2, center.y() - size / 2, size, size), 2.2)
         painter.end()
 
@@ -412,6 +420,26 @@ class DirectorWindow(QMainWindow):
         group.setContentsMargins(0, 0, 0, 0)
         group.setSpacing(px(8))
 
+        # «Live ●» πάνω από τον κύκλο μόνο σε ζωντανή ανακοίνωση. Ο χώρος
+        # μένει δεσμευμένος και σε αναμονή, ώστε ο κύκλος να μη μετακινείται.
+        self.live_badge = QWidget()
+        badge = QHBoxLayout(self.live_badge)
+        badge.setContentsMargins(0, 0, 0, 0)
+        badge.setSpacing(px(6))
+        self.live_label = QLabel(LIVE_BADGE)
+        self.live_label.setObjectName("liveBadge")
+        self.live_dot = StatusDot(theme.LIVE)
+        badge.addStretch(1)
+        badge.addWidget(self.live_label)
+        badge.addWidget(self.live_dot, 0, Qt.AlignmentFlag.AlignVCenter)
+        badge.addStretch(1)
+        self.live_badge.setFixedHeight(self.live_badge.sizeHint().height())
+        policy = self.live_badge.sizePolicy()
+        policy.setRetainSizeWhenHidden(True)
+        self.live_badge.setSizePolicy(policy)
+        self.live_badge.setVisible(False)
+        group.addWidget(self.live_badge)
+
         self.announce_button = AnnounceButton()
         self.announce_button.clicked.connect(self.toggle_announcement)
         group.addWidget(self.announce_button, 0, Qt.AlignmentFlag.AlignHCenter)
@@ -648,6 +676,8 @@ class DirectorWindow(QMainWindow):
     def _refresh_announcement(self) -> None:
         mic = self.mic
         self.announce_button.set_live(mic.live)
+        self.announce_button.set_muted(mic.muted)
+        self.live_badge.setVisible(mic.live)
         # Σε ενεργή ανακοίνωση το κουμπί λήξης είναι πάντα διαθέσιμο.
         self.announce_button.setEnabled(mic.live or mic.can_start)
         self.announce_button.setToolTip(
@@ -671,7 +701,7 @@ class DirectorWindow(QMainWindow):
         elif self.notice:
             text, state = self.notice[0], "error"
         elif mic.live:
-            text, state = (HINT_LIVE_MUTED if mic.muted else HINT_LIVE), "live"
+            text, state = (HINT_LIVE_MUTED if mic.muted else HINT_LIVE), "idle"
         elif mic.muted:
             text, state = HINT_MUTED, "idle"
         elif mic.preview:
