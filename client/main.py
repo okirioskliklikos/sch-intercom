@@ -413,8 +413,8 @@ def main() -> None:
             parser.exit(2, f"Η αίτηση εγγραφής δεν καταχωρήθηκε: {exc}\n")
         save_hints(args.client_hints_file, proposed_room, computer_name)
         until = time.strftime("%d/%m/%Y %H:%M", time.localtime(queued["expires_at"]))
-        print(f"Κωδικός εγγραφής: {queued['code']} | Αίθουσα: {proposed_room} | "
-              f"Υπολογιστής: {computer_name} | Ισχύει έως: {until}", flush=True)
+        print(f"Αίθουσα: {proposed_room} | Υπολογιστής: {computer_name} | "
+              f"Κωδικός: {queued['code']} | Λήξη: {until}", flush=True)
         print("Γράψτε τα και κλείστε. Μετά την έγκριση στον Manager ο Client "
               "συνδέεται μόνος του στην επόμενη εκκίνηση.", flush=True)
         return

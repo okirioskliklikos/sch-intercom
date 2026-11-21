@@ -498,8 +498,12 @@ class ClientRun:
             process.stop()
             rc = None
         seconds = time.monotonic() - started
-        line = process.wait_for("Κωδικός εγγραφής:", timeout=1)
-        sas = line.split("Κωδικός εγγραφής:")[1].split("|")[0].strip() if line else None
+        # Σειρά εμφάνισης (απόφαση χρήστη): Αίθουσα | Υπολογιστής | Κωδικός | Λήξη
+        line = process.wait_for("Αίθουσα:", "| Υπολογιστής:", "| Κωδικός:", "| Λήξη:",
+                                timeout=1)
+        ok = line is not None and (line.index("Αίθουσα:") < line.index("Υπολογιστής:")
+                                   < line.index("Κωδικός:") < line.index("Λήξη:"))
+        sas = line.split("Κωδικός:")[1].split("|")[0].strip() if ok else None
         identity = json.loads(Path(self.paths(profile)[3]).read_text(encoding="utf-8"))
         return {"client_id": identity["client_id"], "sas": sas, "rc": rc, "seconds": seconds}
 
