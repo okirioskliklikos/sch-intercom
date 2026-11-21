@@ -99,7 +99,9 @@ class DirectorWindowTests(TestCase):
 
         # Ο κύκλος διατηρεί την εγκεκριμένη διάμετρο και κεντράρεται.
         button = window.announce_button
-        self.assertEqual(button.width(), button.RING + 4)
+        # Λίγος επιπλέον χώρος μόνο για το μεγαλύτερο κύμα «Live».
+        self.assertGreaterEqual(button.width(), button.RING + 4)
+        self.assertLessEqual(button.width(), button.RING + 4 + current_metrics().px(6))
         self.assertAlmostEqual(button.mapTo(window, button.rect().center()).x(),
                                announce.mapTo(window, announce.rect().center()).x(),
                                delta=3)
@@ -125,7 +127,9 @@ class DirectorWindowTests(TestCase):
                hint.mapTo(window, hint.rect().bottomLeft()).y())
         self.assertGreaterEqual(gap, 0)
         self.assertLess(gap, current_metrics().px(20))
-        self.assertEqual(button.width(), button.RING + 4)
+        # Λίγος επιπλέον χώρος μόνο για το μεγαλύτερο κύμα «Live».
+        self.assertGreaterEqual(button.width(), button.RING + 4)
+        self.assertLessEqual(button.width(), button.RING + 4 + current_metrics().px(6))
 
     def test_room_title_and_first_row_always_at_top(self):
         window = self.make([("id-1", "Γ1", True, 0.1)])
@@ -216,6 +220,57 @@ class DirectorWindowTests(TestCase):
         badge = window.live_badge
         self.assertLess(badge.mapTo(window, badge.rect().bottomLeft()).y(), before.y() + 1)
         self.assertEqual(window.live_label.font().weight(), QFont.Weight.DemiBold)
+
+    def settle(self, button):
+        """Περιμένει να τελειώσει η μετάβαση δαχτυλιδιού ↔ κυμάτων."""
+        wait_until(lambda: (QApplication.processEvents() or True)
+                   and button._mix_anim.state() != button._mix_anim.State.Running)
+        QApplication.processEvents()
+
+    def test_live_waves_replace_ring_and_stop_on_end(self):
+        window = self.make(self.STATUS)
+        window.show()
+        button = window.announce_button
+        self.assertFalse(button.waves_running())
+        self.assertEqual(button.waves_mix, 0.0)
+        window.announce_button.click()
+        self.assertTrue(button.waves_running())
+        self.settle(button)
+        self.assertEqual(button.waves_mix, 1.0)     # σταθερό δαχτυλίδι κρυμμένο
+        window.announce_button.click()
+        self.assertTrue(button.waves_running())     # ομαλή επιστροφή δαχτυλιδιού
+        self.settle(button)
+        self.assertEqual(button.waves_mix, 0.0)
+        self.assertFalse(button.waves_running())
+
+    def test_mute_during_live_stops_waves(self):
+        window = self.make(self.STATUS)
+        window.show()
+        button = window.announce_button
+        window.announce_button.click()
+        self.settle(button)
+        window.mute_button.click()
+        self.settle(button)
+        self.assertFalse(button.waves_running())
+        window.mute_button.click()
+        self.settle(button)
+        self.assertTrue(button.waves_running())
+        window.announce_button.click()
+
+    def test_wave_geometry(self):
+        window = self.make(self.STATUS)
+        button = window.announce_button
+        self.assertEqual(len(button.wave_states(0)), 1)
+        self.assertEqual(len(button.wave_states(theme.WAVE_DELAY_MS * 2)), 3)
+        radius, opacity = button.wave_states(0)[0]
+        self.assertAlmostEqual(radius, button.CIRCLE / 2)
+        self.assertAlmostEqual(opacity, theme.WAVE_OPACITY)
+        radius, opacity = button.wave_states(theme.WAVE_PERIOD_MS - 1)[0]
+        self.assertAlmostEqual(radius, button.CIRCLE * theme.WAVE_SCALE / 2, delta=0.1)
+        self.assertLess(opacity, 0.01)
+        # Το μεγαλύτερο κύμα χωρά στο widget.
+        self.assertLessEqual(button.CIRCLE * theme.WAVE_SCALE + button.WAVE_PEN,
+                             button.width())
 
     def test_unchecking_room_switches_to_specific_rooms(self):
         window = self.make(self.STATUS)

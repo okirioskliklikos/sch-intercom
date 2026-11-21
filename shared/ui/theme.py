@@ -117,6 +117,16 @@ LEFT_COLUMN_WIDTH = 290
 ANNOUNCE_RING = 176
 ANNOUNCE_CIRCLE = 140
 ANNOUNCE_ICON = 60
+# Κύματα «Live» (ui-style.md §4): δακτύλιοι από το περίγραμμα του κύκλου
+# έως ×WAVE_SCALE της διαμέτρου του, που ξεθωριάζουν με ease-out.
+WAVE_SCALE = 1.28
+WAVE_WIDTH = 2
+WAVE_OPACITY = 0.7
+WAVE_COUNT = 3
+WAVE_PERIOD_MS = 2400
+WAVE_DELAY_MS = 800
+WAVE_FADE_MS = 300          # εμφάνιση/εξαφάνιση σταθερού δαχτυλιδιού
+WAVE_FRAME_MS = 33          # ~30 fps, αρκετό για ομαλή κίνηση
 ICON = 16
 BRAND_ICON = 22
 DOT = 8
