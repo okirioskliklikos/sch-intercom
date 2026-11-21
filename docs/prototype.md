@@ -241,8 +241,8 @@ quit
 **Εκκίνηση χωρίς χειροκίνητη IP:**
 
 ```powershell
-.venv\Scripts\python.exe -m director.main --tls-cert C:\\SchoolIntercomTLS\\director-tls.crt --tls-key C:\\SchoolIntercomTLS\\director-tls.key
-.venv\Scripts\python.exe -m client.main --room C2627-Γ1 --tls-ca C:\\SchoolIntercomTLS\\director-tls.crt
+.venv\\Scripts\\python.exe -m director.main --tls-cert "C:\\SchoolIntercomTLS\\director-tls.crt" --tls-key "C:\\SchoolIntercomTLS\\director-tls.key"
+.venv\\Scripts\\python.exe -m client.main --room C2627-Γ1 --tls-ca "C:\\SchoolIntercomTLS\\director-tls.crt"
 ```
 
 Στο ίδιο LAN πρέπει να επιτρέπεται η λήψη UDP broadcast στη θύρα **50556** (Windows Firewall, router/AP). Η TCP θύρα **50555** εξακολουθεί να απαιτείται. Για διαφορετική UDP θύρα χρησιμοποιήστε **και στις δύο εφαρμογές** `--discovery-port N`. Οι ανακοινώσεις χρησιμοποιούν limited broadcast `255.255.255.255`, που ενδέχεται να εμποδίζεται από VLAN, client isolation ή firewall και δεν προωθείται μεταξύ υποδικτύων.
