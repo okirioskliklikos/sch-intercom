@@ -118,6 +118,41 @@ class EnrollmentProtocolTests(LocalTLSFixture, unittest.TestCase):
         self.assertFalse(thread.is_alive())
         self.assertIsNone(self.registry.approved_entry(self.client_id))
 
+    def test_approval_at_expiry_is_not_reported_as_expired(self):
+        import shared.enrollment as enrollment
+
+        class TimedOutEvent(threading.Event):
+            def wait(self, timeout=None):
+                super().wait(2.0)  # η έγκριση φτάνει…
+                return False       # …αλλά η αναμονή «έληξε» ταυτόχρονα
+
+        class LatePending(enrollment.Pending):
+            def __init__(self, *args):
+                super().__init__(*args)
+                self.event = TimedOutEvent()
+
+        original = enrollment.Pending
+        enrollment.Pending = LatePending
+        self.addCleanup(setattr, enrollment, "Pending", original)
+        thread = self._start_client()
+        request_id, _, _, code = self.server.pending()[0]
+        self.server.decide(request_id, code, approve=True)
+        thread.join(timeout=5)
+        self.assertEqual(self.result, [True])  # όχι «expired» για εγκεκριμένο Client
+        self.assertIsNotNone(self.registry.approved_entry(self.client_id))
+
+    def test_resolve_accepts_unique_prefix(self):
+        thread = self._start_client()
+        request_id, _, _, code = self.server.pending()[0]
+        self.assertEqual(self.server.resolve(request_id[:8]), request_id)
+        with self.assertRaises(EnrollmentError):
+            self.server.resolve(request_id[:3])
+        with self.assertRaises(EnrollmentError):
+            self.server.resolve("zzzz")
+        self.server.decide(self.server.resolve(request_id[:6]), code, approve=True)
+        thread.join(timeout=5)
+        self.assertEqual(self.result, [True])
+
     def test_port_closed_until_explicit_enrollment(self):
         self.server.stop()
         with self.assertRaises(OSError):

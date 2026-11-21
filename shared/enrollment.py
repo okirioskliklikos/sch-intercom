@@ -255,10 +255,13 @@ class EnrollmentServer:
                                           "director_nonce": nonce})
                     self.log(f"[Εγγραφή] {request_id} | {unsigned['name']} | "
                              f"{unsigned['room']} | SAS {code}")
-                    completed = pending.event.wait(REQUEST_TTL)
+                    pending.event.wait(REQUEST_TTL)
                     with self._lock:
-                        if not completed:
+                        # Μια έγκριση που πρόλαβε ακριβώς στη λήξη έχει ήδη γραφτεί στο
+                        # μητρώο: δεν τη μετατρέπουμε σε «expired» για τον Client.
+                        if not pending.event.is_set():
                             pending.result = "expired"
+                            pending.event.set()
                         result = pending.result
                     send_message(stream, {"type": result, "request_id": request_id})
         except (OSError, ssl.SSLError, EOFError, EnrollmentError, ValueError) as exc:
@@ -274,6 +277,16 @@ class EnrollmentServer:
             return [(rid, p.request["name"], p.request["room"], p.code)
                     for rid, p in self._pending.items()
                     if not p.event.is_set() and time.monotonic() - p.created < REQUEST_TTL]
+
+    def resolve(self, prefix: str) -> str:
+        """Πλήρες ID από μοναδικό πρόθεμα (≥ 4 χαρακτήρες), για ευκολία στο CLI."""
+        with self._lock:
+            if prefix in self._pending:
+                return prefix
+            matches = [rid for rid in self._pending if rid.startswith(prefix)]
+        if len(prefix) < 4 or len(matches) != 1:
+            raise EnrollmentError("Unknown or ambiguous enrollment request ID")
+        return matches[0]
 
     def decide(self, request_id: str, code: str | None = None, *, approve: bool = False):
         with self._lock:

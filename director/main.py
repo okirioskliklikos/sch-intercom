@@ -83,6 +83,7 @@ def show_help() -> str:
   enroll on/off  Άνοιγμα/κλείσιμο περιορισμένης θύρας εγγραφής
   pending        Εκκρεμή αιτήματα με κωδικό επιβεβαίωσης SAS
   approve <ID> <SAS>  Έγκριση αιτήματος μετά τη σύγκριση κωδικού
+                 (αρκούν οι πρώτοι 4+ χαρακτήρες του ID)
   deny <ID>      Απόρριψη αιτήματος εγγραφής
   set-room <UUID> <αίθουσα>  Αλλαγή αίθουσας χωρίς νέο κλειδί
   set-name <UUID> <όνομα>    Αλλαγή ονόματος χωρίς νέο κλειδί
@@ -339,11 +340,13 @@ def command_loop(broadcaster: AudioBroadcaster, stop: threading.Event,
                 for request_id, name, room, sas in requests:
                     print(f"{request_id} | {name} | {room} | SAS {sas}", flush=True)
             elif command == "approve" and len(values) == 2 and enrollment is not None:
-                enrollment.decide(values[0], values[1], approve=True)
-                print(f"Εγκρίθηκε αίτημα {values[0]}", flush=True)
+                request_id = enrollment.resolve(values[0])
+                enrollment.decide(request_id, values[1], approve=True)
+                print(f"Εγκρίθηκε αίτημα {request_id}", flush=True)
             elif command == "deny" and len(values) == 1 and enrollment is not None:
-                enrollment.decide(values[0], approve=False)
-                print(f"Απορρίφθηκε αίτημα {values[0]}", flush=True)
+                request_id = enrollment.resolve(values[0])
+                enrollment.decide(request_id, approve=False)
+                print(f"Απορρίφθηκε αίτημα {request_id}", flush=True)
             elif command == "set-room" and len(values) == 2 and trust is not None:
                 info = trust.update_info(values[0], broadcaster, room=values[1])
                 print(f"Ενημερώθηκε αίθουσα: {info['room']}", flush=True)
