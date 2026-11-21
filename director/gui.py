@@ -87,6 +87,26 @@ def choose_targets(mode: str, checked: set[str], status) -> set[str] | None:
     return set(checked)
 
 
+def room_display_name(room: str, max_chars: int = 15) -> str:
+    """Όνομα αίθουσας ως 15 χαρακτήρες· από τον 16ο «…» (ui-style.md §4)."""
+    return room if len(room) <= max_chars else room[:max_chars].rstrip() + "…"
+
+
+def room_rows_per_column(count: int, rows_fit: int) -> int:
+    """Γραμμές ανά στήλη στην κάρτα αιθουσών (2 στήλες, ui-style.md §5).
+
+    Η πρώτη στήλη γεμίζει όσο χωρά στο ύψος (`rows_fit`) και μόνο τα υπόλοιπα
+    πάνε στη δεύτερη. Αν δεν χωρούν ούτε σε δύο γεμάτες στήλες, μοιράζονται
+    ισόποσα και η λίστα κυλά κατακόρυφα.
+    """
+    if count <= 0:
+        return 0
+    rows_fit = max(1, rows_fit)
+    if count <= 2 * rows_fit:
+        return min(count, rows_fit)
+    return -(-count // 2)
+
+
 def meter_fraction(peak: float) -> float:
     """Κορυφή 0..1 → 0..1 σε λογαριθμική κλίμακα, όπως ακούγεται η φωνή."""
     if peak <= 0:

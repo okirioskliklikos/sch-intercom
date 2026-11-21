@@ -70,11 +70,37 @@ class DirectorWindowTests(TestCase):
         self.assertFalse(any(b.isEnabled() for k, b in window.nav_buttons.items() if k != "home"))
         self.assertFalse(window.radio_group.isEnabled())
 
-    def test_two_column_grid(self):
-        window = self.make(self.STATUS)
-        positions = {room: window.room_grid.getItemPosition(window.room_grid.indexOf(row))[:2]
-                     for room, row in window.room_rows.items()}
-        self.assertEqual(positions, {"Α1": (0, 0), "Γ1": (0, 1), "Γ2": (1, 0)})
+    def positions(self, window):
+        return {room: window.room_grid.getItemPosition(window.room_grid.indexOf(row))[:2]
+                for room, row in window.room_rows.items()}
+
+    def test_first_column_fills_before_second(self):
+        status = [(f"id-{i}", f"Αίθουσα {i:02d}", True, 0.1) for i in range(12)]
+        window = self.make(status)
+        row = current_metrics().px(theme.ROW_HEIGHT)
+        window.show()
+        for height in (row * 30, row * 9):
+            window.rooms_area.resize(window.rooms_area.width(), height)
+            QApplication.processEvents()
+            window._layout_rooms()
+            rows_fit = window._room_rows_per_column
+            with self.subTest(rows_per_column=rows_fit):
+                columns = {pos[1] for pos in self.positions(window).values()}
+                if rows_fit >= 12:
+                    self.assertEqual(columns, {0})
+                else:
+                    self.assertEqual(columns, {0, 1})
+                    self.assertEqual(self.positions(window)["Αίθουσα 00"], (0, 0))
+                    self.assertEqual(self.positions(window)[f"Αίθουσα {rows_fit:02d}"], (0, 1))
+        widths = {r.width() for r in window.room_rows.values()}
+        self.assertEqual(len(widths), 1)  # ίσες στήλες
+
+    def test_long_room_name_is_cut_after_15_characters(self):
+        long_name = "Εργαστήριο Φυσικής Β"
+        window = self.make([("id-1", long_name, True, 0.1)])
+        label = window.room_rows[long_name].label
+        self.assertEqual(label.text(), "Εργαστήριο Φυσι…")
+        self.assertEqual(label.toolTip(), long_name)
 
     def test_start_and_stop_from_round_button(self):
         window = self.make(self.STATUS)
@@ -169,7 +195,7 @@ class DirectorWindowTests(TestCase):
         m = current_metrics()
         self.assertGreaterEqual(m.base_pt, theme.FONT_MIN_PT)
         self.assertEqual(window.announce_button.RING, m.px(theme.ANNOUNCE_RING))
-        self.assertEqual(window.room_rows["Α1"].height(), m.px(theme.ROW_HEIGHT) + 1)
+        self.assertEqual(window.room_rows["Α1"].height(), m.px(theme.ROW_HEIGHT))
         self.assertEqual(QApplication.font().pointSizeF(), m.font_pt())
         available = window.screen().availableGeometry().size()
         self.assertLessEqual(window.minimumWidth(), available.width())

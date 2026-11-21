@@ -15,12 +15,13 @@ from PySide6.QtCore import QPointF, QRectF, QSize, Qt, QTimer
 from PySide6.QtGui import QColor, QFontMetrics, QPainter
 from PySide6.QtWidgets import (QAbstractButton, QApplication, QButtonGroup, QCheckBox,
                                QFrame, QGridLayout, QHBoxLayout, QLabel, QMainWindow,
-                               QPushButton, QRadioButton, QScrollArea, QSizePolicy,
+                               QPushButton, QRadioButton, QScrollArea, QSizePolicy, QStyle,
                                QVBoxLayout, QWidget)
 
 from director.broadcast import AudioBroadcaster, MAX_CLIENTS
 from director.gui import (MODE_ALL, MODE_ROOMS, DirectorMicrophone, choose_targets,
-                          meter_fraction, room_states)
+                          meter_fraction, room_display_name, room_rows_per_column,
+                          room_states)
 from shared.discovery import announce, director_id
 from shared.ui import icons, theme
 
@@ -162,27 +163,6 @@ class StatusDot(QWidget):
         painter.end()
 
 
-class ElidedLabel(QLabel):
-    """Κείμενο σε μία γραμμή, με «…» όταν δεν χωρά (ui-style.md §2)."""
-
-    def __init__(self, text: str, parent=None):
-        super().__init__(parent)
-        self.full_text = text
-        self.setToolTip(text)
-        self.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
-        self.setMinimumWidth(px(40))
-        self._elide()
-
-    def resizeEvent(self, event) -> None:
-        super().resizeEvent(event)
-        self._elide()
-
-    def _elide(self) -> None:
-        metrics = QFontMetrics(self.font())
-        self.setText(metrics.elidedText(self.full_text, Qt.TextElideMode.ElideRight,
-                                        max(self.width(), 40)))
-
-
 class RoomRow(QWidget):
     """Γραμμή αίθουσας ~30px: checkbox, όνομα, κουκκίδα κατάστασης δεξιά."""
 
@@ -191,14 +171,16 @@ class RoomRow(QWidget):
         self.room = room
         self.setObjectName("roomRow")
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
-        self.setFixedHeight(px(theme.ROW_HEIGHT) + 1)
+        self.setFixedHeight(px(theme.ROW_HEIGHT))
         layout = QHBoxLayout(self)
         layout.setContentsMargins(px(2), 0, px(2), 0)
         layout.setSpacing(px(9))
         self.checkbox = QCheckBox()
         self.checkbox.setFixedWidth(px(18))  # χωρίς κείμενο: όχι κενό spacing
         self.checkbox.setAccessibleName(room)
-        self.label = ElidedLabel(room)
+        self.label = QLabel(room_display_name(room, theme.ROOM_NAME_MAX_CHARS))
+        self.label.setObjectName("roomName")
+        self.label.setToolTip(room)
         self.dot = StatusDot(theme.ROOM_DOT_OFFLINE)
         layout.addWidget(self.checkbox)
         layout.addWidget(self.label, 1)
@@ -218,6 +200,16 @@ class RoomRow(QWidget):
         self.checkbox.setEnabled(enabled)
         self.dot.set_color(theme.ROOM_DOT_ONLINE if online else theme.ROOM_DOT_OFFLINE)
         self.dot.setToolTip("Online" if online else "Κανένας Client online")
+
+
+class _ResizeNotifier(QWidget):
+    def __init__(self, on_resize: Callable[[], None], parent=None):
+        super().__init__(parent)
+        self._on_resize = on_resize
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        self._on_resize()
 
 
 def _card(title: QWidget | str) -> tuple[QFrame, QVBoxLayout]:
@@ -249,6 +241,8 @@ class DirectorWindow(QMainWindow):
         self.checked: set[str] = set()
         self.rooms: list[tuple[str, bool]] = []
         self.room_rows: dict[str, RoomRow] = {}
+        self._room_rows_per_column: int | None = None
+        self._room_columns = 0
         self.notice: tuple[str, float] | None = None
 
         self.setWindowTitle(WINDOW_TITLE)
@@ -353,11 +347,15 @@ class DirectorWindow(QMainWindow):
         left.addStretch(1)
         columns.addWidget(left_widget, 0, Qt.AlignmentFlag.AlignTop)
 
-        right = QVBoxLayout()
+        # Ο χώρος δεξιά: η κάρτα πάνω αριστερά, στο πλάτος των δύο στηλών της.
+        # Το ύψος του ορίζει πόσες αίθουσες χωρούν στην πρώτη στήλη.
+        self.rooms_area = _ResizeNotifier(self._layout_rooms)
+        right = QVBoxLayout(self.rooms_area)
         right.setContentsMargins(0, 0, 0, 0)
-        right.addWidget(self._build_rooms_card())
+        right.addWidget(self._build_rooms_card(), 0,
+                        Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
         right.addStretch(1)
-        columns.addLayout(right, 1)
+        columns.addWidget(self.rooms_area, 1)
         layout.addLayout(columns, 1)
         return page
 
@@ -432,7 +430,8 @@ class DirectorWindow(QMainWindow):
         title_layout.addWidget(self.online_count)
         title_layout.addStretch(1)
         card, layout = _card(title_row)
-        card.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum)
+        card.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Maximum)
+        self.rooms_card, self.rooms_card_layout, self.rooms_title = card, layout, title_row
 
         self.empty_rooms = QLabel("Δεν έχει συνδεθεί ακόμη κανένας Client.")
         self.empty_rooms.setObjectName("muted")
@@ -445,10 +444,9 @@ class DirectorWindow(QMainWindow):
         self.room_grid.setHorizontalSpacing(px(16))
         self.room_grid.setVerticalSpacing(0)
         self.room_scroll = QScrollArea()
-        self.room_scroll.setWidgetResizable(True)
+        self.room_scroll.setWidgetResizable(False)
         self.room_scroll.setFrameShape(QFrame.Shape.NoFrame)
         self.room_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        self.room_scroll.setSizeAdjustPolicy(QScrollArea.SizeAdjustPolicy.AdjustToContents)
         self.room_scroll.setWidget(self.room_grid_widget)
         layout.addWidget(self.room_scroll)
         return card
@@ -545,14 +543,53 @@ class DirectorWindow(QMainWindow):
             self.room_grid.removeWidget(row)
             row.deleteLater()
         self.room_rows = {}
-        for index, room in enumerate(names):
-            row = RoomRow(room, self.room_toggled)
-            self.room_rows[room] = row
-            self.room_grid.addWidget(row, index // 2, index % 2)
-        self.room_grid.setColumnStretch(0, 1)
-        self.room_grid.setColumnStretch(1, 1)
+        for room in names:
+            self.room_rows[room] = RoomRow(room, self.room_toggled)
         # Οι επιλογές αιθουσών που χάθηκαν εντελώς δεν κρατιούνται.
         self.checked &= set(names)
+        self._room_rows_per_column = None
+        self._layout_rooms()
+
+    def _room_column_width(self) -> int:
+        """Ίσες στήλες, όσο το μεγαλύτερο όνομα (με όριο), checkbox και κουκκίδα."""
+        rows = list(self.room_rows.values())
+        rows[0].label.ensurePolished()
+        metrics = QFontMetrics(rows[0].label.font())
+        name = max(metrics.horizontalAdvance(r.label.text()) for r in rows) + px(2)
+        spacing = px(9)
+        return px(2) * 2 + px(18) + spacing + name + px(theme.ROOM_DOT_GAP) + px(theme.DOT)
+
+    def _layout_rooms(self) -> None:
+        """Πρώτη στήλη ως το διαθέσιμο ύψος, μετά δεύτερη (ui-style.md §5)."""
+        if not self.room_rows:
+            return
+        row_height = px(theme.ROW_HEIGHT)
+        margins = self.rooms_card_layout.contentsMargins()
+        chrome = (margins.top() + margins.bottom() + self.rooms_card_layout.spacing()
+                  + self.rooms_title.sizeHint().height() + 2)
+        rows_fit = max(1, (self.rooms_area.height() - chrome) // row_height)
+        names = list(self.room_rows)
+        rows = room_rows_per_column(len(names), rows_fit)
+        width = self._room_column_width()
+        columns = 1 if len(names) <= rows else 2
+        self._room_columns = columns
+        if rows != self._room_rows_per_column:
+            self._room_rows_per_column = rows
+            for row in self.room_rows.values():
+                self.room_grid.removeWidget(row)
+            for index, room in enumerate(names):
+                self.room_grid.addWidget(self.room_rows[room], index % rows, index // rows)
+        for row in self.room_rows.values():
+            row.setFixedWidth(width)
+        scrolls = rows > rows_fit
+        scrollbar = (self.room_scroll.style().pixelMetric(QStyle.PixelMetric.PM_ScrollBarExtent)
+                     + px(6)) if scrolls else 0
+        self.room_scroll.setVerticalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAsNeeded if scrolls else
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        grid_width = width * columns + self.room_grid.horizontalSpacing() * (columns - 1)
+        self.room_grid_widget.setFixedSize(grid_width, rows * row_height)
+        self.room_scroll.setFixedSize(grid_width + scrollbar, min(rows, rows_fit) * row_height)
 
     def _refresh_announcement(self) -> None:
         mic = self.mic

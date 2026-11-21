@@ -73,6 +73,7 @@ FONT_MIN_PT = 12.0
 MOCKUP_BASE_PT = 9.75
 FONT_SMALL = 0.92        # pill «Προεπισκόπηση»
 FONT_NAV = 1.08          # αριστερό μενού
+FONT_ROOM = 1.1          # ονόματα αιθουσών
 FONT_CARD_TITLE = 1.15   # τίτλος κάρτας
 FONT_PAGE_TITLE = 1.4    # τίτλος σελίδας
 
@@ -109,6 +110,8 @@ CHECK_RADIUS = 3
 CARD_PADDING = 13
 CARD_SPACING = 14
 ROW_HEIGHT = 30
+ROOM_NAME_MAX_CHARS = 15    # από τον 16ο χαρακτήρα «…» (tooltip το πλήρες)
+ROOM_DOT_GAP = 9
 SIDEBAR_WIDTH = 200
 LEFT_COLUMN_WIDTH = 290
 ANNOUNCE_RING = 176
@@ -257,8 +260,8 @@ QRadioButton::indicator:checked {{
 QCheckBox::indicator:unchecked:disabled, QRadioButton::indicator:unchecked:disabled {{
     border-color: {CARD_BORDER};
 }}
-#roomRow {{
-    border-bottom: 1px solid {CARD_BORDER};
+#roomName {{
+    font-size: {m.font_pt(FONT_ROOM)}pt;
 }}
 QScrollArea, #roomGrid {{
     background: transparent;
