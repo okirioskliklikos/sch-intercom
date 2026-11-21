@@ -105,6 +105,10 @@ def _unsigned_request(request: dict) -> dict:
             raise ValueError
         unsigned = {k: request[k] for k in expected}
         cert.public_key().verify(signature, canonical(unsigned), ec.ECDSA(hashes.SHA256()))
+        # Proof of possession alone is insufficient if the certificate envelope
+        # was not actually signed by the advertised key.
+        cert.public_key().verify(cert.signature, cert.tbs_certificate_bytes,
+                                 ec.ECDSA(cert.signature_hash_algorithm))
         return unsigned
     except (ValueError, KeyError, TypeError, InvalidSignature) as exc:
         raise EnrollmentError("Invalid Client identity or key-possession proof") from exc
@@ -186,11 +190,14 @@ class EnrollmentServer:
         with self._lock:
             self._stop.set()
             listener, self._listener = self._listener, None
+            thread, self._thread = self._thread, None
             if listener is not None:
                 listener.close()
             for pending in self._pending.values():
                 pending.result = "denied"
                 pending.event.set()
+        if thread is not None and threading.current_thread() is not thread:
+            thread.join(timeout=1)
         self.log("[Εγγραφή] Η λειτουργία εγγραφής σταμάτησε.")
 
     def _serve(self):
