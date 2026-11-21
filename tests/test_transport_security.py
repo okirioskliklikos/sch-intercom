@@ -30,7 +30,7 @@ class TLSTransportTests(unittest.TestCase):
         ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
 
     def _exchange(self, *, client_ca=None, server_name=DEFAULT_SERVER_NAME,
-                  plaintext=False):
+                  plaintext=False, untrusted=False):
         listener = socket.socket()
         listener.bind(("127.0.0.1", 0))
         listener.listen(1)
@@ -60,7 +60,7 @@ class TLSTransportTests(unittest.TestCase):
                     except (OSError, ConnectionError):
                         pass
                 else:
-                    with connect_tls(raw, client_context(client_ca or self.cert), server_name) as stream:
+                    with connect_tls(raw, ssl.create_default_context() if untrusted else client_context(client_ca or self.cert), server_name) as stream:
                         stream.sendall(b"pcm-block")
                         self.assertEqual(stream.recv(32), b"encrypted-pcm")
         finally:
@@ -80,7 +80,7 @@ class TLSTransportTests(unittest.TestCase):
     def test_untrusted_certificate_rejected(self):
         # Trusting the default public roots cannot validate our ephemeral self-signed server.
         with self.assertRaises(ssl.SSLCertVerificationError):
-            self._exchange(client_ca=Path(self.directory.name) / "missing.crt")
+            self._exchange(untrusted=True)
 
     def test_plaintext_is_not_a_protocol_connection(self):
         received, errors = self._exchange(plaintext=True)
