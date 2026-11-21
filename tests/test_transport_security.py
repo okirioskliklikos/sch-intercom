@@ -43,10 +43,10 @@ class TLSTransportTests(unittest.TestCase):
                 raw, _ = listener.accept()
                 with raw:
                     with accept_tls(raw, server_context(self.cert, self.key)) as stream:
-                        received.append(stream.recv(16))
+                        received.append(stream.recv(len(b"pcm-block")))
                         stream.sendall(b"encrypted-pcm")
                         if bidirectional:
-                            received.append(stream.recv(16))
+                            received.append(stream.recv(len(b"client-heartbeat")))
             except (OSError, ssl.SSLError) as exc:
                 errors.append(exc)
         worker = threading.Thread(target=server, daemon=True)
