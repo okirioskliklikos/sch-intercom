@@ -19,19 +19,36 @@ py -m venv .venv
 
 Σε Linux: `python3 -m venv .venv` και `.venv/bin/python -m pip install -e .`.
 
-## Εκτέλεση
+## Εκτέλεση — Φάση 4 (TLS απαιτείται)
+
+Δημιουργήστε **τοπικά** στον Director δοκιμαστικό self-signed πιστοποιητικό με OpenSSL (μία φορά, σε ασφαλή φάκελο εκτός repository):
+
+```bash
+openssl req -x509 -newkey rsa:3072 -sha256 -nodes -days 365 \
+  -keyout director-tls.key -out director-tls.crt \
+  -subj "/CN=school-intercom-director" \
+  -addext "subjectAltName=DNS:school-intercom-director"
+```
+
+Το `director-tls.key` παραμένει **μόνο** στον Director· δώστε περιορισμένα δικαιώματα πρόσβασης και μη το ανεβάσετε ποτέ στο GitHub. Αντιγράψτε **μόνο** το `director-tls.crt` στον Client μέσω αξιόπιστου τρόπου (επιβεβαιώστε το αποτύπωμα εκτός δικτύου). Αντικαταστήστε αυτό το εργαστηριακό πιστοποιητικό με κατάλληλη διαχείριση πιστοποιητικών πριν από τη διανομή.
 
 Director (υπολογιστής με μικρόφωνο):
 
 ```powershell
-.venv\Scripts\python.exe -m director.main
+.venv\Scripts\python.exe -m director.main --tls-cert director-tls.crt --tls-key director-tls.key
 ```
 
 Client (ένας ή περισσότεροι υπολογιστές — αυτόματο discovery):
 
 ```powershell
-.venv\Scripts\python.exe -m client.main
+.venv\Scripts\python.exe -m client.main --tls-ca director-tls.crt
 ```
+
+Το σταθερό όνομα TLS `school-intercom-director` είναι **όνομα πιστοποιητικού**, όχι IP ή απαίτηση DNS resolution· το πραγματικό host προκύπτει από το discovery ή το `--host`. Αν το πιστοποιητικό έχει διαφορετικό SAN, ορίστε το αντίστοιχο `--tls-server-name` στον Client. Η απουσία/αποτυχία πιστοποιητικού οδηγεί σε αποτυχία σύνδεσης, **όχι σε μετάβαση σε plaintext**. Το UDP discovery εξακολουθεί να μην πιστοποιείται και δεν αποτελεί πηγή εμπιστοσύνης.
+
+Για GUI Director προσθέστε τις ίδιες `--tls-cert` / `--tls-key` παραμέτρους στην εντολή `--gui`. **Προς πραγματική επιβεβαίωση:** TLS/GUI/heartbeat/PCM μαζί σε Windows 10/11 και με πολλούς Clients. Η τρέχουσα έκδοση δεν επιβάλλει ακόμη έγκριση Clients.
+
+
 
 Για διαφορετική πόρτα: `--port 50555`. Για συγκεκριμένη συσκευή: `--device N` (αριθμός από `python -m sounddevice`).
 
@@ -43,10 +60,10 @@ Client (ένας ή περισσότεροι υπολογιστές — αυτό
 
 ```powershell
 .venv\Scripts\python.exe -m pip install -e .[gui]
-.venv\Scripts\python.exe -m director.main --gui
+.venv\Scripts\python.exe -m director.main --gui --tls-cert director-tls.crt --tls-key director-tls.key
 ```
 
-Σε Linux: `.venv/bin/python -m pip install -e .[gui]` και `.venv/bin/python -m director.main --gui`. Χωρίς PySide6 το `--gui` τερματίζει με σαφές μήνυμα· η κλασική λειτουργία `python -m director.main` (CLI) δεν αλλάζει.
+Σε Linux: `.venv/bin/python -m pip install -e .[gui]` και `.venv/bin/python -m director.main --gui --tls-cert director-tls.crt --tls-key director-tls.key`. Χωρίς PySide6 το `--gui` τερματίζει με σαφές μήνυμα· η κλασική λειτουργία `python -m director.main` (CLI) δεν αλλάζει.
 
 **Χρήση:**
 - Ο Director ανοίγει σε αναμονή με **κλειστό μικρόφωνο** και κανέναν αποδέκτη, ακόμη κι αν έχουν ήδη συνδεθεί Clients.
@@ -57,7 +74,7 @@ Client (ένας ή περισσότεροι υπολογιστές — αυτό
 - Σφάλμα μικροφώνου (π.χ. δεν υπάρχει ή αποσυνδέθηκε η συσκευή) σταματά την ανακοίνωση ή την προεπισκόπηση και εμφανίζεται κάτω από το κουμπί. Οι Clients μένουν συνδεδεμένοι. Δεν γίνεται αυτόματη επανάληψη· το επόμενο πάτημα ξαναδοκιμάζει.
 - «Συνδεδεμένος» σημαίνει ότι τρέχουν το discovery και η αποδοχή Clients του Director. Οι υπόλοιπες καρτέλες του μενού είναι ανενεργές μέχρι να υλοποιηθούν. Το κλείσιμο του παραθύρου στέλνει STOP προτού κλείσουν οι συνδέσεις (tray: μεταγενέστερη εργασία).
 
-Οι ενδείξεις στάθμης και online **δεν επιβεβαιώνουν** ότι η ανακοίνωση ακούστηκε από φυσικά ηχεία. Το GUI **δεν** παρέχει πιστοποίηση ή TLS· μόνο σε έμπιστο εργαστηριακό δίκτυο.
+Οι ενδείξεις στάθμης και online **δεν επιβεβαιώνουν** ότι η ανακοίνωση ακούστηκε από φυσικά ηχεία. Το GUI χρησιμοποιεί TLS με πιστοποίηση Director· **δεν** παρέχει ακόμη έγκριση/πιστοποίηση Clients, επομένως επιτρέπεται μόνο εργαστηριακή χρήση.
 
 Έλεγχοι χωρίς οθόνη και κάρτα ήχου: `python -m unittest tests.test_director_gui tests.test_director_microphone tests.test_director_qt_gui tests.test_ui_theme -v` (τα tests του παραθύρου τρέχουν με `QT_QPA_PLATFORM=offscreen` και παραλείπονται αν λείπει το PySide6). Στιγμιότυπα για σύγκριση με το mockup: `python -m tools.render_director_gui --out-dir screenshots`.
 
