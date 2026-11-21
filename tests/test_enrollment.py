@@ -1,5 +1,6 @@
 """Enrollment TLS/SAS and Manager-authoritative metadata tests (no physical devices)."""
 import socket
+import ssl
 import threading
 import time
 from pathlib import Path
@@ -63,6 +64,13 @@ class EnrollmentProtocolTests(LocalTLSFixture, unittest.TestCase):
             time.sleep(0.01)
         self.assertTrue(self.server.pending(), "No pending authenticated request")
         return thread
+
+    def test_wrong_manager_hostname_cannot_enroll(self):
+        with self.assertRaises((ssl.SSLError, OSError)):
+            enroll_client("127.0.0.1", self.server.port, self.manager_cert,
+                          "untrusted-manager", self.request, log=lambda message: None)
+        self.assertFalse(self.server.pending())
+        self.assertIsNone(self.registry.approved_entry(self.client_id))
 
     def test_signed_request_cannot_change_room_or_name(self):
         self.assertEqual(_unsigned_request(self.request)["client_id"], self.client_id)
