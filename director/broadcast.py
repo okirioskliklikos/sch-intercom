@@ -10,7 +10,7 @@ import threading
 import time
 from collections.abc import Callable
 
-from shared.audio import (encode_frame, encode_control, MESSAGE_KEEPALIVE,
+from shared.audio import (encode_frame, encode_control, encode_client_settings, MESSAGE_KEEPALIVE,
                           MESSAGE_STREAM_STOP)
 from shared.control import (HEARTBEAT_TIMEOUT_SECONDS, KEEPALIVE_INTERVAL_SECONDS,
                             heartbeat_receiver)
@@ -96,7 +96,7 @@ class AudioBroadcaster:
                 or (ids is not None and session.client_id in ids))
 
     def add_client(self, connection: socket.socket, client_id: str, room: str,
-                   address: object = "local") -> bool:
+                   address: object = "local", *, name: str | None = None) -> bool:
         """Αναλαμβάνει το socket. Διπλό UUID αντικαθιστά την προηγούμενη σύνδεση."""
         validate_identity(client_id, room)
         with self._lock:
@@ -108,6 +108,9 @@ class AudioBroadcaster:
                                      self.queue_blocks, self._remove_client,
                                      self._record_heartbeat, self.heartbeat_timeout)
             session.selected = self._is_selected(session)
+            if name is not None:
+                session.name = name
+                session.enqueue(encode_client_settings(room, name))
             self._sessions[client_id] = session
             self._offline.pop(client_id, None)
         if existing is not None:
@@ -137,6 +140,19 @@ class AudioBroadcaster:
                 session.set_selected(self._is_selected(session))
                 if session.selected and session.enqueue(voice):
                     self.dropped += 1
+
+    def update_client_info(self, client_id: str, room: str, name: str) -> None:
+        """Apply Manager-owned room immediately and queue Client metadata update."""
+        frame = encode_client_settings(room, name)
+        with self._lock:
+            session = self._sessions.get(client_id)
+            if session is None:
+                return
+            # FIFO preserves settings relative to PCM; routing changes now.
+            session.room = room
+            session.name = name
+            session.set_selected(self._is_selected(session))
+            session.enqueue(frame)
 
     def disconnect_client(self, client_id: str) -> None:
         """Drop an authenticated Client immediately on registry revocation."""
@@ -176,6 +192,7 @@ class _ClientSession:
                  heartbeat_timeout: float = HEARTBEAT_TIMEOUT_SECONDS):
         self.client_id = client_id
         self.room = room
+        self.name = ""
         self.connection = connection
         self.address = address
         self.pending: queue.Queue[bytes] = queue.Queue(maxsize=queue_blocks)
