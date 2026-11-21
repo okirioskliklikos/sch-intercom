@@ -255,6 +255,42 @@ class SignedClientRegistry:
                 "status": "approved", "changed_in_version": self.version + 1})
             self._commit(updated)
 
+    def update_client_info(self, client_id: str, *, room: str | None = None,
+                           name: str | None = None) -> dict:
+        """Manager-owned metadata, independent of the authenticated Client key."""
+        from shared.identity import validate_identity
+        if room is not None:
+            validate_identity(client_id, room)
+        if name is not None:
+            if not isinstance(name, str) or not 1 <= len(name) <= 64 or name.strip() != name:
+                raise RegistryError("Invalid computer name")
+            if any(ord(ch) < 32 for ch in name):
+                raise RegistryError("Invalid computer name")
+        if room is None and name is None:
+            raise RegistryError("No metadata changes")
+        with self.lock:
+            self._refresh_from_disk()
+            updated = self.snapshot()
+            for entry in updated["clients"]:
+                if entry["client_id"] != client_id:
+                    continue
+                if entry["status"] != "approved":
+                    raise RegistryError("Only approved Clients can change metadata")
+                new_room = room if room is not None else entry["room"]
+                new_name = name if name is not None else entry["name"]
+                if new_room != entry["room"] or new_name != entry["name"]:
+                    entry.update({"room": new_room, "name": new_name,
+                                  "changed_in_version": self.version + 1})
+                    self._commit(updated)
+                return {"room": new_room, "name": new_name}
+            raise RegistryError("Unknown Client")
+
+    def approved_entry(self, client_id: str) -> dict | None:
+        with self.lock:
+            return next((dict(entry) for entry in self._document["registry"]["clients"]
+                         if entry["client_id"] == client_id
+                         and entry["status"] == "approved"), None)
+
     def revoke(self, client_id: str, *, blocked: bool = False) -> None:
         with self.lock:
             self._refresh_from_disk()
@@ -297,8 +333,8 @@ class SignedClientRegistry:
                 return f"πιστοποιητικό σε κατάσταση {entry['status']}"
             if entry["client_id"] != client_id:
                 return f"το πιστοποιητικό ανήκει σε άλλο UUID ({entry['client_id']})"
-            if entry["room"] != room:
-                return f"εγκεκριμένο για αίθουσα {entry['room']}, δηλώθηκε {room}"
+            # Room is metadata owned by the Manager, not part of key identity.
+            # A mismatched old Client hint is logged by the caller, not denied.
             return None
 
     def tls_server_context(self, certfile: Path, keyfile: Path) -> ssl.SSLContext:
