@@ -1,7 +1,7 @@
 """Enrollment TLS/SAS and Manager-authoritative metadata tests (no physical devices)."""
+import json
 import socket
 import ssl
-import threading
 import time
 from pathlib import Path
 import tempfile
@@ -16,8 +16,8 @@ from shared.audio import (ControlMessage, MESSAGE_CLIENT_SETTINGS,
 from shared.client_hints import load_hints, save_hints
 from shared.client_registry import SignedClientRegistry
 from shared.device_identity import create_device_identity
-from shared.enrollment import (EnrollmentError, EnrollmentServer, REQUEST_TTL,
-                               _unsigned_request, enroll_client, make_request, sas_code)
+from shared.enrollment import (EnrollmentError, EnrollmentServer, IncorrectCodeError,
+                               REQUEST_TTL, _unsigned_request, enroll_client, make_request)
 from tests.tls_support import LocalTLSFixture
 
 
@@ -25,55 +25,44 @@ class EnrollmentProtocolTests(LocalTLSFixture, unittest.TestCase):
     def setUp(self):
         super().setUp()
         root = Path(self._tls_temp.name)
+        self.root = root
         self.manager_cert = root / "director.crt"
         self.manager_key = root / "director.key"
         self.registry = SignedClientRegistry(root / "registry.json",
                                              self.manager_cert, self.manager_key)
         self.trust = RegistryTrust(self.registry, self.manager_cert, self.manager_key)
         self.messages = []
-        self.server = EnrollmentServer(self.manager_cert, self.manager_key, self.trust,
-                                       host="127.0.0.1", port=0,
-                                       log=self.messages.append)
+        self.now = [1_800_000_000.0]
+        self.pending_file = root / "enrollment-pending.json"
+        self.server = self._server()
         self.server.start()
         self.addCleanup(self.server.stop)
         self.client_id = str(uuid.uuid4())
         self.client_dir = root / "client"
         self.cert, self.key, self.password = create_device_identity(
             self.client_dir, self.client_id)
-        self.request = make_request(self.client_id, "C2627-Γ1", "Board1",
-                                    self.cert.read_bytes(), self.key.read_bytes(),
-                                    self.password)
+        self.request = self._request()
 
-    def _start_client(self):
-        self.result = []
-        self.client_log = []
+    def _server(self):
+        server = EnrollmentServer(self.manager_cert, self.manager_key, self.trust,
+                                  host="127.0.0.1", port=0, pending_file=self.pending_file,
+                                  log=self.messages.append, clock=lambda: self.now[0])
+        self.addCleanup(server.stop)
+        return server
 
-        def do_enrollment():
-            try:
-                accepted = enroll_client("127.0.0.1", self.server.port,
-                                         self.manager_cert, "school-intercom-director",
-                                         self.request, log=self.client_log.append)
-                self.result.append(accepted)
-            except Exception as exc:
-                self.result.append(exc)
+    def _request(self, room="C2627-Γ1", name="Board1"):
+        return make_request(self.client_id, room, name, self.cert.read_bytes(),
+                            self.key.read_bytes(), self.password)
 
-        thread = threading.Thread(target=do_enrollment, daemon=True)
-        thread.start()
-        end = time.monotonic() + 4
-        while not self.server.pending() and time.monotonic() < end:
-            time.sleep(0.01)
-        self.assertTrue(self.server.pending(), "No pending authenticated request")
-        return thread
-
-    def _pending_with_code(self):
-        """Ο SAS του αιτήματος όπως τον βλέπει ο Client (ο Manager δεν τον δείχνει)."""
-        return [(rid, name, room, self.server._pending[rid].code)
-                for rid, name, room in self.server.pending()]
+    def _enroll(self, request=None):
+        """Ο Client υποβάλλει και επιστρέφει αμέσως (δεν περιμένει έγκριση)."""
+        return enroll_client("127.0.0.1", self.server.port, self.manager_cert,
+                             "school-intercom-director", request or self.request)
 
     def test_wrong_manager_hostname_cannot_enroll(self):
         with self.assertRaises((ssl.SSLError, OSError)):
             enroll_client("127.0.0.1", self.server.port, self.manager_cert,
-                          "untrusted-manager", self.request, log=lambda message: None)
+                          "untrusted-manager", self.request)
         self.assertFalse(self.server.pending())
         self.assertIsNone(self.registry.approved_entry(self.client_id))
 
@@ -85,92 +74,107 @@ class EnrollmentProtocolTests(LocalTLSFixture, unittest.TestCase):
             with self.subTest(field=field), self.assertRaises(EnrollmentError):
                 _unsigned_request(altered)
 
-    def test_challenge_matches_sas_and_explicit_approval(self):
-        thread = self._start_client()
-        request_id, name, room, code = self._pending_with_code()[0]
-        self.assertEqual((name, room), ("Board1", "C2627-Γ1"))
-        end = time.monotonic() + 4
-        while not self.client_log and time.monotonic() < end:
-            time.sleep(0.01)
-        self.assertIn(code, " ".join(self.client_log))
-        self.server.decide(request_id, code, approve=True)
-        thread.join(timeout=5)
-        self.assertFalse(thread.is_alive())
-        self.assertEqual(self.result, [True])
+    def test_client_returns_immediately_and_approval_works_offline(self):
+        started = time.monotonic()
+        queued = self._enroll()
+        self.assertLess(time.monotonic() - started, 5)
+        self.assertEqual(queued["expires_at"], int(self.now[0] + REQUEST_TTL))
+        self.assertEqual(REQUEST_TTL, 24 * 3600)
+        [(request_id, room, name, expires)] = self.server.pending()
+        self.assertEqual((request_id, room, name), (self.request["request_id"],
+                                                     "C2627-Γ1", "Board1"))
+        # Θύρα κλειστή και Client εκτός: η έγκριση γίνεται κανονικά.
+        self.server.stop()
+        info = self.server.decide(request_id, queued["code"], approve=True)
+        self.assertEqual((info["room"], info["name"]), ("C2627-Γ1", "Board1"))
         record = self.registry.approved_entry(self.client_id)
         self.assertEqual((record["room"], record["name"]), ("C2627-Γ1", "Board1"))
         self.assertEqual(self.trust.context().cert_store_stats()["x509"], 1)
+        self.assertFalse(self.server.pending())
 
-    def test_wrong_sas_denies_without_approval(self):
-        thread = self._start_client()
-        request_id, name, room, code = self._pending_with_code()[0]
-        wrong = "000000" if code != "000000" else "999999"
-        with self.assertRaisesRegex(EnrollmentError, "Incorrect SAS"):
-            self.server.decide(request_id, wrong, approve=True)
-        thread.join(timeout=5)
-        self.assertEqual(self.result, [False])
+    def test_wrong_code_denies_that_request(self):
+        queued = self._enroll()
+        wrong = f"{(int(queued['code']) + 1) % 1000000:06d}"
+        with self.assertRaises(IncorrectCodeError):
+            self.server.decide(self.request["request_id"], wrong, approve=True)
+        self.assertFalse(self.server.pending())
+        self.assertIsNone(self.registry.approved_entry(self.client_id))
+        with self.assertRaises(EnrollmentError):  # ο σωστός κωδικός δεν σώζει πια το αίτημα
+            self.server.decide(self.request["request_id"], queued["code"], approve=True)
+
+    def test_deny_removes_request(self):
+        self._enroll()
+        info = self.server.decide(self.request["request_id"], approve=False)
+        self.assertEqual(info["name"], "Board1")
+        self.assertFalse(self.server.pending())
         self.assertIsNone(self.registry.approved_entry(self.client_id))
 
-    def test_expired_request_cannot_be_approved(self):
-        thread = self._start_client()
-        request_id = self.server.pending()[0][0]
-        with self.server._lock:
-            self.server._pending[request_id].created -= REQUEST_TTL + 1
-        with self.assertRaises(EnrollmentError):
-            self.server.decide(request_id, self.request["request_id"], approve=True)
+    def test_requests_survive_manager_restart(self):
+        queued = self._enroll()
         self.server.stop()
-        thread.join(timeout=5)
-        self.assertFalse(thread.is_alive())
-        self.assertIsNone(self.registry.approved_entry(self.client_id))
-
-    def test_approval_at_expiry_is_not_reported_as_expired(self):
-        import shared.enrollment as enrollment
-
-        class TimedOutEvent(threading.Event):
-            def wait(self, timeout=None):
-                super().wait(2.0)  # η έγκριση φτάνει…
-                return False       # …αλλά η αναμονή «έληξε» ταυτόχρονα
-
-        class LatePending(enrollment.Pending):
-            def __init__(self, *args):
-                super().__init__(*args)
-                self.event = TimedOutEvent()
-
-        original = enrollment.Pending
-        enrollment.Pending = LatePending
-        self.addCleanup(setattr, enrollment, "Pending", original)
-        thread = self._start_client()
-        request_id, _, _, code = self._pending_with_code()[0]
-        self.server.decide(request_id, code, approve=True)
-        thread.join(timeout=5)
-        self.assertEqual(self.result, [True])  # όχι «expired» για εγκεκριμένο Client
+        restarted = self._server()  # νέος Manager από το αρχείο, χωρίς άνοιγμα θύρας
+        self.assertEqual([item[0] for item in restarted.pending()],
+                         [self.request["request_id"]])
+        restarted.decide(self.request["request_id"], queued["code"], approve=True)
         self.assertIsNotNone(self.registry.approved_entry(self.client_id))
+        self.assertFalse(self._server().pending())  # η απόφαση γράφτηκε στο αρχείο
+
+    def test_request_expires_after_one_day(self):
+        queued = self._enroll()
+        self.now[0] += REQUEST_TTL - 1
+        self.assertEqual(len(self.server.pending()), 1)
+        self.now[0] += 1
+        self.assertFalse(self.server.pending())
+        with self.assertRaises(EnrollmentError):
+            self.server.decide(self.request["request_id"], queued["code"], approve=True)
+        self.assertIsNone(self.registry.approved_entry(self.client_id))
+        self.assertFalse(self._server().pending())  # ούτε μετά από επανεκκίνηση
+
+    def test_new_request_from_same_client_replaces_old(self):
+        first = self._enroll()
+        second_request = self._request(room="C2627-Γ2", name="Board2")
+        second = self._enroll(second_request)
+        [(request_id, room, name, _)] = self.server.pending()
+        self.assertEqual((request_id, room, name),
+                         (second_request["request_id"], "C2627-Γ2", "Board2"))
+        with self.assertRaises(EnrollmentError):
+            self.server.decide(self.request["request_id"], first["code"], approve=True)
+        self.server.decide(request_id, second["code"], approve=True)
+        self.assertEqual(self.registry.approved_entry(self.client_id)["room"], "C2627-Γ2")
+
+    def test_already_approved_client_is_rejected_at_submit(self):
+        queued = self._enroll()
+        self.server.decide(self.request["request_id"], queued["code"], approve=True)
+        with self.assertRaises((EOFError, OSError, EnrollmentError)):
+            self._enroll(self._request())
+        self.assertFalse(self.server.pending())
+
+    def test_tampered_pending_file_entries_are_ignored(self):
+        self._enroll()
+        self.server.stop()
+        data = json.loads(self.pending_file.read_text(encoding="utf-8"))
+        data["requests"][0]["request"]["room"] = "C2627-Γ9"  # σπάει την υπογραφή
+        self.pending_file.write_text(json.dumps(data), encoding="utf-8")
+        self.assertFalse(self._server().pending())
 
     def test_manager_never_displays_sas(self):
-        thread = self._start_client()
-        request_id, _, _, code = self._pending_with_code()[0]
-        end = time.monotonic() + 4
-        while not self.client_log and time.monotonic() < end:
-            time.sleep(0.01)
-        self.assertIn(code, " ".join(self.client_log))
-        self.assertTrue(any(request_id in message for message in self.messages))
-        self.assertNotIn(code, " ".join(self.messages))
-        self.assertNotIn(code, repr(self.server.pending()))
-        self.server.decide(request_id, code, approve=True)
-        thread.join(timeout=5)
-        self.assertEqual(self.result, [True])
+        queued = self._enroll()
+        request_id = self.request["request_id"]
+        self.assertTrue(any(request_id[:8] in message for message in self.messages))
+        self.assertNotIn(queued["code"], " ".join(self.messages))
+        self.assertNotIn(queued["code"], repr(self.server.pending()))
+        self.assertEqual(self.server._pending[request_id].code, queued["code"])
 
     def test_resolve_accepts_unique_prefix(self):
-        thread = self._start_client()
-        request_id, _, _, code = self._pending_with_code()[0]
+        queued = self._enroll()
+        request_id = self.request["request_id"]
         self.assertEqual(self.server.resolve(request_id[:8]), request_id)
         with self.assertRaises(EnrollmentError):
             self.server.resolve(request_id[:3])
         with self.assertRaises(EnrollmentError):
             self.server.resolve("zzzz")
-        self.server.decide(self.server.resolve(request_id[:6]), code, approve=True)
-        thread.join(timeout=5)
-        self.assertEqual(self.result, [True])
+        self.server.decide(self.server.resolve(request_id[:6]), queued["code"], approve=True)
+        self.assertIsNotNone(self.registry.approved_entry(self.client_id))
 
     def test_port_closed_until_explicit_enrollment(self):
         self.server.stop()

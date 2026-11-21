@@ -7,7 +7,7 @@
 ΜΟΝΟ ΓΙΑ ΔΟΚΙΜΕΣ: το κανάλι συντονισμού (TCP 50557, UDP beacon 50558) είναι χωρίς
 κρυπτογράφηση και μεταφέρει μόνο δημόσια πιστοποιητικά και εντολές δοκιμής. Δεν είναι
 μηχανισμός εγγραφής· η πραγματική εγγραφή με SAS (4.2A2, TCP 50559) ελέγχεται στα
-βήματα 11–16 με νέα, ξεχωριστή συσκευή δοκιμής.
+βήματα 11–17 με νέα, ξεχωριστή συσκευή δοκιμής (εγγραφή χωρίς αναμονή του Client).
 
     Linux:    tools/mtls_live_test.sh
     Windows:  powershell -ExecutionPolicy Bypass -File tools\\mtls_live_test.ps1
@@ -212,19 +212,30 @@ class DirectorRun:
         self.channel.send(cmd="hello", director_cert=self.cert.read_text(encoding="ascii"))
         self.channel.receive()
 
-    def enroll_request(self, director: Process) -> tuple[str, str, str, int]:
-        """Νέα συσκευή «board» ζητά εγγραφή.
+    def enroll(self, director: Process, profile: str = "board", name: str = NEW_NAME):
+        """Μία συσκευή ζητά εγγραφή· ο Client κλείνει μόνος του αμέσως μετά τον κωδικό.
 
-        Επιστρέφει UUID, ID αιτήματος, τον SAS που δείχνει ο Client (όπως θα τον
-        πληκτρολογούσε ο διαχειριστής) και τη θέση του log για έλεγχο ότι ο Manager
-        δεν τον εμφάνισε."""
+        Επιστρέφει την απάντηση του Client (κωδικός, rc, διάρκεια) και τη γραμμή
+        «Νέο αίτημα» του Manager (ή None)."""
         mark = director.mark()
-        reply = self.ask_client("enroll", profile="board", room=ROOM, name=NEW_NAME)
-        line = director.wait_for(f"| {NEW_NAME} | {ROOM} |", since=mark, timeout=20)
-        if line is None or reply.get("sas") is None:
-            raise RuntimeError("Το αίτημα εγγραφής δεν έφτασε στον Manager")
-        request_id = line.split("[Εγγραφή]", 1)[1].split("|")[0].strip()
-        return reply["client_id"], request_id, reply["sas"], mark
+        reply = self.ask_client("enroll", profile=profile, room=ROOM, name=name)
+        line = director.wait_for("Νέο αίτημα", f"| {ROOM} | {name}", since=mark,
+                                 timeout=5 if reply.get("sas") else 1)
+        # Όπως ο διαχειριστής: το ID βρίσκεται από τη λίστα του Manager (αίθουσα/όνομα).
+        reply["short"] = line.split("Νέο αίτημα")[1].split("|")[0].strip() if line else None
+        return reply, line, mark
+
+    def pending_ids(self, director: Process) -> list[str]:
+        mark = director.mark()
+        director.send("pending")
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline and not (
+                director.seen("| λήγει", since=mark) or director.seen("Δεν υπάρχουν", since=mark)):
+            time.sleep(0.05)
+        time.sleep(0.3)  # υπόλοιπες γραμμές της λίστας
+        with director._cond:
+            rows = [line for line in director.lines[mark:] if "| λήγει" in line]
+        return [row.split("|")[0].split()[-1] for row in rows]
 
     def run(self) -> int:
         from cryptography import x509
@@ -330,46 +341,53 @@ class DirectorRun:
                         reason is not None and joined is not None)
             self.ask_client("stop_client")
 
-            # 11. Εγγραφή 4.2A2: λάθος SAS απορρίπτει το αίτημα
+            # 11. Εγγραφή 4.2A2: λάθος κωδικός απορρίπτει το συγκεκριμένο αίτημα
             mark = director.mark()
             director.send("enroll on")
             opened = director.wait_for("[Εγγραφή] Ενεργή TLS θύρα", since=mark, timeout=10)
-            board_id, request_id, client_sas, _ = self.enroll_request(director)
-            wrong = f"{(int(client_sas) + 1) % 1000000:06d}"
+            reply, line, _ = self.enroll(director)
+            short = reply["short"]
+            wrong = f"{(int(reply['sas']) + 1) % 1000000:06d}"
             mark = director.mark()
-            director.send(f"approve {request_id[:8]} {wrong}")
-            refused = director.wait_for("Incorrect SAS", since=mark, timeout=10)
-            outcome = self.ask_client("enroll_result")
+            director.send(f"approve {short} {wrong}")
+            refused = director.wait_for("Λάθος κωδικός", short, since=mark, timeout=10)
+            left = self.pending_ids(director)
             _, listing = self.cli("--list-clients")
-            self.result("11. Εγγραφή με λάθος SAS: απόρριψη, καμία εγγραφή στο μητρώο",
-                        opened is not None and refused is not None
-                        and outcome["rc"] == 2 and outcome["status"] == "denied"
-                        and board_id not in listing)
+            self.result("11. Λάθος κωδικός: το αίτημα απορρίπτεται, καμία έγκριση",
+                        opened is not None and line is not None and refused is not None
+                        and short not in left and reply["client_id"] not in listing)
 
-            # 12. Ο Manager δεν δείχνει τον SAS· ο διαχειριστής πληκτρολογεί του Client
-            board_id, request_id, client_sas, mark = self.enroll_request(director)
-            director.send("pending")
-            listed = director.wait_for(request_id, NEW_NAME, since=mark, timeout=5)
-            hidden = not director.seen(client_sas, since=mark)
+            # 12. Ο Client κλείνει αμέσως· ο Manager δεν δείχνει τον κωδικό
+            reply, line, mark = self.enroll(director)
+            board_id, short, code = reply["client_id"], reply["short"], reply["sas"]
+            listed = self.pending_ids(director)
+            self.result("12. Ο Client δείχνει κωδικό και κλείνει· ο Manager τον κρύβει",
+                        reply["rc"] == 0 and reply["seconds"] < 15 and code is not None
+                        and line is not None and short in listed
+                        and not director.seen(code, since=mark),
+                        f"κωδικός {code}, Client έκλεισε σε {reply['seconds']:.1f}s")
+
+            # 13. Επανεκκίνηση Manager, κλειστή θύρα και κλειστός Client: έγκριση
+            self.stop_director()
+            director = self.start_director()
+            kept = short in self.pending_ids(director)
             mark = director.mark()
-            director.send(f"approve {request_id[:8]} {client_sas}")
-            approved = director.wait_for(f"Εγκρίθηκε αίτημα {request_id}", since=mark, timeout=10)
-            outcome = self.ask_client("enroll_result")
+            director.send(f"approve {short} {code}")
+            approved = director.wait_for(f"Εγκρίθηκε: {ROOM} | {NEW_NAME} | {board_id}",
+                                         since=mark, timeout=10)
             _, listing = self.cli("--list-clients")
-            rows = [line for line in listing.splitlines() if board_id in line]
-            self.result("12. Εγγραφή με τον SAS του Client (ο Manager δεν τον εμφανίζει)",
-                        listed is not None and hidden and approved is not None
-                        and outcome["rc"] == 0 and outcome["status"] == "approved"
-                        and len(rows) == 1 and rows[0].endswith("approved"),
-                        f"SAS {client_sas}")
+            rows = [row for row in listing.splitlines() if board_id in row]
+            self.result("13. Το αίτημα μένει μετά από επανεκκίνηση· έγκριση με κλειστό Client",
+                        kept and approved is not None
+                        and len(rows) == 1 and rows[0].endswith("approved"))
 
-            # 13. Η νέα συσκευή συνδέεται κανονικά
+            # 14. Η νέα συσκευή συνδέεται μόνη της
             mark = director.mark()
             self.ask_client("start_client", room=ROOM, new_key=False, profile="board")
             joined = director.wait_for(board_id, f"({ROOM}) συνδέθηκε", since=mark, timeout=40)
-            self.result("13. Η εγγεγραμμένη συσκευή συνδέεται", joined is not None)
+            self.result("14. Η εγκεκριμένη συσκευή συνδέεται", joined is not None)
 
-            # 14. Αλλαγή αίθουσας από τον Manager, χωρίς νέο κλειδί
+            # 15. Αλλαγή αίθουσας από τον Manager, χωρίς νέο κλειδί
             mark = director.mark()
             director.send(f"set-room {board_id} {OTHER_ROOM}")
             changed = director.wait_for(f"Ενημερώθηκε αίθουσα: {OTHER_ROOM}", since=mark,
@@ -377,31 +395,31 @@ class DirectorRun:
             director.send("status")
             online = director.wait_for(board_id, OTHER_ROOM, "Online", since=mark, timeout=5)
             hints = self.ask_client("read_hints", profile="board", room=OTHER_ROOM)["hints"]
-            self.result("14. set-room: νέα αίθουσα στον Manager και στον Client",
+            self.result("15. set-room: νέα αίθουσα στον Manager και στον Client",
                         changed is not None and online is not None
                         and hints.get("room") == OTHER_ROOM, f"hints {hints}")
 
-            # 15. Αλλαγή ονόματος από τον Manager
+            # 16. Αλλαγή ονόματος από τον Manager
             mark = director.mark()
             director.send(f"set-name {board_id} {RENAMED}")
             changed = director.wait_for(f"Ενημερώθηκε όνομα: {RENAMED}", since=mark, timeout=10)
             hints = self.ask_client("read_hints", profile="board", name=RENAMED)["hints"]
-            self.result("15. set-name: νέο όνομα στον Manager και στον Client",
+            self.result("16. set-name: νέο όνομα στον Manager και στον Client",
                         changed is not None and hints.get("name") == RENAMED,
                         f"hints {hints}")
             self.ask_client("stop_client")
 
-            # 16. enroll off: η θύρα εγγραφής κλείνει
+            # 17. Με κλειστή θύρα δεν γίνεται νέα εγγραφή
             mark = director.mark()
+            director.send("enroll on")
+            director.wait_for("[Εγγραφή] Ενεργή TLS θύρα", since=mark, timeout=10)
             director.send("enroll off")
             closed = director.wait_for("[Εγγραφή] Η λειτουργία εγγραφής σταμάτησε",
                                        since=mark, timeout=10)
-            reply = self.ask_client("enroll", profile="late", room=ROOM, name="Late1")
-            outcome = self.ask_client("enroll_result")
-            self.result("16. enroll off: νέα εγγραφή δεν γίνεται δεκτή",
+            reply, line, _ = self.enroll(director, profile="late", name="Late1")
+            self.result("17. enroll off: νέα εγγραφή δεν γίνεται δεκτή",
                         closed is not None and reply.get("sas") is None
-                        and outcome["rc"] != 0 and outcome["status"] != "approved"
-                        and not director.seen("| Late1 |", since=mark))
+                        and reply["rc"] != 0 and line is None)
         except Exception as exc:  # η δοκιμή αναφέρει, δεν κρύβει
             self.result("Απρόσμενο σφάλμα δοκιμής", False, f"{type(exc).__name__}: {exc}")
         finally:
@@ -426,7 +444,6 @@ class ClientRun:
         self.director_host = director_host
         self.cert = work / "director-tls.crt"
         self.client: Process | None = None
-        self.enrolling: Process | None = None
 
     def paths(self, profile: str) -> list[str]:
         """Κάθε «συσκευή» δοκιμής έχει δικά της UUID, κλειδί και hints."""
@@ -470,27 +487,22 @@ class ClientRun:
                 "new_key_message": self.client.seen("Δημιουργήθηκε νέο κλειδί")}
 
     def enroll(self, profile: str, room: str, name: str) -> dict:
-        """Ξεκινά ``client.main --enroll``· επιστρέφει τον SAS που δείχνει ο Client."""
-        self.enrolling = Process(["-m", "client.main", *self.paths(profile), "--enroll",
-                                  "--room", room, "--computer-name", name, *self.host_args()],
-                                 label="Εγγραφή")
-        # Αν η θύρα εγγραφής είναι κλειστή, ο Client τερματίζει χωρίς SAS (wait_for → None).
-        line = self.enrolling.wait_for("Κωδικός επιβεβαίωσης SAS:", timeout=30)
-        sas = line.split("SAS:")[1].split(".")[0].strip() if line else None
-        identity = json.loads(Path(self.paths(profile)[3]).read_text(encoding="utf-8"))
-        return {"client_id": identity["client_id"], "sas": sas}
-
-    def enroll_result(self) -> dict:
-        process, self.enrolling = self.enrolling, None
+        """``client.main --enroll``: ο Client δείχνει τον κωδικό και τερματίζει μόνος του."""
+        started = time.monotonic()
+        process = Process(["-m", "client.main", *self.paths(profile), "--enroll",
+                           "--room", room, "--computer-name", name, *self.host_args()],
+                          label="Εγγραφή")
         try:
             rc = process.proc.wait(timeout=30)
         except subprocess.TimeoutExpired:
             process.stop()
             rc = None
-        time.sleep(0.2)  # τελευταίες γραμμές εξόδου
-        line = process.wait_for("Κατάσταση εγγραφής:", timeout=1)
-        status = line.split("Κατάσταση εγγραφής:")[1].strip() if line else None
-        return {"rc": rc, "status": status}
+        seconds = time.monotonic() - started
+        line = process.wait_for("Κωδικός εγγραφής:", timeout=1)
+        sas = line.split("Κωδικός εγγραφής:")[1].split("|")[0].strip() if line else None
+        identity = json.loads(Path(self.paths(profile)[3]).read_text(encoding="utf-8"))
+        return {"client_id": identity["client_id"], "sas": sas, "rc": rc, "seconds": seconds}
+
 
     def read_hints(self, profile: str, **expected) -> dict:
         """Τα hints γράφονται όταν φτάσουν οι ρυθμίσεις· περιμένουμε λίγο."""
@@ -526,8 +538,6 @@ class ClientRun:
                     elif cmd == "enroll":
                         channel.send(**self.enroll(message["profile"], message["room"],
                                                    message["name"]))
-                    elif cmd == "enroll_result":
-                        channel.send(**self.enroll_result())
                     elif cmd == "read_hints":
                         args = {k: v for k, v in message.items() if k != "cmd"}
                         channel.send(hints=self.read_hints(**args))
@@ -546,8 +556,6 @@ class ClientRun:
                     channel.send(error=f"{type(exc).__name__}: {exc}")
         finally:
             self.stop_client()
-            if self.enrolling is not None:
-                self.enrolling.stop()
         print(summary, flush=True)
         return 0
 

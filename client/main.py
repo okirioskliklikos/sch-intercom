@@ -406,12 +406,17 @@ def main() -> None:
             if found is None:
                 parser.exit(2, "Δεν βρέθηκε Manager για εγγραφή. Δώστε --host.\\n")
             enrollment_host = found[0]
-        success = enroll_client(enrollment_host, args.enrollment_port, args.tls_ca,
-                                args.tls_server_name, request)
-        if not success:
-            parser.exit(2, "Η εγγραφή δεν εγκρίθηκε.\\n")
+        try:
+            queued = enroll_client(enrollment_host, args.enrollment_port, args.tls_ca,
+                                   args.tls_server_name, request)
+        except (OSError, EOFError, ValueError) as exc:
+            parser.exit(2, f"Η αίτηση εγγραφής δεν καταχωρήθηκε: {exc}\n")
         save_hints(args.client_hints_file, proposed_room, computer_name)
-        print("Η εγγραφή ολοκληρώθηκε. Εκκινήστε τον Client κανονικά.", flush=True)
+        until = time.strftime("%d/%m/%Y %H:%M", time.localtime(queued["expires_at"]))
+        print(f"Κωδικός εγγραφής: {queued['code']} | Αίθουσα: {proposed_room} | "
+              f"Υπολογιστής: {computer_name} | Ισχύει έως: {until}", flush=True)
+        print("Γράψτε τα και κλείστε. Μετά την έγκριση στον Manager ο Client "
+              "συνδέεται μόνος του στην επόμενη εκκίνηση.", flush=True)
         return
     trusted_director = client_context(args.tls_ca, certfile=certfile, keyfile=keyfile,
                                       password=password)

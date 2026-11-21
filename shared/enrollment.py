@@ -4,6 +4,11 @@ This protocol is NOT an audio endpoint. Only the existing Director certificate
 may authenticate the server. Client proves possession of its private key before
 its request can be displayed. Only the Client shows the six-digit SAS; the
 administrator types it at the Manager, which never displays it (no copy-paste approval).
+
+Offline approval (user decision 21/11/2026): the Client submits its request with the
+desired room/name, shows the code and exits. Requests are kept on disk for one day,
+so the administrator can collect codes on paper and approve each listed request
+later, whether the Client is running or not and even with the enrollment port closed.
 """
 from __future__ import annotations
 
@@ -12,11 +17,13 @@ from collections import deque
 import hashlib
 import hmac
 import json
+import os
 from pathlib import Path
 import secrets
 import socket
 import ssl
 import struct
+import tempfile
 import threading
 import time
 import uuid
@@ -32,16 +39,22 @@ from shared.identity import validate_identity
 from shared.transport_security import server_context, client_context, connect_tls
 
 ENROLL_PORT = 50559
-PROTOCOL = 1
+PROTOCOL = 2  # v2: ο Client δεν περιμένει την έγκριση (εγγραφή χωρίς αναμονή)
 MAX_MESSAGE = 8192
-MAX_PENDING = 16
+MAX_CONNECTIONS = 16  # ταυτόχρονες συνδέσεις στη θύρα εγγραφής
+MAX_PENDING = 100  # αποθηκευμένα αιτήματα (> MAX_CLIENTS)
 MAX_ATTEMPTS_PER_MINUTE = 8
-REQUEST_TTL = 120
+REQUEST_TTL = 24 * 3600  # απόφαση χρήστη: τα αιτήματα ισχύουν μία ημέρα
 NETWORK_TIMEOUT = 8
+PENDING_FILE_VERSION = 1
 
 
 class EnrollmentError(ValueError):
     pass
+
+
+class IncorrectCodeError(EnrollmentError):
+    """Λάθος κωδικός: το συγκεκριμένο αίτημα απορρίφθηκε."""
 
 
 def send_message(stream, message: dict) -> None:
@@ -140,32 +153,99 @@ def sas_code(unsigned: dict, director_nonce: str) -> str:
 
 
 class Pending:
-    def __init__(self, request: dict, code: str):
-        self.request = request
+    def __init__(self, request: dict, code: str, created: float):
+        self.request = request  # υπογεγραμμένο αίτημα (μαζί με proof)
         self.code = code
-        self.created = time.monotonic()
-        self.event = threading.Event()
-        self.result = "denied"
+        self.created = created  # wall clock: τα αιτήματα επιβιώνουν επανεκκίνηση
+
+    @property
+    def expires(self) -> float:
+        return self.created + REQUEST_TTL
 
 
 class EnrollmentServer:
-    """Opt-in registration socket, independent from the authenticated audio port."""
+    """Opt-in registration socket, independent from the authenticated audio port.
+
+    Ο κατάλογος αιτημάτων (``pending_file``) υπάρχει ανεξάρτητα από τη θύρα: η
+    έγκριση/απόρριψη γίνεται και με κλειστή θύρα και με κλειστό Client.
+    """
 
     def __init__(self, certfile: Path, keyfile: Path, trust, *,
                  host: str = "0.0.0.0", port: int = ENROLL_PORT,
-                 log=print):
+                 pending_file: Path | None = None, log=print, clock=time.time):
         self.host, self.port = host, port
         self.trust = trust
         self.log = log
+        self.clock = clock
+        self.pending_file = Path(pending_file) if pending_file is not None else None
         self.context = server_context(certfile, keyfile)
         self._lock = threading.RLock()
         self._pending: dict[str, Pending] = {}
         self._listener = None
         self._thread = None
         self._stop = threading.Event()
-        self._slots = threading.BoundedSemaphore(MAX_PENDING)
+        self._slots = threading.BoundedSemaphore(MAX_CONNECTIONS)
         self._attempts: dict[str, deque[float]] = {}
+        self._load()
 
+    # ------------------------------------------------------------ αποθήκευση
+    def _load(self) -> None:
+        if self.pending_file is None:
+            return
+        try:
+            data = json.loads(self.pending_file.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            return
+        except (OSError, UnicodeError, ValueError) as exc:
+            self.log(f"[Εγγραφή] Αγνοήθηκε αρχείο εκκρεμών αιτημάτων: {exc}")
+            return
+        if not isinstance(data, dict) or data.get("version") != PENDING_FILE_VERSION:
+            self.log("[Εγγραφή] Αγνοήθηκε αρχείο εκκρεμών αιτημάτων άγνωστης μορφής")
+            return
+        now = self.clock()
+        for item in data.get("requests", [])[:MAX_PENDING]:
+            try:
+                request, code, created = item["request"], item["code"], float(item["created"])
+                unsigned = _unsigned_request(request)  # ξαναελέγχεται η υπογραφή
+                if not (isinstance(code, str) and len(code) == 6 and code.isdigit()):
+                    raise ValueError
+            except (EnrollmentError, KeyError, TypeError, ValueError):
+                continue
+            if created <= now < created + REQUEST_TTL:
+                self._pending[unsigned["request_id"]] = Pending(request, code, created)
+
+    def _save(self) -> None:
+        """Ατομική εγγραφή· καλείται με κρατημένο το lock."""
+        if self.pending_file is None:
+            return
+        data = {"version": PENDING_FILE_VERSION, "requests": [
+            {"request": p.request, "code": p.code, "created": p.created}
+            for p in self._pending.values()]}
+        path = self.pending_file
+        path.parent.mkdir(parents=True, exist_ok=True)
+        fd, temporary = tempfile.mkstemp(prefix=path.name + ".", dir=path.parent)
+        try:
+            if os.name != "nt":
+                os.fchmod(fd, 0o600)
+            with os.fdopen(fd, "w", encoding="utf-8") as stream:
+                json.dump(data, stream, ensure_ascii=False)
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(temporary, path)
+        finally:
+            if os.path.exists(temporary):
+                os.unlink(temporary)
+
+    def _purge(self) -> None:
+        """Αφαιρεί ληγμένα αιτήματα· καλείται με κρατημένο το lock."""
+        now = self.clock()
+        expired = [rid for rid, p in self._pending.items() if now >= p.expires]
+        for rid in expired:
+            del self._pending[rid]
+        if expired:
+            self._save()
+
+    # ------------------------------------------------------------ θύρα εγγραφής
     def start(self):
         with self._lock:
             if self._listener is not None:
@@ -175,7 +255,7 @@ class EnrollmentServer:
                 listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
                 listener.bind((self.host, self.port))
                 self.port = listener.getsockname()[1]
-                listener.listen(MAX_PENDING)
+                listener.listen(MAX_CONNECTIONS)
                 listener.settimeout(0.2)
             except BaseException:
                 listener.close()
@@ -188,16 +268,13 @@ class EnrollmentServer:
             self.log(f"[Εγγραφή] Ενεργή TLS θύρα {self.port} (μόνο εγγραφή).")
 
     def stop(self):
+        """Κλείνει μόνο τη θύρα· τα αποθηκευμένα αιτήματα παραμένουν για έγκριση."""
         with self._lock:
             self._stop.set()
             listener, self._listener = self._listener, None
             thread, self._thread = self._thread, None
             if listener is not None:
                 listener.close()
-            for pending in self._pending.values():
-                if not pending.event.is_set():
-                    pending.result = "denied"
-                    pending.event.set()
         if thread is not None and threading.current_thread() is not thread:
             thread.join(timeout=1)
         self.log("[Εγγραφή] Η λειτουργία εγγραφής σταμάτησε.")
@@ -232,7 +309,6 @@ class EnrollmentServer:
                              daemon=True).start()
 
     def _handle(self, raw, address):
-        request_id = None
         try:
             with raw:
                 raw.settimeout(NETWORK_TIMEOUT)
@@ -243,44 +319,43 @@ class EnrollmentServer:
                     nonce = base64.b64encode(secrets.token_bytes(32)).decode("ascii")
                     code = sas_code(unsigned, nonce)
                     with self._lock:
-                        if self._stop.is_set() or len(self._pending) >= MAX_PENDING:
-                            raise EnrollmentError("Registration closed or full")
+                        self._purge()
+                        if self._stop.is_set():
+                            raise EnrollmentError("Registration closed")
                         if request_id in self._pending:
                             raise EnrollmentError("Duplicate request")
-                        if any(p.request["client_id"] == unsigned["client_id"]
-                               for p in self._pending.values()):
-                            raise EnrollmentError("Client already pending")
-                        pending = Pending(unsigned, code)
+                        if self.trust.registry.approved_entry(unsigned["client_id"]):
+                            raise EnrollmentError("Client already approved")
+                        # Νέο αίτημα της ίδιας συσκευής αντικαθιστά το παλιό (νέος κωδικός).
+                        for rid, old in list(self._pending.items()):
+                            if old.request["client_id"] == unsigned["client_id"]:
+                                del self._pending[rid]
+                        if len(self._pending) >= MAX_PENDING:
+                            raise EnrollmentError("Too many pending requests")
+                        pending = Pending(request, code, self.clock())
                         self._pending[request_id] = pending
-                    send_message(stream, {"type": "challenge", "request_id": request_id,
-                                          "director_nonce": nonce})
+                        self._save()
+                    send_message(stream, {"type": "queued", "request_id": request_id,
+                                          "director_nonce": nonce,
+                                          "expires_at": int(pending.expires)})
                     # Ο SAS δεν εμφανίζεται ποτέ στον Manager: ο διαχειριστής πληκτρολογεί
-                    # αυτόν που βλέπει στην οθόνη του Client.
-                    self.log(f"[Εγγραφή] {request_id} | {unsigned['name']} | "
-                             f"{unsigned['room']} | πληκτρολογήστε τον SAS του Client")
-                    pending.event.wait(REQUEST_TTL)
-                    with self._lock:
-                        # Μια έγκριση που πρόλαβε ακριβώς στη λήξη έχει ήδη γραφτεί στο
-                        # μητρώο: δεν τη μετατρέπουμε σε «expired» για τον Client.
-                        if not pending.event.is_set():
-                            pending.result = "expired"
-                            pending.event.set()
-                        result = pending.result
-                    send_message(stream, {"type": result, "request_id": request_id})
+                    # αυτόν που έγραψε από την οθόνη του Client.
+                    self.log(f"[Εγγραφή] Νέο αίτημα {request_id[:8]} | {unsigned['room']} | "
+                             f"{unsigned['name']}")
         except (OSError, ssl.SSLError, EOFError, EnrollmentError, ValueError) as exc:
             self.log(f"[Εγγραφή] Απόρριψη {address[0]}: {exc}")
         finally:
-            if request_id is not None:
-                with self._lock:
-                    self._pending.pop(request_id, None)
             self._slots.release()
 
-    def pending(self) -> list[tuple[str, str, str]]:
-        """Εκκρεμή αιτήματα χωρίς τον SAS (τον δείχνει μόνο ο Client)."""
+    # ------------------------------------------------------------ απόφαση
+    def pending(self) -> list[tuple[str, str, str, float]]:
+        """Εκκρεμή αιτήματα (ID, αίθουσα, όνομα, λήξη) χωρίς τον SAS."""
         with self._lock:
-            return [(rid, p.request["name"], p.request["room"])
-                    for rid, p in self._pending.items()
-                    if not p.event.is_set() and time.monotonic() - p.created < REQUEST_TTL]
+            self._purge()
+            items = sorted(self._pending.items(),
+                           key=lambda item: (item[1].request["room"], item[1].request["name"]))
+            return [(rid, p.request["room"], p.request["name"], p.expires)
+                    for rid, p in items]
 
     def resolve(self, prefix: str) -> str:
         """Πλήρες ID από μοναδικό πρόθεμα (≥ 4 χαρακτήρες), για ευκολία στο CLI."""
@@ -292,55 +367,54 @@ class EnrollmentServer:
             raise EnrollmentError("Unknown or ambiguous enrollment request ID")
         return matches[0]
 
-    def decide(self, request_id: str, code: str | None = None, *, approve: bool = False):
+    def decide(self, request_id: str, code: str | None = None, *,
+               approve: bool = False) -> dict:
+        """Έγκριση με τον κωδικό του συγκεκριμένου αιτήματος ή απόρριψη.
+
+        Λάθος κωδικός απορρίπτει το αίτημα (η συσκευή ζητά ξανά εγγραφή).
+        Επιστρέφει αίθουσα/όνομα του αιτήματος για επιβεβαίωση στον διαχειριστή.
+        """
         with self._lock:
-            pending = self._pending.get(request_id)
-            if pending is None or pending.event.is_set() or (
-                time.monotonic() - pending.created >= REQUEST_TTL):
+            self._purge()
+            pending = self._pending.pop(request_id, None)
+            if pending is None:
                 raise EnrollmentError("No active enrollment request")
-            if approve:
-                if not isinstance(code, str) or not hmac.compare_digest(code, pending.code):
-                    pending.result = "denied"
-                    pending.event.set()
-                    raise EnrollmentError("Incorrect SAS; enrollment denied")
+            try:
                 req = pending.request
-                try:
-                    self.trust.approve(req["client_id"], req["room"],
-                                       req["cert_pem"].encode("ascii"), name=req["name"])
-                except (ValueError, OSError):
-                    pending.result = "denied"
-                    pending.event.set()
-                    raise
-                pending.result = "approved"
-            else:
-                pending.result = "denied"
-            pending.event.set()
+                info = {"client_id": req["client_id"], "room": req["room"],
+                        "name": req["name"]}
+                if not approve:
+                    return info
+                if not isinstance(code, str) or not hmac.compare_digest(code, pending.code):
+                    raise IncorrectCodeError("Incorrect SAS; enrollment denied")
+                self.trust.approve(req["client_id"], req["room"],
+                                   req["cert_pem"].encode("ascii"), name=req["name"])
+                return info
+            finally:
+                self._save()
 
 
 def enroll_client(host: str, port: int, cafile: Path, server_name: str,
-                  request: dict, *, log=print) -> bool:
-    """Validate the pinned Manager TLS cert, show SAS, await explicit decision."""
+                  request: dict) -> dict:
+    """Validate the pinned Manager TLS cert, submit the request, return SAS and expiry.
+
+    Ο Client δεν περιμένει την απόφαση: συνδέεται μόνος του μετά την έγκριση.
+    """
     ctx = client_context(cafile)
     raw = socket.create_connection((host, port), timeout=NETWORK_TIMEOUT)
     try:
         with connect_tls(raw, ctx, server_name) as conn:
             conn.settimeout(NETWORK_TIMEOUT)
             send_message(conn, request)
-            challenge = read_message(conn)
-            if challenge.get("type") != "challenge" or (
-                challenge.get("request_id") != request["request_id"]):
-                raise EnrollmentError("Unexpected enrollment challenge")
+            reply = read_message(conn)
+            if reply.get("type") != "queued" or (
+                reply.get("request_id") != request["request_id"]):
+                raise EnrollmentError("Unexpected enrollment reply")
+            expires = reply.get("expires_at")
+            if type(expires) is not int:
+                raise EnrollmentError("Invalid enrollment expiry")
             unsigned = {k: v for k, v in request.items() if k != "proof"}
-            code = sas_code(unsigned, challenge["director_nonce"])
-            log(f"Κωδικός επιβεβαίωσης SAS: {code}. Πληκτρολογήστε τον στον Manager: "
-                f"approve {request['request_id'][:8]} {code}")
-            conn.settimeout(REQUEST_TTL + 5)
-            result = read_message(conn)
-            if result.get("request_id") != request["request_id"]:
-                raise EnrollmentError("Mismatched enrollment result")
-            if result.get("type") not in ("approved", "denied", "expired"):
-                raise EnrollmentError("Unknown enrollment result")
-            log(f"Κατάσταση εγγραφής: {result['type']}")
-            return result["type"] == "approved"
+            return {"code": sas_code(unsigned, reply["director_nonce"]),
+                    "request_id": request["request_id"], "expires_at": expires}
     finally:
         raw.close()

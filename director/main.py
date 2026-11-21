@@ -15,7 +15,8 @@ import time
 
 from director.broadcast import AudioBroadcaster, MAX_CLIENTS
 from shared.client_registry import RegistryError, SignedClientRegistry
-from shared.enrollment import EnrollmentError, EnrollmentServer, ENROLL_PORT
+from shared.enrollment import (EnrollmentError, EnrollmentServer, ENROLL_PORT,
+                               IncorrectCodeError)
 from shared.discovery import announce, director_id, DISCOVERY_PORT
 from shared.identity import ProtocolMismatch, receive_hello, send_welcome
 from shared.transport_security import accept_tls, server_context
@@ -80,10 +81,10 @@ def show_help() -> str:
   room <όνομα>  Μετάδοση σε μία ή περισσότερες αίθουσες
   client <UUID> Μετάδοση σε έναν ή περισσότερους Clients
   revoke <UUID> Ανάκληση Client και άμεση αποσύνδεσή του
-  enroll on/off  Άνοιγμα/κλείσιμο περιορισμένης θύρας εγγραφής
-  pending        Εκκρεμή αιτήματα (ο SAS φαίνεται μόνο στον Client)
-  approve <ID> <SAS>  Έγκριση με τον κωδικό που δείχνει ο Client
-                 (αρκούν οι πρώτοι 4+ χαρακτήρες του ID)
+  enroll on/off  Άνοιγμα/κλείσιμο θύρας εγγραφής (τα αιτήματα μένουν)
+  pending        Εκκρεμή αιτήματα: ID, αίθουσα, όνομα, λήξη (1 ημέρα)
+  approve <ID> <κωδικός>  Έγκριση με τον κωδικό που έγραψε ο Client
+                 (ID = οι 8 χαρακτήρες του pending· λάθος κωδικός = απόρριψη)
   deny <ID>      Απόρριψη αιτήματος εγγραφής
   set-room <UUID> <αίθουσα>  Αλλαγή αίθουσας χωρίς νέο κλειδί
   set-name <UUID> <όνομα>    Αλλαγή ονόματος χωρίς νέο κλειδί
@@ -337,16 +338,23 @@ def command_loop(broadcaster: AudioBroadcaster, stop: threading.Event,
                 requests = enrollment.pending()
                 if not requests:
                     print("Δεν υπάρχουν εκκρεμείς εγγραφές.", flush=True)
-                for request_id, name, room in requests:
-                    print(f"{request_id} | {name} | {room}", flush=True)
+                for request_id, room, name, expires in requests:
+                    until = time.strftime("%d/%m %H:%M", time.localtime(expires))
+                    print(f"  {request_id[:8]} | {room} | {name} | λήγει {until}", flush=True)
             elif command == "approve" and len(values) == 2 and enrollment is not None:
                 request_id = enrollment.resolve(values[0])
-                enrollment.decide(request_id, values[1], approve=True)
-                print(f"Εγκρίθηκε αίτημα {request_id}", flush=True)
+                try:
+                    info = enrollment.decide(request_id, values[1], approve=True)
+                except IncorrectCodeError:
+                    print(f"Λάθος κωδικός: το αίτημα {request_id[:8]} απορρίφθηκε. "
+                          "Ζητήστε νέα εγγραφή από τον υπολογιστή.", flush=True)
+                    continue
+                print(f"Εγκρίθηκε: {info['room']} | {info['name']} | {info['client_id']}",
+                      flush=True)
             elif command == "deny" and len(values) == 1 and enrollment is not None:
                 request_id = enrollment.resolve(values[0])
-                enrollment.decide(request_id, approve=False)
-                print(f"Απορρίφθηκε αίτημα {request_id}", flush=True)
+                info = enrollment.decide(request_id, approve=False)
+                print(f"Απορρίφθηκε: {info['room']} | {info['name']}", flush=True)
             elif command == "set-room" and len(values) == 2 and trust is not None:
                 info = trust.update_info(values[0], broadcaster, room=values[1])
                 print(f"Ενημερώθηκε αίθουσα: {info['room']}", flush=True)
@@ -447,7 +455,9 @@ def main() -> None:
 
     broadcaster = AudioBroadcaster(max_clients=MAX_CLIENTS, on_event=lambda s: print(s, flush=True))
     enrollment = EnrollmentServer(args.tls_cert, args.tls_key, trust,
-                                  host=args.host, port=args.enrollment_port)
+                                  host=args.host, port=args.enrollment_port,
+                                  pending_file=args.registry_file.with_name(
+                                      "enrollment-pending.json"))
     stop = threading.Event()
     stats = DirectorStats()
     identifier = director_id(args.director_id_file)
