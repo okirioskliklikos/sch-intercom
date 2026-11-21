@@ -309,11 +309,44 @@ def main() -> None:
                         help="Πιστοποιητικό TLS Director (PEM, SAN DNS)")
     parser.add_argument("--tls-key", type=Path, required=True,
                         help="Ιδιωτικό κλειδί TLS Director (εκτός repository)")
+    parser.add_argument("--registry-file", type=Path,
+                        default=Path.home() / ".school-intercom" / "clients-registry.json",
+                        help="Υπογεγραμμένο μητρώο Clients")
+    actions = parser.add_mutually_exclusive_group()
+    actions.add_argument("--approve-client-cert", type=Path,
+                         help="Έγκριση από τοπικό πιστοποιητικό PEM (εκτός σύνδεσης)")
+    actions.add_argument("--revoke-client", metavar="UUID",
+                         help="Ανάκληση πιστοποίησης Client (εκτός σύνδεσης)")
+    actions.add_argument("--list-clients", action="store_true",
+                         help="Προβολή μητρώου Clients")
+    parser.add_argument("--approve-room", default=None,
+                        help="Αίθουσα που αντιστοιχεί στο πιστοποιητικό")
     parser.add_argument("--gui", action="store_true",
                         help="Κεντρική οθόνη Director (PySide6, pip install -e .[gui])")
     args = parser.parse_args()
     tls_context = server_context(args.tls_cert, args.tls_key)
-    secure_accept = partial(accept_clients, tls_context=tls_context)
+    registry = SignedClientRegistry(args.registry_file, args.tls_cert, args.tls_key)
+    if args.approve_client_cert:
+        from cryptography import x509
+        from cryptography.x509.oid import NameOID
+        if args.approve_room is None:
+            parser.error("--approve-client-cert απαιτεί --approve-room")
+        pem = args.approve_client_cert.read_bytes()
+        cert = x509.load_pem_x509_certificate(pem)
+        client_id = cert.subject.get_attributes_for_oid(NameOID.COMMON_NAME)[0].value
+        registry.approve(client_id, args.approve_room, pem)
+        print(f"Εγκρίθηκε Client {client_id} (v{registry.version})", flush=True)
+        return
+    if args.revoke_client:
+        registry.revoke(args.revoke_client)
+        print(f"Ανακλήθηκε Client {args.revoke_client} (v{registry.version})", flush=True)
+        return
+    if args.list_clients:
+        for entry in registry.snapshot()["clients"]:
+            print("{} | {} | {}".format(entry["client_id"], entry["room"], entry["status"]))
+        return
+    secure_context = registry.tls_server_context(args.tls_cert, args.tls_key)
+    secure_accept = partial(accept_clients, tls_context=secure_context, registry=registry)
     if args.gui:
         from director.gui import run_gui
         run_gui(args, accept_clients=secure_accept, stream_microphone=stream_microphone)
