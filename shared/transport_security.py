@@ -45,6 +45,11 @@ class TLSConnection:
     def fileno(self) -> int:
         return self._stream.fileno()
 
+    def getpeercert(self, *, binary_form: bool = False):
+        """Verified TLS peer certificate; available only after the handshake."""
+        with self._lock:
+            return self._stream.getpeercert(binary_form=binary_form)
+
     def pending(self) -> int:
         """Αποκρυπτογραφημένα bytes ήδη στο SSL buffer (το select δεν τα βλέπει)."""
         with self._lock:
@@ -114,12 +119,18 @@ def server_context(certfile: Path, keyfile: Path) -> ssl.SSLContext:
     return ctx
 
 
-def client_context(cafile: Path) -> ssl.SSLContext:
+def client_context(cafile: Path, *, certfile: Path | None = None,
+                   keyfile: Path | None = None,
+                   password: bytes | None = None) -> ssl.SSLContext:
     """Require a trusted Director certificate and a matching DNS identity."""
     ctx = ssl.create_default_context(ssl.Purpose.SERVER_AUTH, cafile=str(cafile))
     ctx.minimum_version = MINIMUM_TLS_VERSION
     ctx.verify_mode = ssl.CERT_REQUIRED
     ctx.check_hostname = True
+    if (certfile is None) != (keyfile is None):
+        raise ValueError("Client certificate and key must be provided together")
+    if certfile is not None:
+        ctx.load_cert_chain(str(certfile), str(keyfile), password=password)
     return ctx
 
 
