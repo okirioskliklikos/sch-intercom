@@ -11,14 +11,16 @@ from director.main import accept_clients
 from shared.audio import (BLOCK_BYTES, Frame, MESSAGE_KEEPALIVE, MESSAGE_STREAM_STOP,
                           receive_frame, receive_message)
 from shared.identity import receive_welcome, send_hello
+from tests.tls_support import LocalTLSFixture
 
 
 def pcm(n):
     return bytes([n % 256]) * BLOCK_BYTES
 
 
-class MultiClientTests(unittest.TestCase):
+class MultiClientTests(LocalTLSFixture, unittest.TestCase):
     def setUp(self):
+        super().setUp()
         self.broadcast = AudioBroadcaster(queue_blocks=5)
         self.server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.server.bind(("127.0.0.1", 0))
@@ -26,6 +28,7 @@ class MultiClientTests(unittest.TestCase):
         self.stop = threading.Event()
         self.listener = threading.Thread(target=accept_clients,
                                          args=(self.server, self.broadcast, self.stop),
+                                         kwargs={"tls_context": self.tls_server_context},
                                          daemon=True)
         self.listener.start()
         self.clients = []
@@ -41,8 +44,7 @@ class MultiClientTests(unittest.TestCase):
 
     def connect_clients(self, number):
         for _ in range(number - len(self.clients)):
-            s = socket.create_connection(self.server.getsockname(), timeout=2)
-            s.settimeout(3)
+            s = self.connect_tls_client(self.server.getsockname())
             index = len(self.clients)
             client_id = str(uuid.UUID(int=index + 1))
             room = "C2627-Γ1" if index % 2 == 0 else "C2627-Γ2"
@@ -165,8 +167,7 @@ class MultiClientTests(unittest.TestCase):
     def test_duplicate_identity_replaces_old_connection(self):
         self.connect_clients(1)
         previous = self.clients[0]
-        new = socket.create_connection(self.server.getsockname(), timeout=2)
-        new.settimeout(2)
+        new = self.connect_tls_client(self.server.getsockname())
         send_hello(new, *self.identities[0])
         receive_welcome(new)
         self.clients.append(new)
@@ -186,8 +187,7 @@ class MultiClientTests(unittest.TestCase):
     def test_max_clients(self):
         self.broadcast.max_clients = 2
         self.connect_clients(2)
-        extra = socket.create_connection(self.server.getsockname(), timeout=2)
-        extra.settimeout(2)
+        extra = self.connect_tls_client(self.server.getsockname())
         self.clients.append(extra)
         send_hello(extra, str(uuid.UUID(int=200)), "C2627-Γ3")
         receive_welcome(extra)
