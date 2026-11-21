@@ -7,6 +7,7 @@
 
 import argparse
 import random
+import socket
 from pathlib import Path
 import socket
 import ssl
@@ -19,6 +20,8 @@ from shared.audio import (BLOCK_BYTES, BLOCK_MS, BLOCK_SAMPLES, CHANNELS, DEFAUL
                           receive_message)
 from shared.jitter import DelayTracker, JitterBuffer
 from shared.identity import load_identity, receive_welcome, send_hello
+from shared.enrollment import ENROLL_PORT, make_request, enroll_client
+from shared.client_hints import load_hints, save_hints
 from shared.device_identity import create_device_identity, replace_device_identity
 from shared.transport_security import client_context, connect_tls, DEFAULT_SERVER_NAME
 from shared.discovery import discover, DISCOVERY_PORT
@@ -80,6 +83,7 @@ def pump_frames(
     report: Callable[[str], None] | None = None,
     report_every_s: float = REPORT_EVERY_SECONDS,
     volume: AnnouncementVolume | AudioPolicyWorker | None = None,
+    settings_callback=None,
 ) -> None:
     """PCM/έλεγχος στην ίδια κατεύθυνση TCP, χωρίς reconnect σε αναμονή."""
     received = 0
@@ -109,6 +113,13 @@ def pump_frames(
             delay.record(message.seq, message.timestamp_us, clock_us())
             jitter.push(message.pcm)
             received += 1
+        elif message.kind == MESSAGE_CLIENT_SETTINGS:
+            if settings_callback is not None:
+                try:
+                    settings_callback(decode_client_settings(message.payload))
+                except (OSError, ValueError) as exc:
+                    print(f"[Client] Αποτυχία τοπικής αποθήκευσης στοιχείων: {exc}",
+                          flush=True)
         elif message.kind == MESSAGE_STREAM_STOP:
             if in_announcement:
                 jitter.finish_announcement()
@@ -153,6 +164,7 @@ def play_stream(
     announcement_volume: int | None = None,
     mute_others: bool = False,
     recovery_path: Path | None = None,
+    settings_callback=None,
 ) -> None:
     import sounddevice as sd
 
@@ -199,7 +211,8 @@ def play_stream(
         )
         try:
             pump_frames(connection, jitter, delay,
-                        report=lambda line: print(line, flush=True), volume=volume)
+                        report=lambda line: print(line, flush=True), volume=volume,
+                        settings_callback=settings_callback)
         finally:
             if volume is not None:
                 # Δίκτυο/τερματισμός: καλύτερα αποκατάσταση παρά παραμονή σε
@@ -326,6 +339,15 @@ def main() -> None:
     parser.add_argument("--new-client-key", action="store_true",
                         help="Δημιουργία νέου κλειδιού για τον ίδιο UUID (μετά από ανάκληση)· "
                              "απαιτεί νέα έγκριση από τον Director")
+    parser.add_argument("--enroll", action="store_true",
+                        help="Μία αρχική εγγραφή μέσω TLS/SAS, χωρίς εκκίνηση ήχου")
+    parser.add_argument("--enrollment-port", type=int, default=ENROLL_PORT,
+                        help="Ξεχωριστή θύρα εγγραφής Director")
+    parser.add_argument("--computer-name", default=None,
+                        help="Προτεινόμενο όνομα υπολογιστή στην εγγραφή")
+    parser.add_argument("--client-hints-file", type=Path,
+                        default=Path.home() / ".school-intercom" / "client-hints.json",
+                        help="Τελευταία στοιχεία που όρισε ο Manager")
     parser.add_argument("--tls-server-name", default=DEFAULT_SERVER_NAME,
                         help="DNS όνομα στο SAN του πιστοποιητικού Director")
     parser.add_argument("--device", type=int, default=None, help="Αριθμός συσκευής εξόδου PortAudio")
@@ -371,6 +393,26 @@ def main() -> None:
     else:
         certfile, keyfile, password = create_device_identity(args.client_credentials_dir,
                                                              client_id)
+    if args.enroll:
+        hints = load_hints(args.client_hints_file)
+        proposed_room = args.room or hints.get("room") or room
+        computer_name = args.computer_name or hints.get("name") or socket.gethostname()[:64]
+        request = make_request(client_id, proposed_room, computer_name,
+                               certfile.read_bytes(), keyfile.read_bytes(), password)
+        if args.host:
+            enrollment_host = args.host
+        else:
+            found = discover(udp_port=args.discovery_port)
+            if found is None:
+                parser.exit(2, "Δεν βρέθηκε Manager για εγγραφή. Δώστε --host.\\n")
+            enrollment_host = found[0]
+        success = enroll_client(enrollment_host, args.enrollment_port, args.tls_ca,
+                                args.tls_server_name, request)
+        if not success:
+            parser.exit(2, "Η εγγραφή δεν εγκρίθηκε.\\n")
+        save_hints(args.client_hints_file, proposed_room, computer_name)
+        print("Η εγγραφή ολοκληρώθηκε. Εκκινήστε τον Client κανονικά.", flush=True)
+        return
     trusted_director = client_context(args.tls_ca, certfile=certfile, keyfile=keyfile,
                                       password=password)
     print(f"Πιστοποιητικό Client: {certfile}", flush=True)
@@ -389,7 +431,10 @@ def main() -> None:
                         buffer_ms=args.buffer_ms, latency=args.latency,
                         fade_ms=args.fade_ms, resume_fade_ms=args.resume_fade_ms,
                         announcement_volume=args.announcement_volume,
-                        mute_others=args.mute_others)
+                        mute_others=args.mute_others,
+                        settings_callback=lambda info: save_hints(
+                            args.client_hints_file, info["room"],
+                            info["name"] or socket.gethostname()[:64]))
         finally:
             heartbeat_stop.set()
             sender.join(timeout=1)
