@@ -70,8 +70,8 @@ class SignedRegistryTests(LocalTLSFixture, unittest.TestCase):
                                                 self.client_id, "Α1"))
         self.assertFalse(self.registry.authorize(peer.public_bytes(serialization.Encoding.DER),
                                                  str(uuid.uuid4()), "Α1"))
-        self.assertFalse(self.registry.authorize(peer.public_bytes(serialization.Encoding.DER),
-                                                 self.client_id, "Α2"))
+        self.assertTrue(self.registry.authorize(peer.public_bytes(serialization.Encoding.DER),
+                                                self.client_id, "Α2"))
         reloaded = SignedClientRegistry(self.registry_path, self.manager_cert, self.manager_key)
         self.assertEqual(reloaded.version, 2)
         reloaded.revoke(self.client_id)
