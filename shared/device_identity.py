@@ -20,6 +20,11 @@ from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.x509.oid import ExtendedKeyUsageOID, NameOID
 
 
+# RFC 5280 §4.1.2.5: «no well-defined expiration date». Απόφαση χρήστη 21/11/2026:
+# το πιστοποιητικό Client δεν λήγει· η ασφάλεια στηρίζεται στην ανάκληση μέσω μητρώου.
+NO_EXPIRY = datetime(9999, 12, 31, 23, 59, 59, tzinfo=timezone.utc)
+
+
 class DeviceIdentityError(ValueError):
     """Incomplete or unreadable local identity; never silently rotate its key."""
 
@@ -121,7 +126,7 @@ def create_device_identity(directory: Path, client_id: str) -> tuple[Path, Path,
         .subject_name(name).issuer_name(name).public_key(key.public_key())
         .serial_number(x509.random_serial_number())
         .not_valid_before(now - timedelta(minutes=5))
-        .not_valid_after(now + timedelta(days=1095))
+        .not_valid_after(NO_EXPIRY)
         .add_extension(x509.BasicConstraints(ca=False, path_length=None), critical=True)
         .add_extension(x509.KeyUsage(
             digital_signature=True, content_commitment=False, key_encipherment=False,

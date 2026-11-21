@@ -32,6 +32,11 @@ class ClientIdentityTests(unittest.TestCase):
             self.assertFalse(actual.extensions.get_extension_for_class(x509.BasicConstraints).value.ca)
             self.assertEqual(actual.subject.get_attributes_for_oid(NameOID.COMMON_NAME)[0].value,
                              client_id)
+            # Χωρίς λήξη (RFC 5280: 99991231235959Z, GeneralizedTime).
+            self.assertEqual(actual.not_valid_after_utc,
+                             datetime.datetime(9999, 12, 31, 23, 59, 59,
+                                               tzinfo=datetime.timezone.utc))
+            self.assertIn(b"99991231235959Z", actual.public_bytes(serialization.Encoding.DER))
 
     def test_incomplete_identity_must_not_regenerate(self):
         with tempfile.TemporaryDirectory() as directory:
