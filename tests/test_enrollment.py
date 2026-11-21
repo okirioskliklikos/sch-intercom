@@ -8,6 +8,7 @@ import unittest
 import uuid
 
 from director.main import RegistryTrust
+from director.broadcast import AudioBroadcaster
 from shared.audio import (ControlMessage, MESSAGE_CLIENT_SETTINGS,
                           decode_client_settings, encode_client_settings,
                           receive_message)
@@ -116,6 +117,31 @@ class EnrollmentProtocolTests(LocalTLSFixture, unittest.TestCase):
 
 
 class ClientSettingsTests(unittest.TestCase):
+    def test_broadcaster_sends_initial_and_live_manager_settings(self):
+        broadcaster = AudioBroadcaster()
+        listener = socket.socket()
+        listener.bind(("127.0.0.1", 0))
+        listener.listen(1)
+        client = socket.create_connection(listener.getsockname(), timeout=2)
+        accepted, _ = listener.accept()
+        client.settimeout(3)
+        try:
+            client_id = str(uuid.uuid4())
+            self.assertTrue(broadcaster.add_client(
+                accepted, client_id, "Α1", name="PC"))
+            first = receive_message(client)
+            self.assertEqual(decode_client_settings(first.payload),
+                             {"room": "Α1", "name": "PC"})
+            broadcaster.update_client_info(client_id, "Α2", "Board")
+            second = receive_message(client)
+            self.assertEqual(decode_client_settings(second.payload),
+                             {"room": "Α2", "name": "Board"})
+            self.assertEqual(broadcaster.clients_snapshot(), [(client_id, "Α2")])
+        finally:
+            broadcaster.close()
+            client.close()
+            listener.close()
+
     def test_settings_control_wire_format(self):
         a, b = socket.socketpair()
         try:
