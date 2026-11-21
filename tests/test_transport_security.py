@@ -1,20 +1,18 @@
 """Loopback TLS tests; all temporary private keys remain outside the repository."""
 
-import shutil
 import socket
 import ssl
-import subprocess
 import tempfile
 import threading
 import unittest
 from pathlib import Path
 
+from director.tls_identity import create_director_identity
 from shared.transport_security import (
     DEFAULT_SERVER_NAME, accept_tls, client_context, connect_tls, server_context,
 )
 
 
-@unittest.skipUnless(shutil.which("openssl"), "requires openssl CLI for ephemeral test certificates")
 class TLSTransportTests(unittest.TestCase):
     def setUp(self):
         self.directory = tempfile.TemporaryDirectory()
@@ -22,12 +20,7 @@ class TLSTransportTests(unittest.TestCase):
         base = Path(self.directory.name)
         self.cert = base / "director.crt"
         self.key = base / "director.key"
-        subprocess.run([
-            "openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes",
-            "-days", "1", "-sha256", "-keyout", str(self.key), "-out", str(self.cert),
-            "-subj", f"/CN={DEFAULT_SERVER_NAME}",
-            "-addext", f"subjectAltName=DNS:{DEFAULT_SERVER_NAME}",
-        ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
+        create_director_identity(self.cert, self.key)  # cryptography, όχι openssl CLI
 
     def _exchange(self, *, client_ca=None, server_name=DEFAULT_SERVER_NAME,
                   plaintext=False, untrusted=False, bidirectional=False):

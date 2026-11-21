@@ -2,13 +2,12 @@
 
 Keys are generated under TemporaryDirectory, never committed to the repository.
 """
-import shutil
 import socket
-import subprocess
 import tempfile
 import unittest
 from pathlib import Path
 
+from director.tls_identity import create_director_identity
 from shared.transport_security import (
     DEFAULT_SERVER_NAME, client_context, connect_tls, server_context,
 )
@@ -17,21 +16,13 @@ from shared.transport_security import (
 class LocalTLSFixture:
     def setUp(self):
         super().setUp()
-        if shutil.which("openssl") is None:
-            self.skipTest("openssl required for ephemeral TLS integration tests")
         self._tls_temp = tempfile.TemporaryDirectory()
         self.addCleanup(self._tls_temp.cleanup)
         directory = Path(self._tls_temp.name)
         cert = directory / "director.crt"
         key = directory / "director.key"
-        subprocess.run(
-            ["openssl", "req", "-x509", "-newkey", "rsa:2048",
-             "-nodes", "-sha256", "-days", "1",
-             "-keyout", str(key), "-out", str(cert),
-             "-subj", "/CN=" + DEFAULT_SERVER_NAME,
-             "-addext", "subjectAltName=DNS:" + DEFAULT_SERVER_NAME],
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True,
-        )
+        # Με cryptography (όχι το πρόγραμμα openssl, που δεν υπάρχει στα Windows).
+        create_director_identity(cert, key)
         self.tls_server_context = server_context(cert, key)
         self.tls_client_context = client_context(cert)
 

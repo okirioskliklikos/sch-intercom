@@ -8,9 +8,9 @@ import unittest
 import uuid
 
 from director.broadcast import AudioBroadcaster
-from director.main import accept_clients
+from director.main import RegistryTrust, accept_clients
 from shared.client_registry import SignedClientRegistry
-from shared.device_identity import create_device_identity
+from shared.device_identity import create_device_identity, replace_device_identity
 from shared.identity import receive_welcome, send_hello
 from shared.transport_security import client_context, connect_tls
 from tests.tls_support import LocalTLSFixture
@@ -71,6 +71,72 @@ class AuthenticatedAdmissionTests(LocalTLSFixture, unittest.TestCase):
             # instead of during the first application read.
             pass
         self.assertEqual(self.broadcast.client_count, 0)
+
+    def restart_listener(self, **kwargs):
+        self.stop.set()
+        self.listener.join(timeout=2)
+        self.stop = threading.Event()
+        self.listener = threading.Thread(target=accept_clients,
+            args=(self.server, self.broadcast, self.stop),
+            kwargs={"registry": self.registry, **kwargs}, daemon=True)
+        self.listener.start()
+
+    def assert_denied(self, context, client_id, room):
+        try:
+            with self.connect(context) as connection:
+                send_hello(connection, client_id, room)
+                with self.assertRaises((OSError, EOFError, ValueError)):
+                    receive_welcome(connection)
+        except (OSError, EOFError):
+            pass
+        time.sleep(0.05)
+        self.assertEqual(self.broadcast.client_count, 0)
+
+    def test_approved_key_with_forged_uuid_or_room_is_denied(self):
+        client_id, cert, context = self.device("forger")
+        self.registry.approve(client_id, "Α1", cert.read_bytes())
+        self.restart_listener(tls_context=self.registry.tls_server_context(
+            self.director_cert, self.director_key))
+        victim_id = str(uuid.uuid4())
+        self.assert_denied(context, victim_id, "Α1")
+        self.assert_denied(context, client_id, "Α2")
+
+    def test_live_revoke_disconnects_and_new_context_rejects_handshake(self):
+        client_id, cert, context = self.device("live")
+        self.registry.approve(client_id, "Α1", cert.read_bytes())
+        trust = RegistryTrust(self.registry, self.director_cert, self.director_key)
+        self.restart_listener(tls_context=trust.context(), context_provider=trust.context)
+        with self.connect(context) as connection:
+            send_hello(connection, client_id, "Α1")
+            receive_welcome(connection)
+            deadline = time.monotonic() + 2
+            while self.broadcast.client_count == 0 and time.monotonic() < deadline:
+                time.sleep(0.01)
+            self.assertEqual(self.broadcast.client_count, 1)
+            trust.revoke(client_id, self.broadcast)
+            self.assertEqual(self.broadcast.client_count, 0)
+        self.assertEqual(trust.context().cert_store_stats()["x509"], 0)
+        self.assert_denied(context, client_id, "Α1")
+
+    def test_reenrolled_client_joins_with_new_key_old_key_denied(self):
+        client_id, cert, old_context = self.device("rekey")
+        self.registry.approve(client_id, "Α1", cert.read_bytes())
+        trust = RegistryTrust(self.registry, self.director_cert, self.director_key)
+        self.restart_listener(tls_context=trust.context(), context_provider=trust.context)
+        trust.revoke(client_id, self.broadcast)
+        directory = Path(self._tls_temp.name) / "rekey"
+        cert, key, password = replace_device_identity(directory, client_id)
+        new_context = client_context(self.director_cert, certfile=cert, keyfile=key,
+                                     password=password)
+        trust.approve(client_id, "Α1", cert.read_bytes())
+        self.assert_denied(old_context, client_id, "Α1")
+        with self.connect(new_context) as connection:
+            send_hello(connection, client_id, "Α1")
+            receive_welcome(connection)
+            deadline = time.monotonic() + 2
+            while self.broadcast.client_count == 0 and time.monotonic() < deadline:
+                time.sleep(0.01)
+            self.assertEqual(self.broadcast.client_count, 1)
 
     def test_approved_client_joins_and_revoked_client_is_denied(self):
         self.stop.set()
