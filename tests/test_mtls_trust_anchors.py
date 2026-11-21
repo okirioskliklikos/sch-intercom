@@ -23,6 +23,11 @@ from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.x509.oid import ExtendedKeyUsageOID, NameOID
 
 TIMEOUT = 4
+# Ο server το στέλνει μόνο αφού δεχτεί το πιστοποιητικό του Client. Ο Client το διαβάζει
+# πριν κλείσει: με TLS 1.3 το handshake του Client τελειώνει πριν από την επαλήθευση στον
+# server, και αν ο Client έκλεινε αμέσως, στα Windows ο server έπαιρνε
+# ConnectionAbortedError στέλνοντας τα session tickets.
+ACK = b"A"
 
 
 def _certificate(name, role):
@@ -52,7 +57,10 @@ def _certificate(name, role):
 class SelfSignedClientTrustTests(unittest.TestCase):
     def _round_trip(self, *, approved=True, use_approved=True,
                     client_role=ExtendedKeyUsageOID.CLIENT_AUTH):
-        """approved=False: κανένα εγκεκριμένο πιστοποιητικό (άδειο μητρώο)."""
+        """approved=False: κανένα εγκεκριμένο πιστοποιητικό (άδειο μητρώο).
+
+        Επιστρέφει (αποτέλεσμα server, αν ο Client έλαβε δεδομένα εφαρμογής).
+        """
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             director_cert, director_key = _certificate("school-intercom-director",
@@ -93,6 +101,7 @@ class SelfSignedClientTrustTests(unittest.TestCase):
                     raw.settimeout(TIMEOUT)
                     with server_ctx.wrap_socket(raw, server_side=True) as secure:
                         result.append(("ok", bool(secure.getpeercert(binary_form=True))))
+                        secure.sendall(ACK)
                 except ssl.SSLError as exc:
                     result.append(("rejected", type(exc).__name__))
                 except OSError as exc:
@@ -100,35 +109,42 @@ class SelfSignedClientTrustTests(unittest.TestCase):
 
             worker = threading.Thread(target=serve)
             worker.start()
+            received = b""
             try:
                 with socket.create_connection(listener.getsockname(), timeout=TIMEOUT) as raw:
-                    # Client might see handshake success before server rejects the unknown
-                    # certificate: server-side acceptance is the security assertion.
+                    # Ο Client μπορεί να δει επιτυχές handshake πριν ο server απορρίψει το
+                    # πιστοποιητικό του: η απόφαση του server είναι ο έλεγχος ασφάλειας, και
+                    # ο απορριφθείς Client δεν πρέπει να λάβει δεδομένα εφαρμογής.
                     try:
-                        with client_ctx.wrap_socket(raw, server_hostname="school-intercom-director"):
-                            pass
-                    except ssl.SSLError:
+                        with client_ctx.wrap_socket(
+                                raw, server_hostname="school-intercom-director") as secure:
+                            received = secure.recv(len(ACK))
+                    except (ssl.SSLError, OSError):
                         pass
             finally:
                 worker.join(timeout=5)
                 listener.close()
             self.assertFalse(worker.is_alive(), "TLS server did not terminate")
             self.assertEqual(len(result), 1)
-            return result[0]
+            return result[0], received == ACK
 
     def test_approved_self_signed_ca_false(self):
-        self.assertEqual(self._round_trip(), ("ok", True))
+        self.assertEqual(self._round_trip(), (("ok", True), True))
+
+    def _assert_rejected(self, **options):
+        (status, _), client_got_data = self._round_trip(**options)
+        self.assertEqual(status, "rejected")
+        self.assertFalse(client_got_data, "rejected Client received application data")
 
     def test_unknown_self_signed_ca_false_is_rejected(self):
-        self.assertEqual(self._round_trip(use_approved=False)[0], "rejected")
+        self._assert_rejected(use_approved=False)
 
     def test_empty_registry_rejects_every_client(self):
-        self.assertEqual(self._round_trip(approved=False)[0], "rejected")
+        self._assert_rejected(approved=False)
 
     def test_approved_certificate_without_client_auth_eku_is_rejected(self):
         # Ίδιο εγκεκριμένο πιστοποιητικό, αλλά μόνο με EKU serverAuth.
-        outcome = self._round_trip(client_role=ExtendedKeyUsageOID.SERVER_AUTH)
-        self.assertEqual(outcome[0], "rejected")
+        self._assert_rejected(client_role=ExtendedKeyUsageOID.SERVER_AUTH)
 
 
 if __name__ == "__main__":
