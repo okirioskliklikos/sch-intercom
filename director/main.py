@@ -15,6 +15,7 @@ import time
 
 from director.broadcast import AudioBroadcaster, MAX_CLIENTS
 from shared.client_registry import RegistryError, SignedClientRegistry
+from shared.enrollment import EnrollmentError, EnrollmentServer, ENROLL_PORT
 from shared.discovery import announce, director_id, DISCOVERY_PORT
 from shared.identity import ProtocolMismatch, receive_hello, send_welcome
 from shared.transport_security import accept_tls, server_context
@@ -79,6 +80,12 @@ def show_help() -> str:
   room <όνομα>  Μετάδοση σε μία ή περισσότερες αίθουσες
   client <UUID> Μετάδοση σε έναν ή περισσότερους Clients
   revoke <UUID> Ανάκληση Client και άμεση αποσύνδεσή του
+  enroll on/off  Άνοιγμα/κλείσιμο περιορισμένης θύρας εγγραφής
+  pending        Εκκρεμή αιτήματα με κωδικό επιβεβαίωσης SAS
+  approve <ID> <SAS>  Έγκριση αιτήματος μετά τη σύγκριση κωδικού
+  deny <ID>      Απόρριψη αιτήματος εγγραφής
+  set-room <UUID> <αίθουσα>  Αλλαγή αίθουσας χωρίς νέο κλειδί
+  set-name <UUID> <όνομα>    Αλλαγή ονόματος χωρίς νέο κλειδί
   quit          Τερματισμός Director"""
 
 
@@ -169,8 +176,16 @@ def _admit_client(connection: socket.socket, address, broadcaster: AudioBroadcas
                           flush=True)
                     connection.close()
                     return
+                entry = registry.approved_entry(client_id)
+                if entry is None:
+                    connection.close()
+                    return
+                if room != entry["room"]:
+                    print(f"[Director] Client {client_id}: δηλώνει {room}, "
+                          f"ο Manager ορίζει {entry['room']}", flush=True)
                 send_welcome(connection, accepted=True)
-                if not broadcaster.add_client(connection, client_id, room, address):
+                if not broadcaster.add_client(connection, client_id, entry["room"],
+                                              address, name=entry.get("name") or ""):
                     print(f"[Director] Όριο Clients: {broadcaster.max_clients}", flush=True)
                 return
         # Legacy isolated transport tests only; production always supplies registry.
@@ -206,11 +221,19 @@ class RegistryTrust:
         with self.registry.lock:
             return self._context
 
-    def approve(self, client_id: str, room: str, cert_pem: bytes) -> None:
+    def approve(self, client_id: str, room: str, cert_pem: bytes, *,
+                name: str = "") -> None:
         """Έγκριση (και νέου κλειδιού μετά από ανάκληση) με άμεσο νέο mTLS context."""
         with self.registry.lock:
-            self.registry.approve(client_id, room, cert_pem)
+            self.registry.approve(client_id, room, cert_pem, name=name)
             self._context = self.registry.tls_server_context(self._certfile, self._keyfile)
+
+    def update_info(self, client_id: str, broadcaster: AudioBroadcaster, *,
+                    room: str | None = None, name: str | None = None) -> dict:
+        with self.registry.lock:
+            info = self.registry.update_client_info(client_id, room=room, name=name)
+            broadcaster.update_client_info(client_id, info["room"], info["name"])
+            return info
 
     def revoke(self, client_id: str, broadcaster: AudioBroadcaster) -> None:
         with self.registry.lock:
@@ -268,7 +291,8 @@ def accept_clients(server: socket.socket, broadcaster: AudioBroadcaster,
 
 
 def command_loop(broadcaster: AudioBroadcaster, stop: threading.Event,
-                 stats: DirectorStats, *, revoke=None) -> None:
+                 stats: DirectorStats, *, revoke=None,
+                 enrollment: EnrollmentServer | None = None, trust=None) -> None:
     """Προσωρινός έλεγχος παραληπτών από το τερματικό του Director."""
     print("Πληκτρολογήστε help για τις διαθέσιμες εντολές.", flush=True)
     while not stop.is_set():
@@ -304,6 +328,28 @@ def command_loop(broadcaster: AudioBroadcaster, stop: threading.Event,
             elif command == "revoke" and len(values) == 1 and revoke is not None:
                 revoke(values[0])
                 print(f"Ανακλήθηκε ο Client {values[0]}", flush=True)
+            elif command == "enroll" and values == ["on"] and enrollment is not None:
+                enrollment.start()
+            elif command == "enroll" and values == ["off"] and enrollment is not None:
+                enrollment.stop()
+            elif command == "pending" and not values and enrollment is not None:
+                requests = enrollment.pending()
+                if not requests:
+                    print("Δεν υπάρχουν εκκρεμείς εγγραφές.", flush=True)
+                for request_id, name, room, sas in requests:
+                    print(f"{request_id} | {name} | {room} | SAS {sas}", flush=True)
+            elif command == "approve" and len(values) == 2 and enrollment is not None:
+                enrollment.decide(values[0], values[1], approve=True)
+                print(f"Εγκρίθηκε αίτημα {values[0]}", flush=True)
+            elif command == "deny" and len(values) == 1 and enrollment is not None:
+                enrollment.decide(values[0], approve=False)
+                print(f"Απορρίφθηκε αίτημα {values[0]}", flush=True)
+            elif command == "set-room" and len(values) == 2 and trust is not None:
+                info = trust.update_info(values[0], broadcaster, room=values[1])
+                print(f"Ενημερώθηκε αίθουσα: {info['room']}", flush=True)
+            elif command == "set-name" and len(values) >= 2 and trust is not None:
+                info = trust.update_info(values[0], broadcaster, name=" ".join(values[1:]))
+                print(f"Ενημερώθηκε όνομα: {info['name']}", flush=True)
             elif command == "all" and not values:
                 broadcaster.set_targets()
                 print("Μετάδοση σε όλους τους Clients", flush=True)
@@ -344,6 +390,8 @@ def main() -> None:
                         help="Πιστοποιητικό TLS Director (PEM, SAN DNS)")
     parser.add_argument("--tls-key", type=Path, required=True,
                         help="Ιδιωτικό κλειδί TLS Director (εκτός repository)")
+    parser.add_argument("--enrollment-port", type=int, default=ENROLL_PORT,
+                        help="Ξεχωριστή TLS θύρα εγγραφής (ανοίγει μόνο με enroll on)")
     parser.add_argument("--registry-file", type=Path,
                         default=Path.home() / ".school-intercom" / "clients-registry.json",
                         help="Υπογεγραμμένο μητρώο Clients")
@@ -395,6 +443,8 @@ def main() -> None:
         return
 
     broadcaster = AudioBroadcaster(max_clients=MAX_CLIENTS, on_event=lambda s: print(s, flush=True))
+    enrollment = EnrollmentServer(args.tls_cert, args.tls_key, trust,
+                                  host=args.host, port=args.enrollment_port)
     stop = threading.Event()
     stats = DirectorStats()
     identifier = director_id(args.director_id_file)
@@ -412,7 +462,8 @@ def main() -> None:
                                     daemon=True, name="accept-clients")
         receiver.start()
         commands = threading.Thread(target=command_loop, args=(broadcaster, stop, stats),
-                                    kwargs={"revoke": lambda client_id: trust.revoke(client_id, broadcaster)},
+                                    kwargs={"revoke": lambda client_id: trust.revoke(client_id, broadcaster),
+                                            "enrollment": enrollment, "trust": trust},
                                     daemon=True, name="director-commands")
         commands.start()
         reporter = threading.Thread(target=periodic_stats,
@@ -426,6 +477,7 @@ def main() -> None:
             print("\nΟ Director τερματίστηκε.", flush=True)
         finally:
             stop.set()
+            enrollment.stop()
             receiver.join(timeout=1)
             beacon.join(timeout=1)
             reporter.join(timeout=1)
