@@ -6,13 +6,15 @@
 """
 from __future__ import annotations
 
+import math
 import socket
 import threading
 import time
 from collections.abc import Callable
 
-from PySide6.QtCore import QPointF, QRectF, QSize, Qt, QTimer
-from PySide6.QtGui import QColor, QFontMetrics, QPainter
+from PySide6.QtCore import (QElapsedTimer, QPointF, QRectF, QSize, Qt, QTimer,
+                            QVariantAnimation)
+from PySide6.QtGui import QColor, QFontMetrics, QPainter, QPen
 from PySide6.QtWidgets import (QAbstractButton, QApplication, QButtonGroup, QCheckBox,
                                QFrame, QGridLayout, QHBoxLayout, QLabel, QMainWindow,
                                QPushButton, QRadioButton, QScrollArea, QSizePolicy, QStyle,
@@ -31,8 +33,9 @@ REFRESH_MS = 100
 NOTICE_SECONDS = 4.0
 
 HINT_IDLE = "Πατήστε για έναρξη"
-HINT_LIVE = "ΖΩΝΤΑΝΑ · πατήστε για λήξη"
-HINT_LIVE_MUTED = "ΖΩΝΤΑΝΑ · σίγαση · πατήστε για λήξη"
+HINT_LIVE = "Πατήστε για λήξη"
+HINT_LIVE_MUTED = "Σίγαση · πατήστε για λήξη"
+LIVE_BADGE = "Live"
 HINT_MUTED = "Σίγαση ενεργή · άρση σίγασης για έναρξη"
 HINT_PREVIEW = "Προεπισκόπηση · δεν μεταδίδεται"
 
@@ -73,18 +76,102 @@ class AnnounceButton(QAbstractButton):
         super().__init__(parent)
         self.RING = px(theme.ANNOUNCE_RING)
         self.CIRCLE = px(theme.ANNOUNCE_CIRCLE)
+        self.WAVE_PEN = px(theme.WAVE_WIDTH)
         self.live = False
+        self.muted = False
+        # 0 = σταθερό δαχτυλίδι, 1 = κύματα· ενδιάμεσες τιμές στη μετάβαση.
+        self.waves_mix = 0.0
+        self._mix_anim = QVariantAnimation(self)
+        self._mix_anim.setDuration(theme.WAVE_FADE_MS)
+        self._mix_anim.valueChanged.connect(self._set_mix)
+        self._mix_anim.finished.connect(self._mix_finished)
+        self._clock = QElapsedTimer()
+        self._frame = QTimer(self)
+        self._frame.setInterval(theme.WAVE_FRAME_MS)
+        self._frame.timeout.connect(self.update)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.setFixedSize(self.RING + 4, self.RING + 4)
+        # Χώρος δεσμευμένος για το μέγιστο κύμα, ώστε η διάταξη να μη μετακινείται.
+        wave_max = math.ceil(self.CIRCLE * theme.WAVE_SCALE) + self.WAVE_PEN
+        side = max(self.RING, wave_max) + 4
+        self.setFixedSize(side, side)
         self.setAccessibleName("Ανακοίνωση")
 
     def set_live(self, live: bool) -> None:
         if live != self.live:
             self.live = live
+            self._update_waves()
             self.update()
 
+    def set_muted(self, muted: bool) -> None:
+        """Σίγαση: λευκό μικρόφωνο με διαγώνια γραμμή (ui-style.md §4)."""
+        if muted != self.muted:
+            self.muted = muted
+            self._update_waves()
+            self.update()
+
+    def waves_wanted(self) -> bool:
+        """Κύματα μόνο σε ζωντανή ανακοίνωση χωρίς σίγαση (ui-style.md §4)."""
+        return self.live and not self.muted and self.isEnabled()
+
+    def waves_running(self) -> bool:
+        return self._frame.isActive()
+
+    def _update_waves(self) -> None:
+        target = 1.0 if self.waves_wanted() else 0.0
+        current_end = self._mix_anim.endValue()
+        if self._mix_anim.state() == QVariantAnimation.State.Running:
+            if current_end == target:
+                return
+            self._mix_anim.stop()
+        elif self.waves_mix == target:
+            return
+        if target and not self._frame.isActive():
+            self._clock.start()
+            self._frame.start()
+        self._mix_anim.setStartValue(self.waves_mix)
+        self._mix_anim.setEndValue(target)
+        self._mix_anim.start()
+
+    def _set_mix(self, value) -> None:
+        self.waves_mix = float(value)
+        self.update()
+
+    def _mix_finished(self) -> None:
+        if self.waves_mix <= 0.0:
+            self._frame.stop()
+            self.update()
+
+    def changeEvent(self, event) -> None:
+        super().changeEvent(event)
+        if event.type() == event.Type.EnabledChange:
+            self._update_waves()
+
+    def hideEvent(self, event) -> None:
+        self._frame.stop()
+        super().hideEvent(event)
+
+    def showEvent(self, event) -> None:
+        super().showEvent(event)
+        if self.waves_mix > 0.0 and not self._frame.isActive():
+            self._clock.start()
+            self._frame.start()
+
     def sizeHint(self) -> QSize:
-        return QSize(self.RING + 4, self.RING + 4)
+        return self.size()
+
+    def wave_states(self, elapsed_ms: int) -> list[tuple[float, float]]:
+        """(ακτίνα, opacity) κάθε ενεργού κύματος μετά από elapsed_ms."""
+        start = self.CIRCLE / 2
+        grow = self.CIRCLE * theme.WAVE_SCALE / 2 - start
+        waves = []
+        for index in range(theme.WAVE_COUNT):
+            local = elapsed_ms - index * theme.WAVE_DELAY_MS
+            if local < 0:
+                continue
+            progress = (local % theme.WAVE_PERIOD_MS) / theme.WAVE_PERIOD_MS
+            eased = 1 - (1 - progress) ** 3          # ease-out
+            waves.append((start + grow * eased, theme.WAVE_OPACITY * (1 - eased)))
+        return waves
 
     def paintEvent(self, _event) -> None:
         if not self.isEnabled():
@@ -97,12 +184,24 @@ class AnnounceButton(QAbstractButton):
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         painter.setPen(Qt.PenStyle.NoPen)
         center = QPointF(self.width() / 2, self.height() / 2)
-        painter.setBrush(QColor(ring))
-        painter.drawEllipse(center, self.RING / 2, self.RING / 2)
+        mix = self.waves_mix
+        if mix < 1.0:
+            ring_color = QColor(ring)
+            ring_color.setAlphaF(1.0 - mix)
+            painter.setBrush(ring_color)
+            painter.drawEllipse(center, self.RING / 2, self.RING / 2)
+        if mix > 0.0 and self._frame.isActive():
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            for radius, opacity in self.wave_states(self._clock.elapsed()):
+                color = QColor(theme.LIVE)
+                color.setAlphaF(opacity * mix)
+                painter.setPen(QPen(color, self.WAVE_PEN))
+                painter.drawEllipse(center, radius, radius)
+            painter.setPen(Qt.PenStyle.NoPen)
         painter.setBrush(QColor(fill))
         painter.drawEllipse(center, self.CIRCLE / 2, self.CIRCLE / 2)
         size = px(theme.ANNOUNCE_ICON)
-        icons.render(painter, "mic", theme.WHITE,
+        icons.render(painter, "mic_off" if self.muted else "mic", theme.WHITE,
                      QRectF(center.x() - size / 2, center.y() - size / 2, size, size), 2.2)
         painter.end()
 
@@ -412,6 +511,26 @@ class DirectorWindow(QMainWindow):
         group.setContentsMargins(0, 0, 0, 0)
         group.setSpacing(px(8))
 
+        # «Live ●» πάνω από τον κύκλο μόνο σε ζωντανή ανακοίνωση. Ο χώρος
+        # μένει δεσμευμένος και σε αναμονή, ώστε ο κύκλος να μη μετακινείται.
+        self.live_badge = QWidget()
+        badge = QHBoxLayout(self.live_badge)
+        badge.setContentsMargins(0, 0, 0, 0)
+        badge.setSpacing(px(6))
+        self.live_label = QLabel(LIVE_BADGE)
+        self.live_label.setObjectName("liveBadge")
+        self.live_dot = StatusDot(theme.LIVE)
+        badge.addStretch(1)
+        badge.addWidget(self.live_label)
+        badge.addWidget(self.live_dot, 0, Qt.AlignmentFlag.AlignVCenter)
+        badge.addStretch(1)
+        self.live_badge.setFixedHeight(self.live_badge.sizeHint().height())
+        policy = self.live_badge.sizePolicy()
+        policy.setRetainSizeWhenHidden(True)
+        self.live_badge.setSizePolicy(policy)
+        self.live_badge.setVisible(False)
+        group.addWidget(self.live_badge)
+
         self.announce_button = AnnounceButton()
         self.announce_button.clicked.connect(self.toggle_announcement)
         group.addWidget(self.announce_button, 0, Qt.AlignmentFlag.AlignHCenter)
@@ -648,6 +767,8 @@ class DirectorWindow(QMainWindow):
     def _refresh_announcement(self) -> None:
         mic = self.mic
         self.announce_button.set_live(mic.live)
+        self.announce_button.set_muted(mic.muted)
+        self.live_badge.setVisible(mic.live)
         # Σε ενεργή ανακοίνωση το κουμπί λήξης είναι πάντα διαθέσιμο.
         self.announce_button.setEnabled(mic.live or mic.can_start)
         self.announce_button.setToolTip(
@@ -671,7 +792,7 @@ class DirectorWindow(QMainWindow):
         elif self.notice:
             text, state = self.notice[0], "error"
         elif mic.live:
-            text, state = (HINT_LIVE_MUTED if mic.muted else HINT_LIVE), "live"
+            text, state = (HINT_LIVE_MUTED if mic.muted else HINT_LIVE), "idle"
         elif mic.muted:
             text, state = HINT_MUTED, "idle"
         elif mic.preview:
