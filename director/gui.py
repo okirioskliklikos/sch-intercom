@@ -87,8 +87,8 @@ def choose_targets(mode: str, checked: set[str], status) -> set[str] | None:
     return set(checked)
 
 
-def room_display_name(room: str, max_chars: int = 15) -> str:
-    """Όνομα αίθουσας ως 15 χαρακτήρες· από τον 16ο «…» (ui-style.md §4)."""
+def room_display_name(room: str, max_chars: int = 18) -> str:
+    """Όνομα αίθουσας ως 18 χαρακτήρες· από τον 19ο «…» (ui-style.md §5)."""
     return room if len(room) <= max_chars else room[:max_chars].rstrip() + "…"
 
 

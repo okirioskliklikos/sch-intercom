@@ -95,11 +95,11 @@ class DirectorWindowTests(TestCase):
         widths = {r.width() for r in window.room_rows.values()}
         self.assertEqual(len(widths), 1)  # ίσες στήλες
 
-    def test_long_room_name_is_cut_after_15_characters(self):
-        long_name = "Εργαστήριο Φυσικής Β"
+    def test_long_room_name_is_cut_after_18_characters(self):
+        long_name = "Εργαστήριο Φυσικής Β΄ τάξης"
         window = self.make([("id-1", long_name, True, 0.1)])
         label = window.room_rows[long_name].label
-        self.assertEqual(label.text(), "Εργαστήριο Φυσι…")
+        self.assertEqual(label.text(), "Εργαστήριο Φυσικής…")
         self.assertEqual(label.toolTip(), long_name)
 
     def test_start_and_stop_from_round_button(self):

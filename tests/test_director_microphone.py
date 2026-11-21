@@ -282,8 +282,9 @@ class TargetChoiceTests(TestCase):
     def test_room_display_name(self):
         self.assertEqual(room_display_name("Α1"), "Α1")
         self.assertEqual(room_display_name("Τμήμα Υποδοχής"), "Τμήμα Υποδοχής")
-        self.assertEqual(room_display_name("Εργ. Υπολογιστών"), "Εργ. Υπολογιστώ…")
-        self.assertEqual(room_display_name("Πολύ μεγάλο όνομα"), "Πολύ μεγάλο όνο…")
+        self.assertEqual(room_display_name("Εργ. Υπολογιστών"), "Εργ. Υπολογιστών")
+        self.assertEqual(room_display_name("Κεντρική Αίθουσα 12"), "Κεντρική Αίθουσα 1…")
+        self.assertEqual(room_display_name("Εργαστήριο Φυσικής Β"), "Εργαστήριο Φυσικής…")
 
     def test_meter_scale(self):
         self.assertEqual(meter_fraction(0.0), 0.0)
