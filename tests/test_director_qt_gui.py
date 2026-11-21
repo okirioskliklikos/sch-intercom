@@ -180,12 +180,79 @@ class DirectorWindowTests(TestCase):
         widths = {r.width() for r in window.room_rows.values()}
         self.assertEqual(len(widths), 1)  # ίσες στήλες
 
-    def test_long_room_name_is_cut_after_18_characters(self):
-        long_name = "Εργαστήριο Φυσικής Β΄ τάξης"
-        window = self.make([("id-1", long_name, True, 0.1)])
-        label = window.room_rows[long_name].label
-        self.assertEqual(label.text(), "Εργαστήριο Φυσικής…")
-        self.assertEqual(label.toolTip(), long_name)
+    def test_long_room_name_is_elided_at_status_dot(self):
+        long_name = "Εργαστήριο Φυσικής και Χημείας Β΄ τάξης"
+        names = [long_name, "Αίθουσα Εικαστικών", "Γραφείο Καθηγητών"]
+        window = self.make([(f"id-{i}", n, True, 0.1) for i, n in enumerate(names)])
+        window.show()
+        QApplication.processEvents()
+        row = window.room_rows[long_name]
+        self.assertTrue(row.label.text().endswith("…"))
+        self.assertTrue(long_name.startswith(row.label.text()[:-1]))
+        # Κόβεται βάσει πλάτους: το κείμενο γεμίζει τον χώρο ως την κουκκίδα.
+        advance = row.label.fontMetrics().horizontalAdvance(row.label.text())
+        self.assertLessEqual(advance, row.label.contentsRect().width())
+        self.assertGreater(advance, row.label.contentsRect().width() * 0.8)
+        self.assertEqual(row.label.toolTip(), long_name)
+        self.assertLessEqual(row.label.x() + row.label.width(), row.dot.x())
+        for name in names[1:]:
+            with self.subTest(name=name):
+                self.assertEqual(window.room_rows[name].label.text(), name)
+
+    def test_room_scrollbar_styled_and_always_visible(self):
+        status = [(f"id-{i}", f"Αίθουσα {i:02d}", True, 0.1) for i in range(60)]
+        window = self.make(status)
+        window.show()
+        QApplication.processEvents()
+        window._layout_rooms()
+        QApplication.processEvents()
+        bar = window.room_scroll.verticalScrollBar()
+        self.assertTrue(bar.isVisible())          # χωρίς να περάσει το ποντίκι
+        self.assertGreater(bar.maximum(), 0)
+        self.assertEqual(bar.width(), current_metrics().px(theme.SCROLLBAR))
+        qss = theme.stylesheet(current_metrics())
+        self.assertIn("QScrollBar::handle:vertical", qss)
+        self.assertIn(theme.PRIMARY_DARK, qss)
+
+    def test_third_column_opens_and_announcement_narrows(self):
+        status = [(f"id-{i}", f"Αίθουσα {i:02d}", True, 0.1) for i in range(30)]
+        window = self.make(status)
+        m = current_metrics()
+        window.setMinimumSize(m.px(1350), m.px(640))
+        window.resize(m.px(1350), m.px(640))
+        window.show()
+        QApplication.processEvents()
+        window._layout_rooms()
+        QApplication.processEvents()
+        self.assertGreaterEqual(window._room_columns, 3)
+        bar = window.room_scroll.verticalScrollBar()
+        self.assertFalse(bar.isVisible())         # χωρά σε στήλες, χωρίς κύλιση
+        self.assertGreaterEqual(window.announcement_card.width(),
+                                m.px(theme.ANNOUNCE_MIN_WIDTH))
+        # Στενότερο παράθυρο: λιγότερες στήλες και κύλιση.
+        window.setMinimumSize(m.px(860), m.px(640))
+        window.resize(m.px(900), m.px(640))
+        QApplication.processEvents()
+        window._layout_rooms()
+        QApplication.processEvents()
+        self.assertEqual(window._room_columns, 2)
+        self.assertTrue(bar.isVisible())
+        self.assertGreaterEqual(window.announcement_card.width(),
+                                m.px(theme.ANNOUNCE_MIN_WIDTH))
+
+    def test_connection_dot_after_label(self):
+        window = self.make(self.STATUS)
+        window.show()
+        QApplication.processEvents()
+        self.assertGreater(window.connection_dot.x(),
+                           window.connection_label.x() + window.connection_label.width() - 1)
+
+    def test_room_columns_have_fixed_scaled_width(self):
+        window = self.make(self.STATUS)
+        window.show()
+        QApplication.processEvents()
+        width = current_metrics().px(theme.ROOM_COLUMN_WIDTH)
+        self.assertEqual({r.width() for r in window.room_rows.values()}, {width})
 
     def test_start_and_stop_from_round_button(self):
         window = self.make(self.STATUS)
