@@ -57,6 +57,81 @@ class MultiClientTests(LocalTLSFixture, unittest.TestCase):
             time.sleep(0.01)
         self.assertEqual(self.broadcast.client_count, number)
 
+    def test_silent_connection_does_not_delay_other_clients(self):
+        silent = socket.create_connection(self.server.getsockname())
+        self.addCleanup(silent.close)
+        time.sleep(0.1)   # ο Director έχει δεχτεί τη σιωπηλή σύνδεση
+        started = time.monotonic()
+        self.connect_clients(1)
+        self.assertLess(time.monotonic() - started, 1.0)
+
+    def test_pending_handshakes_are_bounded(self):
+        self.stop.set()
+        self.listener.join(timeout=1)
+        server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        server.bind(("127.0.0.1", 0))
+        server.listen(8)
+        self.addCleanup(server.close)
+        stop = threading.Event()
+        self.addCleanup(stop.set)
+        threading.Thread(target=accept_clients, args=(server, self.broadcast, stop),
+                         kwargs={"tls_context": self.tls_server_context, "max_pending": 1},
+                         daemon=True).start()
+        silent = socket.create_connection(server.getsockname())
+        self.addCleanup(silent.close)
+        time.sleep(0.1)
+        extra = socket.create_connection(server.getsockname())
+        self.addCleanup(extra.close)
+        extra.settimeout(1)
+        try:
+            self.assertEqual(extra.recv(1), b"")   # κλείνει αμέσως, όχι μετά από 3 s
+        except ConnectionResetError:
+            pass
+
+    def test_50_simultaneous_clients_all_connect(self):
+        """Πρωινό άνοιγμα: 50 Clients συνδέονται ταυτόχρονα, με λίγες θέσεις
+        χειραψίας· όσοι απορρίπτονται ξαναδοκιμάζουν και τελικά συνδέονται όλοι."""
+        self.stop.set()
+        self.listener.join(timeout=1)
+        broadcast = AudioBroadcaster(queue_blocks=5, max_clients=64)
+        self.addCleanup(broadcast.close)
+        server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        server.bind(("127.0.0.1", 0))
+        server.listen(128)
+        self.addCleanup(server.close)
+        stop = threading.Event()
+        self.addCleanup(stop.set)
+        threading.Thread(target=accept_clients, args=(server, broadcast, stop),
+                         kwargs={"tls_context": self.tls_server_context, "max_pending": 8},
+                         daemon=True).start()
+        sockets, lock = [], threading.Lock()
+        def client(index):
+            for _ in range(40):          # επανάληψη όπως ο πραγματικός Client
+                try:
+                    s = self.connect_tls_client(server.getsockname())
+                    send_hello(s, str(uuid.UUID(int=index + 1)), f"Αίθουσα {index}")
+                    receive_welcome(s)
+                    with lock:
+                        sockets.append(s)
+                    return
+                except (OSError, EOFError, ValueError):
+                    time.sleep(0.05)
+        threads = [threading.Thread(target=client, args=(i,)) for i in range(50)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=20)
+        for s in sockets:
+            self.addCleanup(s.close)
+        end = time.monotonic() + 3
+        while broadcast.client_count != 50 and time.monotonic() < end:
+            time.sleep(0.01)
+        self.assertEqual(broadcast.client_count, 50)
+
+    def test_accept_requires_tls_context(self):
+        with self.assertRaises(ValueError):
+            accept_clients(self.server, self.broadcast, threading.Event())
+
     def test_2_5_10_15_20_clients_receive_identical_frames(self):
         for count in (2, 5, 10, 15, 20):
             with self.subTest(clients=count):
