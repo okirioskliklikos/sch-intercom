@@ -1,4 +1,5 @@
 """Phase 4.2A1: portable Client identity, signed registry and fail-closed authorization."""
+import datetime
 import json
 from pathlib import Path
 import ssl
@@ -88,6 +89,53 @@ class SignedRegistryTests(LocalTLSFixture, unittest.TestCase):
         context = self.registry.tls_server_context(self.manager_cert, self.manager_key)
         self.assertEqual(context.verify_mode, ssl.CERT_REQUIRED)
         self.assertGreaterEqual(context.cert_store_stats()["x509"], 1)
+
+    def test_change_by_other_process_is_adopted_not_overwritten(self):
+        # Manager running (self.registry) while the CLI approves in another process.
+        cli = SignedClientRegistry(self.registry_path, self.manager_cert, self.manager_key)
+        cli.approve(self.client_id, "Α1", self.cert.read_bytes())
+        other_id = str(uuid.uuid4())
+        other_cert, _, _ = create_device_identity(Path(self._tls_temp.name) / "other", other_id)
+        self.registry.approve(other_id, "Α2", other_cert.read_bytes())
+        reloaded = SignedClientRegistry(self.registry_path, self.manager_cert, self.manager_key)
+        self.assertEqual(reloaded.version, 3)
+        self.assertEqual({entry["client_id"] for entry in reloaded.snapshot()["clients"]},
+                         {self.client_id, other_id})
+
+    def test_diverged_file_is_never_overwritten(self):
+        older = self.registry_path.read_bytes()  # v1, signed by the same Manager
+        self.registry.approve(self.client_id, "Α1", self.cert.read_bytes())  # v2
+        # An older backup restored on disk is not a descendant of the running v2.
+        self.registry_path.write_bytes(older)
+        with self.assertRaises(RegistryError):
+            self.registry.revoke(self.client_id)
+        self.assertEqual(self.registry_path.read_bytes(), older)
+        self.assertEqual(self.registry.version, 2)
+
+    def test_certificate_without_client_extensions_rejected_cleanly(self):
+        key = ec.generate_private_key(ec.SECP256R1())
+        name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, self.client_id)])
+        now = datetime.datetime.now(datetime.timezone.utc)
+        bare = (x509.CertificateBuilder().subject_name(name).issuer_name(name)
+                .public_key(key.public_key()).serial_number(x509.random_serial_number())
+                .not_valid_before(now).not_valid_after(now + datetime.timedelta(days=1))
+                .sign(key, hashes.SHA256())).public_bytes(serialization.Encoding.PEM)
+        with self.assertRaises(RegistryError):
+            self.registry.approve(self.client_id, "Α1", bare)
+        with self.assertRaises(RegistryError):
+            self.registry.approve(self.client_id, "Α1", b"not a certificate")
+        self.assertEqual(self.registry.version, 1)
+
+    def test_rejection_reason_names_the_mismatch(self):
+        der = x509.load_pem_x509_certificate(self.cert.read_bytes()).public_bytes(
+            serialization.Encoding.DER)
+        self.assertIn("άγνωστο", self.registry.rejection_reason(der, self.client_id, "Α1"))
+        self.registry.approve(self.client_id, "Α1", self.cert.read_bytes())
+        self.assertIsNone(self.registry.rejection_reason(der, self.client_id, "Α1"))
+        self.assertIn("UUID", self.registry.rejection_reason(der, str(uuid.uuid4()), "Α1"))
+        self.assertIn("Α1", self.registry.rejection_reason(der, self.client_id, "Α2"))
+        self.registry.revoke(self.client_id)
+        self.assertIn("revoked", self.registry.rejection_reason(der, self.client_id, "Α1"))
 
     def test_spki_is_stable(self):
         fp = public_key_fingerprint(self.cert.read_bytes())

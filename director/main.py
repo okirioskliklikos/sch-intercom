@@ -14,7 +14,7 @@ import threading
 import time
 
 from director.broadcast import AudioBroadcaster, MAX_CLIENTS
-from shared.client_registry import SignedClientRegistry
+from shared.client_registry import RegistryError, SignedClientRegistry
 from shared.discovery import announce, director_id, DISCOVERY_PORT
 from shared.identity import ProtocolMismatch, receive_hello, send_welcome
 from shared.transport_security import accept_tls, server_context
@@ -162,8 +162,11 @@ def _admit_client(connection: socket.socket, address, broadcaster: AudioBroadcas
         client_id, room = receive_hello(connection)
         if registry is not None:
             with registry.lock:
-                if not registry.authorize(connection.getpeercert(binary_form=True), client_id, room):
-                    print(f"[Director] Μη εγκεκριμένος Client {address}: {client_id}", flush=True)
+                reason = registry.rejection_reason(
+                    connection.getpeercert(binary_form=True), client_id, room)
+                if reason is not None:
+                    print(f"[Director] Μη εγκεκριμένος Client {address}: {client_id}: {reason}",
+                          flush=True)
                     connection.close()
                     return
                 send_welcome(connection, accepted=True)
@@ -188,6 +191,26 @@ def _admit_client(connection: socket.socket, address, broadcaster: AudioBroadcas
         return
     if not broadcaster.add_client(connection, client_id, room, address):
         print(f"[Director] Απόρριψη Client {address}: όριο {broadcaster.max_clients}", flush=True)
+
+
+class RegistryTrust:
+    """Τρέχον mTLS context ενωμένο με το μητρώο: ανάκληση και αναδημιουργία ατομικά."""
+
+    def __init__(self, registry: SignedClientRegistry, certfile: Path, keyfile: Path):
+        self.registry = registry
+        self._certfile = certfile
+        self._keyfile = keyfile
+        self._context = registry.tls_server_context(certfile, keyfile)
+
+    def context(self) -> ssl.SSLContext:
+        with self.registry.lock:
+            return self._context
+
+    def revoke(self, client_id: str, broadcaster: AudioBroadcaster) -> None:
+        with self.registry.lock:
+            self.registry.revoke(client_id)
+            broadcaster.disconnect_client(client_id)
+            self._context = self.registry.tls_server_context(self._certfile, self._keyfile)
 
 
 def accept_clients(server: socket.socket, broadcaster: AudioBroadcaster,
@@ -331,41 +354,35 @@ def main() -> None:
                         help="Κεντρική οθόνη Director (PySide6, pip install -e .[gui])")
     args = parser.parse_args()
     tls_context = server_context(args.tls_cert, args.tls_key)
-    registry = SignedClientRegistry(args.registry_file, args.tls_cert, args.tls_key)
-    if args.approve_client_cert:
-        from cryptography import x509
-        from cryptography.x509.oid import NameOID
-        if args.approve_room is None:
-            parser.error("--approve-client-cert απαιτεί --approve-room")
-        pem = args.approve_client_cert.read_bytes()
-        cert = x509.load_pem_x509_certificate(pem)
-        client_id = cert.subject.get_attributes_for_oid(NameOID.COMMON_NAME)[0].value
-        registry.approve(client_id, args.approve_room, pem)
-        print(f"Εγκρίθηκε Client {client_id} (v{registry.version})", flush=True)
-        return
-    if args.revoke_client:
-        registry.revoke(args.revoke_client)
-        print(f"Ανακλήθηκε Client {args.revoke_client} (v{registry.version})", flush=True)
-        return
+    try:
+        registry = SignedClientRegistry(args.registry_file, args.tls_cert, args.tls_key)
+        if args.approve_client_cert:
+            from cryptography import x509
+            from cryptography.x509.oid import NameOID
+            if args.approve_room is None:
+                parser.error("--approve-client-cert απαιτεί --approve-room")
+            pem = args.approve_client_cert.read_bytes()
+            names = x509.load_pem_x509_certificate(pem).subject.get_attributes_for_oid(
+                NameOID.COMMON_NAME)
+            if len(names) != 1:
+                raise RegistryError("Certificate identity does not match UUID")
+            client_id = names[0].value
+            registry.approve(client_id, args.approve_room, pem)
+            print(f"Εγκρίθηκε Client {client_id} (v{registry.version})", flush=True)
+            return
+        if args.revoke_client:
+            registry.revoke(args.revoke_client)
+            print(f"Ανακλήθηκε Client {args.revoke_client} (v{registry.version})", flush=True)
+            return
+    except (RegistryError, ValueError, OSError) as exc:
+        parser.exit(2, f"Σφάλμα μητρώου Clients: {exc}\n")
     if args.list_clients:
         for entry in registry.snapshot()["clients"]:
             print("{} | {} | {}".format(entry["client_id"], entry["room"], entry["status"]))
         return
-    secure_context = registry.tls_server_context(args.tls_cert, args.tls_key)
-    current_context = [secure_context]
-
-    def get_context():
-        with registry.lock:
-            return current_context[0]
-
-    def live_revoke(client_id: str, broadcaster: AudioBroadcaster):
-        with registry.lock:
-            registry.revoke(client_id)
-            broadcaster.disconnect_client(client_id)
-            current_context[0] = registry.tls_server_context(args.tls_cert, args.tls_key)
-
-    secure_accept = partial(accept_clients, tls_context=secure_context,
-                            registry=registry, context_provider=get_context)
+    trust = RegistryTrust(registry, args.tls_cert, args.tls_key)
+    secure_accept = partial(accept_clients, tls_context=trust.context(),
+                            registry=registry, context_provider=trust.context)
     if args.gui:
         from director.gui import run_gui
         run_gui(args, accept_clients=secure_accept, stream_microphone=stream_microphone)
@@ -389,7 +406,7 @@ def main() -> None:
                                     daemon=True, name="accept-clients")
         receiver.start()
         commands = threading.Thread(target=command_loop, args=(broadcaster, stop, stats),
-                                    kwargs={"revoke": lambda client_id: live_revoke(client_id, broadcaster)},
+                                    kwargs={"revoke": lambda client_id: trust.revoke(client_id, broadcaster)},
                                     daemon=True, name="director-commands")
         commands.start()
         reporter = threading.Thread(target=periodic_stats,

@@ -167,6 +167,28 @@ class SignedClientRegistry:
         _atomic_write(self.path, json.dumps(data, sort_keys=True,
                                             ensure_ascii=False, indent=2).encode("utf-8") + bytes([10]))
 
+    def _refresh_from_disk(self) -> None:
+        """Adopt a newer signed file written by another process; never overwrite it.
+
+        Without this, an approval made with the CLI while the Manager runs would be
+        silently lost on the Manager's next live revocation (and the history forked).
+        """
+        try:
+            on_disk = json.loads(self.path.read_text(encoding="utf-8"))
+        except FileNotFoundError as exc:
+            raise RegistryError("Registry file disappeared; restore it before changes") from exc
+        except ValueError as exc:
+            raise RegistryError("Invalid or tampered registry") from exc
+        disk_registry = verify_document(on_disk, self._cert_pem)
+        memory_registry = self._document["registry"]
+        if disk_registry == memory_registry:
+            return
+        if digest(memory_registry) in disk_registry["history"]:
+            self._document = on_disk  # Newer descendant of what we hold.
+            return
+        raise RegistryError("Registry on disk diverged from the running Manager; "
+                            "restart the Manager before changing Clients")
+
     def _commit(self, newer: dict) -> None:
         older = self._document["registry"]
         newer["history"] = older["history"] + [digest(older)]
@@ -179,19 +201,28 @@ class SignedClientRegistry:
         """CLI-first approval. A revoked key cannot be approved a second time."""
         from shared.identity import validate_identity
         validate_identity(client_id, room)
-        cert = x509.load_pem_x509_certificate(cert_pem)
-        if cert.subject != cert.issuer:
-            raise RegistryError("Only self-signed device certificates are supported")
-        from cryptography.x509.oid import ExtendedKeyUsageOID, NameOID
-        if cert.subject.get_attributes_for_oid(NameOID.COMMON_NAME)[0].value != client_id:
-            raise RegistryError("Certificate identity does not match UUID")
-        if cert.extensions.get_extension_for_class(x509.BasicConstraints).value.ca:
-            raise RegistryError("Client certificate must not be a CA")
-        if ExtendedKeyUsageOID.CLIENT_AUTH not in cert.extensions.get_extension_for_class(
-                x509.ExtendedKeyUsage).value:
-            raise RegistryError("Certificate is not valid for Client TLS")
+        try:
+            cert = x509.load_pem_x509_certificate(cert_pem)
+            if cert.subject != cert.issuer:
+                raise RegistryError("Only self-signed device certificates are supported")
+            from cryptography.x509.oid import ExtendedKeyUsageOID, NameOID
+            names = cert.subject.get_attributes_for_oid(NameOID.COMMON_NAME)
+            if len(names) != 1 or names[0].value != client_id:
+                raise RegistryError("Certificate identity does not match UUID")
+            if cert.extensions.get_extension_for_class(x509.BasicConstraints).value.ca:
+                raise RegistryError("Client certificate must not be a CA")
+            if ExtendedKeyUsageOID.CLIENT_AUTH not in cert.extensions.get_extension_for_class(
+                    x509.ExtendedKeyUsage).value:
+                raise RegistryError("Certificate is not valid for Client TLS")
+        except x509.ExtensionNotFound as exc:
+            raise RegistryError("Client certificate lacks CA:FALSE/clientAuth extensions") from exc
+        except ValueError as exc:
+            if isinstance(exc, RegistryError):
+                raise
+            raise RegistryError("Invalid Client certificate") from exc
         fp = public_key_fingerprint(cert_pem)
         with self.lock:
+            self._refresh_from_disk()
             updated = self.snapshot()
             if any(entry["client_id"] == client_id or entry["spki_sha256"] == fp
                    for entry in updated["clients"]):
@@ -204,6 +235,7 @@ class SignedClientRegistry:
 
     def revoke(self, client_id: str, *, blocked: bool = False) -> None:
         with self.lock:
+            self._refresh_from_disk()
             updated = self.snapshot()
             for entry in updated["clients"]:
                 if entry["client_id"] == client_id:
@@ -221,16 +253,29 @@ class SignedClientRegistry:
                     if entry["status"] == "approved"]
 
     def authorize(self, peer_der: bytes | None, client_id: str, room: str) -> bool:
+        return self.rejection_reason(peer_der, client_id, room) is None
+
+    def rejection_reason(self, peer_der: bytes | None, client_id: str,
+                         room: str) -> str | None:
+        """None when admitted; otherwise a short reason for the Manager log only."""
         if not peer_der:
-            return False
+            return "χωρίς πιστοποιητικό Client"
         peer = x509.load_der_x509_certificate(peer_der)
         fp = public_key_fingerprint(peer.public_bytes(serialization.Encoding.PEM))
         with self.lock:
-            return any(entry["spki_sha256"] == fp and entry["client_id"] == client_id
-                       and entry["room"] == room and entry["status"] == "approved"
-                       and x509.load_pem_x509_certificate(entry["cert_pem"].encode("ascii"))
-                           .fingerprint(hashes.SHA256()) == peer.fingerprint(hashes.SHA256())
-                       for entry in self._document["registry"]["clients"])
+            entry = next((item for item in self._document["registry"]["clients"]
+                          if item["spki_sha256"] == fp), None)
+            if entry is None or x509.load_pem_x509_certificate(
+                    entry["cert_pem"].encode("ascii")).fingerprint(hashes.SHA256()) != (
+                    peer.fingerprint(hashes.SHA256())):
+                return "άγνωστο πιστοποιητικό"
+            if entry["status"] != "approved":
+                return f"πιστοποιητικό σε κατάσταση {entry['status']}"
+            if entry["client_id"] != client_id:
+                return f"το πιστοποιητικό ανήκει σε άλλο UUID ({entry['client_id']})"
+            if entry["room"] != room:
+                return f"εγκεκριμένο για αίθουσα {entry['room']}, δηλώθηκε {room}"
+            return None
 
     def tls_server_context(self, certfile: Path, keyfile: Path) -> ssl.SSLContext:
         """Trust only registered approved certificates; empty list denies everyone."""
