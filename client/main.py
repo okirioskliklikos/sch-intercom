@@ -1,13 +1,12 @@
 """Client: σύνδεση στον Director και αναπαραγωγή PCM.
 
-ΠΡΟΣΟΧΗ: πειραματικό TLS v5 με πιστοποιημένη ταυτότητα Client.
-Αρχική έγκριση προσωρινά από το CLI Manager.
+ΠΡΟΣΟΧΗ: πειραματικό TLS v6 με πιστοποιημένη ταυτότητα Client.
+Η δικτυακή εγγραφή με SAS ενεργοποιείται ρητά από τον χρήστη.
 Χρήση μόνο σε ελεγχόμενο δίκτυο δοκιμών.
 """
 
 import argparse
 import random
-import socket
 from pathlib import Path
 import socket
 import ssl
@@ -17,6 +16,7 @@ from collections.abc import Callable
 
 from shared.audio import (BLOCK_BYTES, BLOCK_MS, BLOCK_SAMPLES, CHANNELS, DEFAULT_PORT,
                           DTYPE, SAMPLE_RATE, Frame, MESSAGE_STREAM_STOP,
+                          MESSAGE_CLIENT_SETTINGS, decode_client_settings,
                           receive_message)
 from shared.jitter import DelayTracker, JitterBuffer
 from shared.identity import load_identity, receive_welcome, send_hello
