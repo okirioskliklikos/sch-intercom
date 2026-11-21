@@ -93,7 +93,7 @@ def encode_client_settings(room: str, name: str) -> bytes:
     from shared.identity import validate_identity, ROOM_PATTERN
     if not isinstance(room, str) or not ROOM_PATTERN.fullmatch(room) or room.strip() != room:
         raise ValueError("Invalid room")
-    if not isinstance(name, str) or not (1 <= len(name) <= 64) or name.strip() != name:
+    if not isinstance(name, str) or not (0 <= len(name) <= 64) or name.strip() != name:
         raise ValueError("Invalid computer name")
     if any(ord(ch) < 32 for ch in name):
         raise ValueError("Invalid computer name")
