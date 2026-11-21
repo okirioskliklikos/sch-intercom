@@ -65,6 +65,11 @@ class EnrollmentProtocolTests(LocalTLSFixture, unittest.TestCase):
         self.assertTrue(self.server.pending(), "No pending authenticated request")
         return thread
 
+    def _pending_with_code(self):
+        """Ο SAS του αιτήματος όπως τον βλέπει ο Client (ο Manager δεν τον δείχνει)."""
+        return [(rid, name, room, self.server._pending[rid].code)
+                for rid, name, room in self.server.pending()]
+
     def test_wrong_manager_hostname_cannot_enroll(self):
         with self.assertRaises((ssl.SSLError, OSError)):
             enroll_client("127.0.0.1", self.server.port, self.manager_cert,
@@ -82,7 +87,7 @@ class EnrollmentProtocolTests(LocalTLSFixture, unittest.TestCase):
 
     def test_challenge_matches_sas_and_explicit_approval(self):
         thread = self._start_client()
-        request_id, name, room, code = self.server.pending()[0]
+        request_id, name, room, code = self._pending_with_code()[0]
         self.assertEqual((name, room), ("Board1", "C2627-Γ1"))
         end = time.monotonic() + 4
         while not self.client_log and time.monotonic() < end:
@@ -98,7 +103,7 @@ class EnrollmentProtocolTests(LocalTLSFixture, unittest.TestCase):
 
     def test_wrong_sas_denies_without_approval(self):
         thread = self._start_client()
-        request_id, name, room, code = self.server.pending()[0]
+        request_id, name, room, code = self._pending_with_code()[0]
         wrong = "000000" if code != "000000" else "999999"
         with self.assertRaisesRegex(EnrollmentError, "Incorrect SAS"):
             self.server.decide(request_id, wrong, approve=True)
@@ -117,6 +122,55 @@ class EnrollmentProtocolTests(LocalTLSFixture, unittest.TestCase):
         thread.join(timeout=5)
         self.assertFalse(thread.is_alive())
         self.assertIsNone(self.registry.approved_entry(self.client_id))
+
+    def test_approval_at_expiry_is_not_reported_as_expired(self):
+        import shared.enrollment as enrollment
+
+        class TimedOutEvent(threading.Event):
+            def wait(self, timeout=None):
+                super().wait(2.0)  # η έγκριση φτάνει…
+                return False       # …αλλά η αναμονή «έληξε» ταυτόχρονα
+
+        class LatePending(enrollment.Pending):
+            def __init__(self, *args):
+                super().__init__(*args)
+                self.event = TimedOutEvent()
+
+        original = enrollment.Pending
+        enrollment.Pending = LatePending
+        self.addCleanup(setattr, enrollment, "Pending", original)
+        thread = self._start_client()
+        request_id, _, _, code = self._pending_with_code()[0]
+        self.server.decide(request_id, code, approve=True)
+        thread.join(timeout=5)
+        self.assertEqual(self.result, [True])  # όχι «expired» για εγκεκριμένο Client
+        self.assertIsNotNone(self.registry.approved_entry(self.client_id))
+
+    def test_manager_never_displays_sas(self):
+        thread = self._start_client()
+        request_id, _, _, code = self._pending_with_code()[0]
+        end = time.monotonic() + 4
+        while not self.client_log and time.monotonic() < end:
+            time.sleep(0.01)
+        self.assertIn(code, " ".join(self.client_log))
+        self.assertTrue(any(request_id in message for message in self.messages))
+        self.assertNotIn(code, " ".join(self.messages))
+        self.assertNotIn(code, repr(self.server.pending()))
+        self.server.decide(request_id, code, approve=True)
+        thread.join(timeout=5)
+        self.assertEqual(self.result, [True])
+
+    def test_resolve_accepts_unique_prefix(self):
+        thread = self._start_client()
+        request_id, _, _, code = self._pending_with_code()[0]
+        self.assertEqual(self.server.resolve(request_id[:8]), request_id)
+        with self.assertRaises(EnrollmentError):
+            self.server.resolve(request_id[:3])
+        with self.assertRaises(EnrollmentError):
+            self.server.resolve("zzzz")
+        self.server.decide(self.server.resolve(request_id[:6]), code, approve=True)
+        thread.join(timeout=5)
+        self.assertEqual(self.result, [True])
 
     def test_port_closed_until_explicit_enrollment(self):
         self.server.stop()

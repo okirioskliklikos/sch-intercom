@@ -1,4 +1,4 @@
-# Αυτόματη δοκιμή 4.2A1 — πλευρά Client (Windows). Βλ. tools/mtls_live_test.py.
+# Αυτόματη δοκιμή 4.2A1/4.2A2 — πλευρά Client (Windows). Βλ. tools/mtls_live_test.py.
 # Εκτέλεση: powershell -ExecutionPolicy Bypass -File tools\mtls_live_test.ps1
 param([string]$DirectorHost = "")
 $ErrorActionPreference = "Stop"
