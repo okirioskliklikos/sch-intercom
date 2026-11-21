@@ -87,7 +87,7 @@ class SignedRegistryTests(LocalTLSFixture, unittest.TestCase):
         self.registry.approve(self.client_id, "Α1", self.cert.read_bytes())
         context = self.registry.tls_server_context(self.manager_cert, self.manager_key)
         self.assertEqual(context.verify_mode, ssl.CERT_REQUIRED)
-        self.assertGreaterEqual(context.cert_store_stats()["x509_ca"], 1)
+        self.assertGreaterEqual(context.cert_store_stats()["x509"], 1)
 
     def test_spki_is_stable(self):
         fp = public_key_fingerprint(self.cert.read_bytes())
