@@ -10,7 +10,7 @@ import uuid
 from director.broadcast import AudioBroadcaster
 from director.main import RegistryTrust, accept_clients
 from shared.client_registry import SignedClientRegistry
-from shared.device_identity import create_device_identity
+from shared.device_identity import create_device_identity, replace_device_identity
 from shared.identity import receive_welcome, send_hello
 from shared.transport_security import client_context, connect_tls
 from tests.tls_support import LocalTLSFixture
@@ -117,6 +117,26 @@ class AuthenticatedAdmissionTests(LocalTLSFixture, unittest.TestCase):
             self.assertEqual(self.broadcast.client_count, 0)
         self.assertEqual(trust.context().cert_store_stats()["x509"], 0)
         self.assert_denied(context, client_id, "Α1")
+
+    def test_reenrolled_client_joins_with_new_key_old_key_denied(self):
+        client_id, cert, old_context = self.device("rekey")
+        self.registry.approve(client_id, "Α1", cert.read_bytes())
+        trust = RegistryTrust(self.registry, self.director_cert, self.director_key)
+        self.restart_listener(tls_context=trust.context(), context_provider=trust.context)
+        trust.revoke(client_id, self.broadcast)
+        directory = Path(self._tls_temp.name) / "rekey"
+        cert, key, password = replace_device_identity(directory, client_id)
+        new_context = client_context(self.director_cert, certfile=cert, keyfile=key,
+                                     password=password)
+        trust.approve(client_id, "Α1", cert.read_bytes())
+        self.assert_denied(old_context, client_id, "Α1")
+        with self.connect(new_context) as connection:
+            send_hello(connection, client_id, "Α1")
+            receive_welcome(connection)
+            deadline = time.monotonic() + 2
+            while self.broadcast.client_count == 0 and time.monotonic() < deadline:
+                time.sleep(0.01)
+            self.assertEqual(self.broadcast.client_count, 1)
 
     def test_approved_client_joins_and_revoked_client_is_denied(self):
         self.stop.set()

@@ -19,7 +19,7 @@ from shared.audio import (BLOCK_BYTES, BLOCK_MS, BLOCK_SAMPLES, CHANNELS, DEFAUL
                           receive_message)
 from shared.jitter import DelayTracker, JitterBuffer
 from shared.identity import load_identity, receive_welcome, send_hello
-from shared.device_identity import create_device_identity
+from shared.device_identity import create_device_identity, replace_device_identity
 from shared.transport_security import client_context, connect_tls, DEFAULT_SERVER_NAME
 from shared.discovery import discover, DISCOVERY_PORT
 from shared.control import heartbeat_sender
@@ -323,6 +323,9 @@ def main() -> None:
     parser.add_argument("--client-credentials-dir", type=Path,
                         default=Path.home() / ".school-intercom" / "credentials",
                         help="Φάκελος κρυπτογραφημένου κλειδιού Client")
+    parser.add_argument("--new-client-key", action="store_true",
+                        help="Δημιουργία νέου κλειδιού για τον ίδιο UUID (μετά από ανάκληση)· "
+                             "απαιτεί νέα έγκριση από τον Director")
     parser.add_argument("--tls-server-name", default=DEFAULT_SERVER_NAME,
                         help="DNS όνομα στο SAN του πιστοποιητικού Director")
     parser.add_argument("--device", type=int, default=None, help="Αριθμός συσκευής εξόδου PortAudio")
@@ -361,7 +364,13 @@ def main() -> None:
         parser.error("--announcement-volume δεν συνδυάζεται ακόμη με --device")
 
     client_id, room = load_identity(args.identity_file, room_override=args.room)
-    certfile, keyfile, password = create_device_identity(args.client_credentials_dir, client_id)
+    if args.new_client_key:
+        certfile, keyfile, password = replace_device_identity(args.client_credentials_dir,
+                                                              client_id)
+        print("Δημιουργήθηκε νέο κλειδί Client· το παλιό διαγράφηκε.", flush=True)
+    else:
+        certfile, keyfile, password = create_device_identity(args.client_credentials_dir,
+                                                             client_id)
     trusted_director = client_context(args.tls_ca, certfile=certfile, keyfile=keyfile,
                                       password=password)
     print(f"Πιστοποιητικό Client: {certfile}", flush=True)

@@ -15,7 +15,7 @@ from cryptography.x509.oid import NameOID
 from shared.client_registry import (RegistryError, SignedClientRegistry,
                                     public_key_fingerprint, verify_document)
 from shared.device_identity import (DeviceIdentityError, create_device_identity,
-                                    identity_credentials)
+                                    identity_credentials, replace_device_identity)
 from tests.tls_support import LocalTLSFixture
 
 
@@ -141,6 +141,75 @@ class SignedRegistryTests(LocalTLSFixture, unittest.TestCase):
         self.assertIn("Α1", self.registry.rejection_reason(der, self.client_id, "Α2"))
         self.registry.revoke(self.client_id)
         self.assertIn("revoked", self.registry.rejection_reason(der, self.client_id, "Α1"))
+
+    def der(self, cert_path):
+        return x509.load_pem_x509_certificate(cert_path.read_bytes()).public_bytes(
+            serialization.Encoding.DER)
+
+    def test_reapproval_after_revoke_needs_new_key_and_bans_old_one(self):
+        old_cert = self.cert.read_bytes()
+        old_der = self.der(self.cert)
+        self.registry.approve(self.client_id, "Α1", old_cert)
+        with self.assertRaises(RegistryError):  # ενεργός: πρώτα ανάκληση
+            self.registry.approve(self.client_id, "Α1", old_cert)
+        self.registry.revoke(self.client_id)
+        with self.assertRaises(RegistryError):  # το παλιό κλειδί ποτέ ξανά
+            self.registry.approve(self.client_id, "Α1", old_cert)
+        new_cert, _, _ = replace_device_identity(self.device_dir, self.client_id)
+        self.assertNotEqual(public_key_fingerprint(new_cert.read_bytes()),
+                            public_key_fingerprint(old_cert))
+        self.registry.approve(self.client_id, "Α2", new_cert.read_bytes())  # και νέα αίθουσα
+        self.assertTrue(self.registry.authorize(self.der(new_cert), self.client_id, "Α2"))
+        self.assertIn("ανακλημένο", self.registry.rejection_reason(old_der, self.client_id, "Α2"))
+        self.assertEqual(len(self.registry.snapshot()["clients"]), 1)
+        context = self.registry.tls_server_context(self.manager_cert, self.manager_key)
+        self.assertEqual(context.cert_store_stats()["x509"], 1)
+        # Μετά από επανεκκίνηση ισχύουν τα ίδια (υπογεγραμμένο και επαληθευμένο αρχείο).
+        reloaded = SignedClientRegistry(self.registry_path, self.manager_cert, self.manager_key)
+        self.assertTrue(reloaded.authorize(self.der(new_cert), self.client_id, "Α2"))
+        self.assertFalse(reloaded.authorize(old_der, self.client_id, "Α2"))
+
+    def test_revoked_key_is_recorded_in_signed_registry(self):
+        cert = self.cert.read_bytes()
+        self.registry.approve(self.client_id, "Α1", cert)
+        self.registry.revoke(self.client_id)
+        replace_device_identity(self.device_dir, self.client_id)
+        new_cert = self.cert.read_bytes()
+        self.registry.approve(self.client_id, "Α1", new_cert)
+        snapshot = self.registry.snapshot()
+        old_fp = snapshot["clients"][0]["previous_spki"][0]
+        self.assertEqual(old_fp, public_key_fingerprint(cert))
+
+    def test_blocked_client_cannot_be_reapproved(self):
+        self.registry.approve(self.client_id, "Α1", self.cert.read_bytes())
+        self.registry.revoke(self.client_id, blocked=True)
+        new_cert, _, _ = replace_device_identity(self.device_dir, self.client_id)
+        with self.assertRaises(RegistryError):
+            self.registry.approve(self.client_id, "Α1", new_cert.read_bytes())
+
+    def test_signed_registry_reusing_revoked_key_is_rejected(self):
+        # Ακόμη και υπογεγραμμένο αρχείο δεν επιτρέπει το ίδιο κλειδί σε δύο θέσεις.
+        self.registry.approve(self.client_id, "Α1", self.cert.read_bytes())
+        self.registry.revoke(self.client_id)
+        replace_device_identity(self.device_dir, self.client_id)
+        self.registry.approve(self.client_id, "Α1", self.cert.read_bytes())
+        registry = self.registry.snapshot()
+        entry = registry["clients"][0]
+        entry["previous_spki"].append(entry["spki_sha256"])
+        from shared.client_registry import _wrap
+        from cryptography.hazmat.primitives.serialization import load_pem_private_key
+        key = load_pem_private_key(self.manager_key.read_bytes(), password=None)
+        with self.assertRaises(RegistryError):
+            verify_document(_wrap(registry, key), self.manager_cert.read_bytes())
+
+    def test_replace_identity_keeps_uuid(self):
+        old = public_key_fingerprint(self.cert.read_bytes())
+        cert, _, _ = replace_device_identity(self.device_dir, self.client_id)
+        actual = x509.load_pem_x509_certificate(cert.read_bytes())
+        self.assertEqual(actual.subject.get_attributes_for_oid(NameOID.COMMON_NAME)[0].value,
+                         self.client_id)
+        self.assertNotEqual(public_key_fingerprint(cert.read_bytes()), old)
+        self.assertEqual(identity_credentials(self.device_dir)[0], cert)
 
     def test_spki_is_stable(self):
         fp = public_key_fingerprint(self.cert.read_bytes())

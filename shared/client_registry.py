@@ -100,12 +100,18 @@ def verify_document(document: dict, manager_cert_pem: bytes) -> dict:
                 raise RegistryError("Client key fingerprint mismatch")
             if entry["status"] not in VALID_STATES or client_id in seen_ids:
                 raise RegistryError("Duplicate Client or invalid status")
-            if entry["spki_sha256"] in seen_keys:
+            previous = entry.get("previous_spki", [])
+            if not isinstance(previous, list) or not all(
+                    isinstance(item, str) and len(item) == 64 for item in previous):
+                raise RegistryError("Invalid revoked key list")
+            keys = [entry["spki_sha256"], *previous]
+            if len(set(keys)) != len(keys) or seen_keys.intersection(keys):
+                # Ένα κλειδί (ενεργό ή ανακλημένο) ανήκει σε μία μόνο θέση του μητρώου.
                 raise RegistryError("One key cannot represent multiple Clients")
             if not isinstance(entry["room"], str) or not entry["room"]:
                 raise RegistryError("Invalid room")
             seen_ids.add(client_id)
-            seen_keys.add(entry["spki_sha256"])
+            seen_keys.update(keys)
         return registry
     except (InvalidSignature, KeyError, TypeError, ValueError, IndexError) as exc:
         raise RegistryError("Invalid or tampered registry") from exc
@@ -224,9 +230,25 @@ class SignedClientRegistry:
         with self.lock:
             self._refresh_from_disk()
             updated = self.snapshot()
-            if any(entry["client_id"] == client_id or entry["spki_sha256"] == fp
+            if any(entry["spki_sha256"] == fp or fp in entry.get("previous_spki", [])
                    for entry in updated["clients"]):
-                raise RegistryError("Existing/revoked Client identity; re-enrol with a new key")
+                raise RegistryError("Key already used or revoked; it can never be approved again")
+            existing = next((entry for entry in updated["clients"]
+                             if entry["client_id"] == client_id), None)
+            if existing is not None:
+                # Απόφαση χρήστη 21/11/2026: ο ίδιος UUID ξαναεγκρίνεται μετά από ανάκληση,
+                # μόνο με νέο κλειδί· το παλιό SPKI μένει μόνιμα απαγορευμένο.
+                if existing["status"] == "approved":
+                    raise RegistryError("Client already approved; revoke it before a new key")
+                if existing["status"] == "blocked":
+                    raise RegistryError("Client is blocked; explicit unblock required")
+                existing["previous_spki"] = [*existing.get("previous_spki", []),
+                                             existing["spki_sha256"]]
+                existing.update({"name": name, "room": room, "spki_sha256": fp,
+                                 "cert_pem": cert_pem.decode("ascii"), "status": "approved",
+                                 "changed_in_version": self.version + 1})
+                self._commit(updated)
+                return
             updated["clients"].append({
                 "client_id": client_id, "name": name, "room": room,
                 "spki_sha256": fp, "cert_pem": cert_pem.decode("ascii"),
@@ -263,8 +285,10 @@ class SignedClientRegistry:
         peer = x509.load_der_x509_certificate(peer_der)
         fp = public_key_fingerprint(peer.public_bytes(serialization.Encoding.PEM))
         with self.lock:
-            entry = next((item for item in self._document["registry"]["clients"]
-                          if item["spki_sha256"] == fp), None)
+            clients = self._document["registry"]["clients"]
+            if any(fp in item.get("previous_spki", []) for item in clients):
+                return "ανακλημένο παλιό κλειδί"
+            entry = next((item for item in clients if item["spki_sha256"] == fp), None)
             if entry is None or x509.load_pem_x509_certificate(
                     entry["cert_pem"].encode("ascii")).fingerprint(hashes.SHA256()) != (
                     peer.fingerprint(hashes.SHA256())):

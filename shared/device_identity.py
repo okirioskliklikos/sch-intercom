@@ -103,6 +103,17 @@ def identity_credentials(directory: Path) -> tuple[Path, Path, bytes]:
     return cert, key, password
 
 
+def replace_device_identity(directory: Path, client_id: str) -> tuple[Path, Path, bytes]:
+    """Ρητή αντικατάσταση κλειδιού (μετά από ανάκληση): ίδιο UUID, νέο ζεύγος κλειδιών.
+
+    Το παλιό κλειδί διαγράφεται· ο Manager το κρατά μόνιμα απαγορευμένο στο μητρώο.
+    """
+    directory = Path(directory)
+    for path in _paths(directory):
+        path.unlink(missing_ok=True)
+    return create_device_identity(directory, client_id)
+
+
 def create_device_identity(directory: Path, client_id: str) -> tuple[Path, Path, bytes]:
     """Create only on a new directory; never overwrite or auto-repair keys."""
     if str(uuid.UUID(client_id)) != client_id:

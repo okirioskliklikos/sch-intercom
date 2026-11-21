@@ -206,6 +206,12 @@ class RegistryTrust:
         with self.registry.lock:
             return self._context
 
+    def approve(self, client_id: str, room: str, cert_pem: bytes) -> None:
+        """Έγκριση (και νέου κλειδιού μετά από ανάκληση) με άμεσο νέο mTLS context."""
+        with self.registry.lock:
+            self.registry.approve(client_id, room, cert_pem)
+            self._context = self.registry.tls_server_context(self._certfile, self._keyfile)
+
     def revoke(self, client_id: str, broadcaster: AudioBroadcaster) -> None:
         with self.registry.lock:
             self.registry.revoke(client_id)
