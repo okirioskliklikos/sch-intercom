@@ -7,6 +7,7 @@ its request can be displayed. The human compares a six-digit SAS on BOTH PCs.
 from __future__ import annotations
 
 import base64
+from collections import deque
 import hashlib
 import hmac
 import json
@@ -33,6 +34,7 @@ ENROLL_PORT = 50559
 PROTOCOL = 1
 MAX_MESSAGE = 8192
 MAX_PENDING = 16
+MAX_ATTEMPTS_PER_MINUTE = 8
 REQUEST_TTL = 120
 NETWORK_TIMEOUT = 8
 
@@ -157,6 +159,7 @@ class EnrollmentServer:
         self._thread = None
         self._stop = threading.Event()
         self._slots = threading.BoundedSemaphore(MAX_PENDING)
+        self._attempts: dict[str, deque[float]] = {}
 
     def start(self):
         with self._lock:
@@ -166,6 +169,7 @@ class EnrollmentServer:
             try:
                 listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
                 listener.bind((self.host, self.port))
+                self.port = listener.getsockname()[1]
                 listener.listen(MAX_PENDING)
                 listener.settimeout(0.2)
             except BaseException:
@@ -201,7 +205,18 @@ class EnrollmentServer:
                 continue
             except OSError:
                 return
-            if not self._slots.acquire(False):
+            with self._lock:
+                now = time.monotonic()
+                attempts = self._attempts.setdefault(address[0], deque())
+                while attempts and now - attempts[0] >= 60:
+                    attempts.popleft()
+                limited = len(attempts) >= MAX_ATTEMPTS_PER_MINUTE
+                if not limited:
+                    attempts.append(now)
+                if len(self._attempts) > 256:
+                    self._attempts = {ip: q for ip, q in self._attempts.items()
+                                      if q and now - q[-1] < 60}
+            if limited or not self._slots.acquire(False):
                 raw.close()
                 continue
             threading.Thread(target=self._handle, args=(raw, address),
@@ -260,6 +275,8 @@ class EnrollmentServer:
                 raise EnrollmentError("No active enrollment request")
             if approve:
                 if not isinstance(code, str) or not hmac.compare_digest(code, pending.code):
+                    pending.result = "denied"
+                    pending.event.set()
                     raise EnrollmentError("Incorrect SAS; enrollment denied")
                 req = pending.request
                 self.trust.approve(req["client_id"], req["room"],
