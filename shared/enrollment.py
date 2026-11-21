@@ -26,7 +26,7 @@ from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.x509.oid import NameOID
 
-from shared.client_registry import canonical, RegistryError
+from shared.client_registry import canonical
 from shared.identity import validate_identity
 from shared.transport_security import server_context, client_context, connect_tls
 
@@ -286,8 +286,13 @@ class EnrollmentServer:
                     pending.event.set()
                     raise EnrollmentError("Incorrect SAS; enrollment denied")
                 req = pending.request
-                self.trust.approve(req["client_id"], req["room"],
-                                   req["cert_pem"].encode("ascii"), name=req["name"])
+                try:
+                    self.trust.approve(req["client_id"], req["room"],
+                                       req["cert_pem"].encode("ascii"), name=req["name"])
+                except (ValueError, OSError):
+                    pending.result = "denied"
+                    pending.event.set()
+                    raise
                 pending.result = "approved"
             else:
                 pending.result = "denied"
