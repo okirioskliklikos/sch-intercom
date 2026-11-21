@@ -12,6 +12,7 @@ import uuid
 
 from director.broadcast import AudioBroadcaster
 from director.main import accept_clients
+from tests.tls_support import LocalTLSFixture
 from shared.audio import read_exact
 from shared.identity import (
     CONNECTION_PROTOCOL, HELLO_MAGIC, WELCOME, WELCOME_INCOMPATIBLE, WELCOME_MAGIC,
@@ -99,8 +100,9 @@ class WelcomeTests(unittest.TestCase):
             receive_welcome(self.right)
 
 
-class DirectorAcceptVersionTests(unittest.TestCase):
+class DirectorAcceptVersionTests(LocalTLSFixture, unittest.TestCase):
     def setUp(self):
+        super().setUp()
         self.broadcast = AudioBroadcaster(queue_blocks=5)
         self.server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.server.bind(("127.0.0.1", 0))
@@ -112,7 +114,8 @@ class DirectorAcceptVersionTests(unittest.TestCase):
 
     def _accept(self):
         with contextlib.redirect_stdout(self.output):
-            accept_clients(self.server, self.broadcast, self.stop)
+            accept_clients(self.server, self.broadcast, self.stop,
+                           tls_context=self.tls_server_context)
 
     def tearDown(self):
         self.stop.set()
@@ -121,8 +124,7 @@ class DirectorAcceptVersionTests(unittest.TestCase):
         self.server.close()
 
     def connect(self):
-        connection = socket.create_connection(self.server.getsockname(), timeout=2)
-        connection.settimeout(2)
+        connection = self.connect_tls_client(self.server.getsockname(), timeout=2)
         self.addCleanup(connection.close)
         return connection
 
