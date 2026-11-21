@@ -105,7 +105,12 @@ def create_device_identity(directory: Path, client_id: str) -> tuple[Path, Path,
     directory = Path(directory)
     cert, keyfile, password_file = _paths(directory)
     if any(path.exists() for path in (cert, keyfile, password_file)):
-        return identity_credentials(directory)
+        credentials = identity_credentials(directory)
+        existing = x509.load_pem_x509_certificate(cert.read_bytes())
+        existing_id = existing.subject.get_attributes_for_oid(NameOID.COMMON_NAME)[0].value
+        if existing_id != client_id:
+            raise DeviceIdentityError("Client UUID changed; existing key must not be reused")
+        return credentials
     directory.mkdir(parents=True, exist_ok=True, mode=0o700)
     if os.name != "nt":
         os.chmod(directory, 0o700)
