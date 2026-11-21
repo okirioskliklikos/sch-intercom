@@ -14,6 +14,7 @@ import threading
 import time
 
 from director.broadcast import AudioBroadcaster, MAX_CLIENTS
+from shared.client_registry import SignedClientRegistry
 from shared.discovery import announce, director_id, DISCOVERY_PORT
 from shared.identity import ProtocolMismatch, receive_hello, send_welcome
 from shared.transport_security import accept_tls, server_context
@@ -150,13 +151,25 @@ HELLO_TIMEOUT_SECONDS = 2.0
 
 
 def _admit_client(connection: socket.socket, address, broadcaster: AudioBroadcaster,
-                  tls_context: ssl.SSLContext) -> None:
+                  tls_context: ssl.SSLContext, *,
+                  registry: SignedClientRegistry | None = None) -> None:
     """TLS και HELLO ενός Client, σε δικό του νήμα ώστε να μην καθυστερεί τους άλλους."""
     # Το TLS ολοκληρώνεται πριν επιτραπεί οποιοδήποτε HELLO/PCM.
     try:
         connection = accept_tls(connection, tls_context)
         connection.settimeout(HELLO_TIMEOUT_SECONDS)
         client_id, room = receive_hello(connection)
+        if registry is not None:
+            with registry.lock:
+                if not registry.authorize(connection.getpeercert(binary_form=True), client_id, room):
+                    print(f"[Director] Μη εγκεκριμένος Client {address}: {client_id}", flush=True)
+                    connection.close()
+                    return
+                send_welcome(connection, accepted=True)
+                if not broadcaster.add_client(connection, client_id, room, address):
+                    print(f"[Director] Όριο Clients: {broadcaster.max_clients}", flush=True)
+                return
+        # Legacy isolated transport tests only; production always supplies registry.
         send_welcome(connection, accepted=True)
     except ProtocolMismatch as exc:
         print(f"[Director] Απόρριψη {address}: {exc}", flush=True)
@@ -178,7 +191,8 @@ def _admit_client(connection: socket.socket, address, broadcaster: AudioBroadcas
 
 def accept_clients(server: socket.socket, broadcaster: AudioBroadcaster,
                    stop: threading.Event, *, tls_context: ssl.SSLContext | None = None,
-                   max_pending: int = MAX_PENDING_HANDSHAKES) -> None:
+                   max_pending: int = MAX_PENDING_HANDSHAKES,
+                   registry: SignedClientRegistry | None = None) -> None:
     """Αποδέχεται νέους Clients ανεξάρτητα από την καταγραφή ήχου.
 
     Το νήμα αυτό μόνο δέχεται συνδέσεις. Το TLS και το HELLO κάθε Client γίνονται
@@ -214,7 +228,7 @@ def accept_clients(server: socket.socket, broadcaster: AudioBroadcaster,
 
         def admit(connection=connection, address=address):
             try:
-                _admit_client(connection, address, broadcaster, tls_context)
+                _admit_client(connection, address, broadcaster, tls_context, registry=registry)
             finally:
                 pending.release()
 
