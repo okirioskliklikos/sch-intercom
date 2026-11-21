@@ -78,6 +78,7 @@ def show_help() -> str:
   none          Παύση ομιλίας προς όλους
   room <όνομα>  Μετάδοση σε μία ή περισσότερες αίθουσες
   client <UUID> Μετάδοση σε έναν ή περισσότερους Clients
+  revoke <UUID> Ανάκληση Client και άμεση αποσύνδεσή του
   quit          Τερματισμός Director"""
 
 
@@ -192,7 +193,8 @@ def _admit_client(connection: socket.socket, address, broadcaster: AudioBroadcas
 def accept_clients(server: socket.socket, broadcaster: AudioBroadcaster,
                    stop: threading.Event, *, tls_context: ssl.SSLContext | None = None,
                    max_pending: int = MAX_PENDING_HANDSHAKES,
-                   registry: SignedClientRegistry | None = None) -> None:
+                   registry: SignedClientRegistry | None = None,
+                   context_provider=None) -> None:
     """Αποδέχεται νέους Clients ανεξάρτητα από την καταγραφή ήχου.
 
     Το νήμα αυτό μόνο δέχεται συνδέσεις. Το TLS και το HELLO κάθε Client γίνονται
@@ -228,7 +230,8 @@ def accept_clients(server: socket.socket, broadcaster: AudioBroadcaster,
 
         def admit(connection=connection, address=address):
             try:
-                _admit_client(connection, address, broadcaster, tls_context, registry=registry)
+                current_tls = context_provider() if context_provider is not None else tls_context
+                _admit_client(connection, address, broadcaster, current_tls, registry=registry)
             finally:
                 pending.release()
 
@@ -236,7 +239,7 @@ def accept_clients(server: socket.socket, broadcaster: AudioBroadcaster,
 
 
 def command_loop(broadcaster: AudioBroadcaster, stop: threading.Event,
-                 stats: DirectorStats) -> None:
+                 stats: DirectorStats, *, revoke=None) -> None:
     """Προσωρινός έλεγχος παραληπτών από το τερματικό του Director."""
     print("Πληκτρολογήστε help για τις διαθέσιμες εντολές.", flush=True)
     while not stop.is_set():
@@ -269,6 +272,9 @@ def command_loop(broadcaster: AudioBroadcaster, stop: threading.Event,
                 for client_id, room, active, age in clients:
                     state = "Online" if active else "Offline"
                     print(f"  {client_id} | {room} | {state} | τελευταίο heartbeat πριν {age:.1f}s", flush=True)
+            elif command == "revoke" and len(values) == 1 and revoke is not None:
+                revoke(values[0])
+                print(f"Ανακλήθηκε ο Client {values[0]}", flush=True)
             elif command == "all" and not values:
                 broadcaster.set_targets()
                 print("Μετάδοση σε όλους τους Clients", flush=True)
@@ -346,7 +352,20 @@ def main() -> None:
             print("{} | {} | {}".format(entry["client_id"], entry["room"], entry["status"]))
         return
     secure_context = registry.tls_server_context(args.tls_cert, args.tls_key)
-    secure_accept = partial(accept_clients, tls_context=secure_context, registry=registry)
+    current_context = [secure_context]
+
+    def get_context():
+        with registry.lock:
+            return current_context[0]
+
+    def live_revoke(client_id: str, broadcaster: AudioBroadcaster):
+        with registry.lock:
+            registry.revoke(client_id)
+            broadcaster.disconnect_client(client_id)
+            current_context[0] = registry.tls_server_context(args.tls_cert, args.tls_key)
+
+    secure_accept = partial(accept_clients, tls_context=secure_context,
+                            registry=registry, context_provider=get_context)
     if args.gui:
         from director.gui import run_gui
         run_gui(args, accept_clients=secure_accept, stream_microphone=stream_microphone)
@@ -370,6 +389,7 @@ def main() -> None:
                                     daemon=True, name="accept-clients")
         receiver.start()
         commands = threading.Thread(target=command_loop, args=(broadcaster, stop, stats),
+                                    kwargs={"revoke": lambda client_id: live_revoke(client_id, broadcaster)},
                                     daemon=True, name="director-commands")
         commands.start()
         reporter = threading.Thread(target=periodic_stats,
