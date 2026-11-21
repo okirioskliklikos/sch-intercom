@@ -77,6 +77,9 @@ class DirectorWindowTests(TestCase):
 
     def test_landscape_layout_expands_announcement_and_stacks_right_cards(self):
         window = self.make(self.STATUS)
+        # Το offscreen Qt μπορεί να αναφέρει εικονική οθόνη μόλις 800px.
+        # Ελέγχουμε ρητά τη συμφωνημένη οριζόντια διάταξη σε landscape viewport.
+        window.resize(1366, 768)
         window.show()
         QApplication.processEvents()
         window._layout_rooms()
