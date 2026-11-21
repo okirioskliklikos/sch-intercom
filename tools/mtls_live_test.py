@@ -212,15 +212,19 @@ class DirectorRun:
         self.channel.send(cmd="hello", director_cert=self.cert.read_text(encoding="ascii"))
         self.channel.receive()
 
-    def enroll_request(self, director: Process) -> tuple[str, str, str, str]:
-        """Νέα συσκευή «board» ζητά εγγραφή· επιστρέφει UUID, ID αιτήματος και τους δύο SAS."""
+    def enroll_request(self, director: Process) -> tuple[str, str, str, int]:
+        """Νέα συσκευή «board» ζητά εγγραφή.
+
+        Επιστρέφει UUID, ID αιτήματος, τον SAS που δείχνει ο Client (όπως θα τον
+        πληκτρολογούσε ο διαχειριστής) και τη θέση του log για έλεγχο ότι ο Manager
+        δεν τον εμφάνισε."""
         mark = director.mark()
         reply = self.ask_client("enroll", profile="board", room=ROOM, name=NEW_NAME)
-        line = director.wait_for(f"| {NEW_NAME} | {ROOM} | SAS", since=mark, timeout=20)
+        line = director.wait_for(f"| {NEW_NAME} | {ROOM} |", since=mark, timeout=20)
         if line is None or reply.get("sas") is None:
             raise RuntimeError("Το αίτημα εγγραφής δεν έφτασε στον Manager")
-        fields = [field.strip() for field in line.split("[Εγγραφή]", 1)[1].split("|")]
-        return reply["client_id"], fields[0], reply["sas"], fields[3].split()[-1]
+        request_id = line.split("[Εγγραφή]", 1)[1].split("|")[0].strip()
+        return reply["client_id"], request_id, reply["sas"], mark
 
     def run(self) -> int:
         from cryptography import x509
@@ -330,8 +334,8 @@ class DirectorRun:
             mark = director.mark()
             director.send("enroll on")
             opened = director.wait_for("[Εγγραφή] Ενεργή TLS θύρα", since=mark, timeout=10)
-            board_id, request_id, client_sas, manager_sas = self.enroll_request(director)
-            wrong = f"{(int(manager_sas) + 1) % 1000000:06d}"
+            board_id, request_id, client_sas, _ = self.enroll_request(director)
+            wrong = f"{(int(client_sas) + 1) % 1000000:06d}"
             mark = director.mark()
             director.send(f"approve {request_id[:8]} {wrong}")
             refused = director.wait_for("Incorrect SAS", since=mark, timeout=10)
@@ -342,16 +346,19 @@ class DirectorRun:
                         and outcome["rc"] == 2 and outcome["status"] == "denied"
                         and board_id not in listing)
 
-            # 12. Σωστός SAS: ίδιος κωδικός σε Client και Manager, έγκριση με σύντομο ID
-            board_id, request_id, client_sas, manager_sas = self.enroll_request(director)
+            # 12. Ο Manager δεν δείχνει τον SAS· ο διαχειριστής πληκτρολογεί του Client
+            board_id, request_id, client_sas, mark = self.enroll_request(director)
+            director.send("pending")
+            listed = director.wait_for(request_id, NEW_NAME, since=mark, timeout=5)
+            hidden = not director.seen(client_sas, since=mark)
             mark = director.mark()
-            director.send(f"approve {request_id[:8]} {manager_sas}")
+            director.send(f"approve {request_id[:8]} {client_sas}")
             approved = director.wait_for(f"Εγκρίθηκε αίτημα {request_id}", since=mark, timeout=10)
             outcome = self.ask_client("enroll_result")
             _, listing = self.cli("--list-clients")
             rows = [line for line in listing.splitlines() if board_id in line]
-            self.result("12. Εγγραφή με σωστό SAS (ίδιος κωδικός στις δύο πλευρές)",
-                        client_sas == manager_sas and approved is not None
+            self.result("12. Εγγραφή με τον SAS του Client (ο Manager δεν τον εμφανίζει)",
+                        listed is not None and hidden and approved is not None
                         and outcome["rc"] == 0 and outcome["status"] == "approved"
                         and len(rows) == 1 and rows[0].endswith("approved"),
                         f"SAS {client_sas}")

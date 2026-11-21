@@ -2,7 +2,8 @@
 
 This protocol is NOT an audio endpoint. Only the existing Director certificate
 may authenticate the server. Client proves possession of its private key before
-its request can be displayed. The human compares a six-digit SAS on BOTH PCs.
+its request can be displayed. Only the Client shows the six-digit SAS; the
+administrator types it at the Manager, which never displays it (no copy-paste approval).
 """
 from __future__ import annotations
 
@@ -253,8 +254,10 @@ class EnrollmentServer:
                         self._pending[request_id] = pending
                     send_message(stream, {"type": "challenge", "request_id": request_id,
                                           "director_nonce": nonce})
+                    # Ο SAS δεν εμφανίζεται ποτέ στον Manager: ο διαχειριστής πληκτρολογεί
+                    # αυτόν που βλέπει στην οθόνη του Client.
                     self.log(f"[Εγγραφή] {request_id} | {unsigned['name']} | "
-                             f"{unsigned['room']} | SAS {code}")
+                             f"{unsigned['room']} | πληκτρολογήστε τον SAS του Client")
                     pending.event.wait(REQUEST_TTL)
                     with self._lock:
                         # Μια έγκριση που πρόλαβε ακριβώς στη λήξη έχει ήδη γραφτεί στο
@@ -272,9 +275,10 @@ class EnrollmentServer:
                     self._pending.pop(request_id, None)
             self._slots.release()
 
-    def pending(self) -> list[tuple[str, str, str, str]]:
+    def pending(self) -> list[tuple[str, str, str]]:
+        """Εκκρεμή αιτήματα χωρίς τον SAS (τον δείχνει μόνο ο Client)."""
         with self._lock:
-            return [(rid, p.request["name"], p.request["room"], p.code)
+            return [(rid, p.request["name"], p.request["room"])
                     for rid, p in self._pending.items()
                     if not p.event.is_set() and time.monotonic() - p.created < REQUEST_TTL]
 
@@ -328,7 +332,8 @@ def enroll_client(host: str, port: int, cafile: Path, server_name: str,
                 raise EnrollmentError("Unexpected enrollment challenge")
             unsigned = {k: v for k, v in request.items() if k != "proof"}
             code = sas_code(unsigned, challenge["director_nonce"])
-            log(f"Κωδικός επιβεβαίωσης SAS: {code}. Συγκρίνετε με τον Manager.")
+            log(f"Κωδικός επιβεβαίωσης SAS: {code}. Πληκτρολογήστε τον στον Manager: "
+                f"approve {request['request_id'][:8]} {code}")
             conn.settimeout(REQUEST_TTL + 5)
             result = read_message(conn)
             if result.get("request_id") != request["request_id"]:
