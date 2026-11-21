@@ -5,6 +5,7 @@
 """
 
 import argparse
+import random
 from pathlib import Path
 import socket
 import ssl
@@ -24,7 +25,10 @@ from client.windows_volume import (AnnouncementVolume, AudioPolicyWorker,
                                    create_volume_controller, recover_pending_volume)
 from client.windows_apps import ApplicationAudio
 
-RECONNECT_DELAY_SECONDS = 3
+#: Νέα προσπάθεια μετά από 5 s ±1 s: το τυχαίο jitter απλώνει τις επανασυνδέσεις
+#: όταν πολλοί Clients ξεκινούν μαζί (π.χ. πρωινό άνοιγμα υπολογιστών).
+RECONNECT_DELAY_SECONDS = 5
+RECONNECT_JITTER_SECONDS = 1
 # Έγκυρο PCM, KEEPALIVE ή STREAM_STOP ανανεώνει το όριο. Απώλεια όλων
 # των μηνυμάτων για 3 s ενεργοποιεί τον υπάρχοντα μηχανισμό επανασύνδεσης.
 RECEIVE_TIMEOUT_SECONDS = 3.0
@@ -212,16 +216,29 @@ def parse_latency(value: str) -> str | float:
     return float(value)
 
 
+def _retry_delay(base: float, jitter: float) -> float:
+    """base ± jitter δευτερόλεπτα (ποτέ αρνητικό)."""
+    if jitter <= 0:
+        return base
+    return max(0.0, base + random.uniform(-jitter, jitter))
+
+
+def _require_tls(tls_context: ssl.SSLContext | None) -> None:
+    """Χωρίς πιστοποιητικό Director δεν γίνεται σύνδεση (όχι σιωπηλό plaintext)."""
+    if not isinstance(tls_context, ssl.SSLContext):
+        raise ValueError("Απαιτείται TLS: ορίστε το πιστοποιητικό του Director (--tls-ca)")
+
+
 def open_connection(host: str, port: int, *,
                     receive_timeout: float = RECEIVE_TIMEOUT_SECONDS,
                     tls_context: ssl.SSLContext | None = None,
                     tls_server_name: str = DEFAULT_SERVER_NAME) -> socket.socket:
-    """Συνδέεται στον Director με όριο αναμονής για κάθε λήψη."""
+    """Συνδέεται στον Director με υποχρεωτικό TLS και όριο αναμονής για κάθε λήψη."""
+    _require_tls(tls_context)
     connection = socket.create_connection((host, port), timeout=CONNECT_TIMEOUT_SECONDS)
     try:
         connection.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-        if tls_context is not None:
-            connection = connect_tls(connection, tls_context, tls_server_name)
+        connection = connect_tls(connection, tls_context, tls_server_name)
         connection.settimeout(receive_timeout)
     except OSError:
         connection.close()
@@ -236,6 +253,7 @@ def run_with_reconnect(
     *,
     receive_timeout: float = RECEIVE_TIMEOUT_SECONDS,
     reconnect_delay: float = RECONNECT_DELAY_SECONDS,
+    reconnect_jitter: float = RECONNECT_JITTER_SECONDS,
     discovery_port: int = DISCOVERY_PORT,
     tls_context: ssl.SSLContext | None = None,
     tls_server_name: str = DEFAULT_SERVER_NAME,
@@ -249,6 +267,8 @@ def run_with_reconnect(
     Η παλιά σύνδεση κλείνει πάντα πριν από τη νέα προσπάθεια.
     max_sessions υπάρχει μόνο για τα tests (None = για πάντα).
     """
+    # Έλεγχος πριν από τον βρόχο: αλλιώς το σφάλμα θα γινόταν ατέρμονη επανασύνδεση.
+    _require_tls(tls_context)
     attempts = 0
     preferred_id: str | None = None
     while max_sessions is None or attempts < max_sessions:
@@ -261,21 +281,28 @@ def run_with_reconnect(
                     log("Δεν εντοπίστηκε Director στο LAN· επανάληψη ανακάλυψης.")
                     raise ConnectionError("Ο Director δεν είναι διαθέσιμος")
                 target_host, target_port, found_id = result
-                if preferred_id is None:
-                    preferred_id = found_id
                 log(f"Discovery: Director {target_host}:{target_port} ({found_id})")
             log(f"Σύνδεση στον Director {target_host}:{target_port}...")
             with open_connection(target_host, target_port, receive_timeout=receive_timeout,
                                  tls_context=tls_context,
                                  tls_server_name=tls_server_name) as connection:
+                # «Κλείδωμα» στον Director μόνο αφού το TLS τον επαλήθευσε· ένα
+                # ψεύτικο beacon που απάντησε πρώτο δεν κρατά τον Client μακριά
+                # από τον πραγματικό Director.
+                if host is None and preferred_id is None:
+                    preferred_id = found_id
                 session(connection)
         except socket.timeout:
+            delay = _retry_delay(reconnect_delay, reconnect_jitter)
             log(f"Δεν ήρθε έγκυρο μήνυμα από τον Director για {receive_timeout:g}s· "
-                f"η σύνδεση θεωρείται χαμένη. Νέα προσπάθεια σε {reconnect_delay:g}s.")
+                f"η σύνδεση θεωρείται χαμένη. Νέα προσπάθεια σε {delay:.1f}s.")
         except (OSError, EOFError, ValueError) as exc:
-            log(f"Η σύνδεση διακόπηκε: {exc}. Νέα προσπάθεια σε {reconnect_delay:g}s.")
+            delay = _retry_delay(reconnect_delay, reconnect_jitter)
+            log(f"Η σύνδεση διακόπηκε: {exc}. Νέα προσπάθεια σε {delay:.1f}s.")
+        else:
+            delay = _retry_delay(reconnect_delay, reconnect_jitter)
         if max_sessions is None or attempts < max_sessions:
-            sleep(reconnect_delay)
+            sleep(delay)
 
 
 def main() -> None:

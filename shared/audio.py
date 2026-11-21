@@ -40,6 +40,13 @@ class ControlMessage(NamedTuple):
     kind: int
 
 
+def _buffered(connection) -> bool:
+    """Με TLS, δεδομένα μπορεί να περιμένουν ήδη αποκρυπτογραφημένα στο SSL
+    buffer ενώ το socket δεν είναι readable· τότε δεν περιμένουμε στο select."""
+    pending = getattr(connection, "pending", None)
+    return pending is not None and pending() > 0
+
+
 def read_exact(connection: socket.socket, count: int, *,
                deadline: float | None = None) -> bytes:
     """Διαβάζει ακριβώς count bytes ή εγείρει EOFError/timeout.
@@ -50,7 +57,7 @@ def read_exact(connection: socket.socket, count: int, *,
     """
     data = bytearray()
     while len(data) < count:
-        if deadline is not None:
+        if deadline is not None and not _buffered(connection):
             remaining = deadline - time.monotonic()
             if remaining <= 0 or not select.select([connection], [], [], remaining)[0]:
                 raise socket.timeout("Δεν ελήφθη πλήρες έγκυρο μήνυμα")

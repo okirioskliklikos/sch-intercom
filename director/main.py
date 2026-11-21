@@ -140,9 +140,56 @@ def stream_microphone(broadcaster: AudioBroadcaster, *, device: int | None = Non
                 stats.update(frames_sent, dropped)
 
 
+#: Ταυτόχρονες προσπάθειες σύνδεσης (TLS + HELLO σε εξέλιξη), όχι όριο
+#: συνδεδεμένων Clients. Οι επιπλέον κλείνουν αμέσως και ο Client ξαναδοκιμάζει
+#: μετά από 5 s ±1 s (client.main.RECONNECT_DELAY_SECONDS).
+MAX_PENDING_HANDSHAKES = 25
+#: Ένα μήνυμα ανά τόσα δευτερόλεπτα για απορρίψεις λόγω φόρτου.
+BUSY_LOG_INTERVAL_SECONDS = 5.0
+HELLO_TIMEOUT_SECONDS = 2.0
+
+
+def _admit_client(connection: socket.socket, address, broadcaster: AudioBroadcaster,
+                  tls_context: ssl.SSLContext) -> None:
+    """TLS και HELLO ενός Client, σε δικό του νήμα ώστε να μην καθυστερεί τους άλλους."""
+    # Το TLS ολοκληρώνεται πριν επιτραπεί οποιοδήποτε HELLO/PCM.
+    try:
+        connection = accept_tls(connection, tls_context)
+        connection.settimeout(HELLO_TIMEOUT_SECONDS)
+        client_id, room = receive_hello(connection)
+        send_welcome(connection, accepted=True)
+    except ProtocolMismatch as exc:
+        print(f"[Director] Απόρριψη {address}: {exc}", flush=True)
+        if exc.client_version is not None:
+            # Ο νεότερος/διαφορετικός Client καταλαβαίνει την απάντηση· ο παλιός όχι.
+            try:
+                send_welcome(connection, accepted=False)
+            except OSError:
+                pass
+        connection.close()
+        return
+    except (OSError, EOFError, ValueError) as exc:
+        print(f"[Director] Μη αποδεκτή δήλωση {address}: {exc}", flush=True)
+        connection.close()
+        return
+    if not broadcaster.add_client(connection, client_id, room, address):
+        print(f"[Director] Απόρριψη Client {address}: όριο {broadcaster.max_clients}", flush=True)
+
+
 def accept_clients(server: socket.socket, broadcaster: AudioBroadcaster,
-                   stop: threading.Event, *, tls_context: ssl.SSLContext | None = None) -> None:
-    """Αποδέχεται νέους Clients ανεξάρτητα από την καταγραφή ήχου."""
+                   stop: threading.Event, *, tls_context: ssl.SSLContext | None = None,
+                   max_pending: int = MAX_PENDING_HANDSHAKES) -> None:
+    """Αποδέχεται νέους Clients ανεξάρτητα από την καταγραφή ήχου.
+
+    Το νήμα αυτό μόνο δέχεται συνδέσεις. Το TLS και το HELLO κάθε Client γίνονται
+    σε ξεχωριστό νήμα, ώστε μια αργή ή σιωπηλή σύνδεση να μην καθυστερεί τους
+    υπόλοιπους. Το πολύ `max_pending` τέτοια νήματα ταυτόχρονα.
+    """
+    if not isinstance(tls_context, ssl.SSLContext):
+        raise ValueError("TLS context required for incoming Clients")
+    pending = threading.BoundedSemaphore(max_pending)
+    busy_rejections = 0
+    last_busy_log = 0.0
     server.settimeout(0.2)
     while not stop.is_set():
         try:
@@ -153,30 +200,25 @@ def accept_clients(server: socket.socket, broadcaster: AudioBroadcaster,
             if not stop.is_set():
                 raise
             break
-        # Το TLS ολοκληρώνεται πριν επιτραπεί οποιοδήποτε HELLO/PCM.
-        try:
-            if tls_context is None:
-                raise ValueError("TLS context required for incoming Clients")
-            connection = accept_tls(connection, tls_context)
-            connection.settimeout(2.0)
-            client_id, room = receive_hello(connection)
-            send_welcome(connection, accepted=True)
-        except ProtocolMismatch as exc:
-            print(f"[Director] Απόρριψη {address}: {exc}", flush=True)
-            if exc.client_version is not None:
-                # Ο νεότερος/διαφορετικός Client καταλαβαίνει την απάντηση· ο παλιός όχι.
-                try:
-                    send_welcome(connection, accepted=False)
-                except OSError:
-                    pass
+        if not pending.acquire(blocking=False):
+            # Ο Client ξαναδοκιμάζει μόνος του· ένα σύντομο μήνυμα, όχι ένα ανά σύνδεση.
             connection.close()
+            busy_rejections += 1
+            now = time.monotonic()
+            if now - last_busy_log >= BUSY_LOG_INTERVAL_SECONDS:
+                print(f"[Director] {busy_rejections} συνδέσεις σε αναμονή λόγω φόρτου· "
+                      "οι Clients ξαναδοκιμάζουν αυτόματα", flush=True)
+                busy_rejections = 0
+                last_busy_log = now
             continue
-        except (OSError, EOFError, ValueError) as exc:
-            print(f"[Director] Μη αποδεκτή δήλωση {address}: {exc}", flush=True)
-            connection.close()
-            continue
-        if not broadcaster.add_client(connection, client_id, room, address):
-            print(f"[Director] Απόρριψη Client {address}: όριο {broadcaster.max_clients}", flush=True)
+
+        def admit(connection=connection, address=address):
+            try:
+                _admit_client(connection, address, broadcaster, tls_context)
+            finally:
+                pending.release()
+
+        threading.Thread(target=admit, daemon=True, name=f"admit-{address}").start()
 
 
 def command_loop(broadcaster: AudioBroadcaster, stop: threading.Event,

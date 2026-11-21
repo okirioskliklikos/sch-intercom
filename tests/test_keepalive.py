@@ -15,6 +15,8 @@ from shared.identity import (CONNECTION_PROTOCOL, ProtocolMismatch, receive_hell
                              receive_welcome, send_hello, WELCOME, WELCOME_MAGIC, WELCOME_OK)
 from shared.jitter import DelayTracker, JitterBuffer
 from director.broadcast import AudioBroadcaster
+from shared.transport_security import accept_tls
+from tests.tls_support import LocalTLSFixture
 
 
 def wait_until(check, timeout=2):
@@ -264,6 +266,13 @@ class ControlProtocolTests(unittest.TestCase):
             sender.close()
             receiver.close()
 
+    def test_playback_defaults_remain(self):
+        self.assertEqual(DEFAULT_BUFFER_MS, 250)
+        self.assertEqual(DEFAULT_LATENCY, 0.04)
+        self.assertEqual(ANNOUNCEMENT_PREFILL_MS, 120)
+
+
+class ReconnectOverTLSTests(LocalTLSFixture, unittest.TestCase):
     def test_missing_keepalive_causes_reconnect_at_three_seconds(self):
         server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         server.bind(("127.0.0.1", 0))
@@ -275,10 +284,12 @@ class ControlProtocolTests(unittest.TestCase):
         def director():
             try:
                 first, _ = server.accept()
+                first = accept_tls(first, self.tls_server_context)
                 connections.append(first)
                 first.sendall(encode_control(MESSAGE_KEEPALIVE))
                 # Η σύνδεση παραμένει ανοιχτή, αλλά σιωπούν όλα τα μηνύματα.
                 second, _ = server.accept()
+                second = accept_tls(second, self.tls_server_context)
                 seen_second.set()
                 connections.append(second)
                 first.settimeout(1)
@@ -301,7 +312,7 @@ class ControlProtocolTests(unittest.TestCase):
                 sessions.append(len(jitter))
         try:
             run_with_reconnect(*server.getsockname(), session, reconnect_delay=0,
-                               max_sessions=2, log=lambda _: None, sleep=lambda _: None)
+                               tls_context=self.tls_client_context, max_sessions=2, log=lambda _: None, sleep=lambda _: None)
             elapsed = time.monotonic() - start
             self.assertTrue(seen_second.is_set())
             self.assertTrue(closed_first.is_set())
@@ -313,11 +324,6 @@ class ControlProtocolTests(unittest.TestCase):
             for connection in connections:
                 connection.close()
             background.join(timeout=1)
-
-    def test_playback_defaults_remain(self):
-        self.assertEqual(DEFAULT_BUFFER_MS, 250)
-        self.assertEqual(DEFAULT_LATENCY, 0.04)
-        self.assertEqual(ANNOUNCEMENT_PREFILL_MS, 120)
 
 
 if __name__ == "__main__":

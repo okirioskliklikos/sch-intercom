@@ -3,6 +3,7 @@
 from pathlib import Path
 from unittest import mock
 import socket
+import ssl
 import tempfile
 import threading
 import time
@@ -10,7 +11,10 @@ import unittest
 import uuid
 
 from shared.discovery import decode_beacon, encode_beacon, director_id, discover
-from client.main import run_with_reconnect
+from client.main import open_connection, run_with_reconnect
+
+# Τα open_connection είναι mock· αρκεί έγκυρο SSLContext για τον έλεγχο «TLS υποχρεωτικό».
+TLS = ssl.create_default_context()
 
 
 class DiscoveryTests(unittest.TestCase):
@@ -142,7 +146,7 @@ class DiscoveryTests(unittest.TestCase):
             raise ValueError("Το ID Director εμφανίστηκε από πολλές διευθύνσεις")
         lines = []
         with mock.patch("client.main.open_connection") as connect:
-            run_with_reconnect(None, 50555, lambda _: None, max_sessions=2,
+            run_with_reconnect(None, 50555, lambda _: None, max_sessions=2, tls_context=TLS,
                                discovery=discovery, sleep=lambda _: None, log=lines.append)
         connect.assert_not_called()
         self.assertEqual(len(calls), 2)
@@ -165,7 +169,7 @@ class DiscoveryTests(unittest.TestCase):
             sessions.append(connection)
             raise EOFError("test disconnect")
         with mock.patch("client.main.open_connection", return_value=Connection()) as open_mock:
-            run_with_reconnect(None, 50555, session, max_sessions=2,
+            run_with_reconnect(None, 50555, session, max_sessions=2, tls_context=TLS,
                                discovery=discovery, sleep=lambda _: None, log=lambda _: None)
         self.assertEqual(discovered, [None, identifier])
         self.assertEqual([call.args[0] for call in open_mock.call_args_list],
@@ -177,10 +181,45 @@ class DiscoveryTests(unittest.TestCase):
             def __enter__(self): return self
             def __exit__(self, *args): return False
         with mock.patch("client.main.open_connection", return_value=Connection()) as connect:
-            run_with_reconnect("192.0.2.1", 50555, lambda _: None, max_sessions=1,
+            run_with_reconnect("192.0.2.1", 50555, lambda _: None, max_sessions=1, tls_context=TLS,
                                discovery=lambda **_: self.fail("unexpected discovery"),
                                log=lambda _: None)
         self.assertEqual(connect.call_args.args[:2], ("192.0.2.1", 50555))
+
+
+    def test_fake_director_failing_tls_does_not_lock_client(self):
+        fake, real = str(uuid.uuid4()), str(uuid.uuid4())
+        found = iter([("192.0.2.66", 50555, fake), ("192.0.2.10", 50555, real),
+                      ("192.0.2.11", 50555, real)])
+        preferred = []
+        def discovery(**kwargs):
+            preferred.append(kwargs["preferred_id"])
+            return next(found)
+        class Connection:
+            def __enter__(self): return self
+            def __exit__(self, *args): return False
+        def connect(host, *args, **kwargs):
+            if host == "192.0.2.66":
+                raise ssl.SSLCertVerificationError("untrusted Director")
+            return Connection()
+        def session(connection):
+            raise EOFError("test disconnect")
+        with mock.patch("client.main.open_connection", side_effect=connect) as open_mock:
+            run_with_reconnect(None, 50555, session, max_sessions=3, tls_context=TLS,
+                               discovery=discovery, sleep=lambda _: None, log=lambda _: None)
+        # Μετά την αποτυχία TLS δεν προτιμά τον ψεύτικο· κλειδώνει στον πραγματικό.
+        self.assertEqual(preferred, [None, None, real])
+        self.assertEqual([c.args[0] for c in open_mock.call_args_list],
+                         ["192.0.2.66", "192.0.2.10", "192.0.2.11"])
+
+    def test_client_refuses_to_connect_without_tls(self):
+        with mock.patch("client.main.open_connection") as open_mock:
+            with self.assertRaises(ValueError):
+                run_with_reconnect("192.0.2.1", 50555, lambda _: None, max_sessions=1,
+                                   log=lambda _: None)
+        open_mock.assert_not_called()
+        with self.assertRaises(ValueError):
+            open_connection("127.0.0.1", 9)
 
 
 if __name__ == "__main__":

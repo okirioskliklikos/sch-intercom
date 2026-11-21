@@ -11,6 +11,8 @@ import unittest
 from client.main import RECEIVE_TIMEOUT_SECONDS, pump_frames, run_with_reconnect
 from shared.audio import BLOCK_BYTES, BLOCK_MS, encode_frame
 from shared.jitter import DelayTracker, JitterBuffer
+from shared.transport_security import accept_tls
+from tests.tls_support import LocalTLSFixture
 
 
 def pcm(n):
@@ -21,7 +23,8 @@ class SilentDirector:
     """Δέχεται συνδέσεις· στην πρώτη στέλνει λίγα blocks και μετά σωπαίνει
     κρατώντας το socket ανοιχτό (όπως Director που έχασε ρεύμα/Wi-Fi)."""
 
-    def __init__(self, frames_before_silence=5):
+    def __init__(self, tls_context, frames_before_silence=5):
+        self.tls_context = tls_context
         self.frames_before_silence = frames_before_silence
         self.server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.server.bind(("127.0.0.1", 0))
@@ -39,12 +42,14 @@ class SilentDirector:
 
     def _run(self):
         first, _ = self.server.accept()
+        first = accept_tls(first, self.tls_context)
         self.connections.append(first)
         for seq in range(self.frames_before_silence):
             first.sendall(encode_frame(pcm(seq), seq, seq * BLOCK_MS * 1000))
             time.sleep(BLOCK_MS / 1000)
         # Σιωπή χωρίς close/shutdown.
         second, _ = self.server.accept()
+        second = accept_tls(second, self.tls_context)
         self.connections.append(second)
         self.second_connected.set()
         # Ο Client πρέπει να έχει κλείσει την παλιά σύνδεση: recv επιστρέφει b"".
@@ -63,13 +68,21 @@ class SilentDirector:
         self.server.close()
 
 
-class ReconnectTests(unittest.TestCase):
+class ReconnectTests(LocalTLSFixture, unittest.TestCase):
+    def test_retry_delay_is_5_seconds_with_jitter(self):
+        from client.main import RECONNECT_DELAY_SECONDS, RECONNECT_JITTER_SECONDS, _retry_delay
+        self.assertEqual((RECONNECT_DELAY_SECONDS, RECONNECT_JITTER_SECONDS), (5, 1))
+        delays = {_retry_delay(5, 1) for _ in range(200)}
+        self.assertTrue(all(4 <= d <= 6 for d in delays))
+        self.assertGreater(len(delays), 50)          # απλώνονται, όχι όλοι μαζί
+        self.assertEqual(_retry_delay(0.01, 0), 0.01)
+
     def test_default_timeout_is_2_to_3_seconds(self):
         self.assertGreaterEqual(RECEIVE_TIMEOUT_SECONDS, 2)
         self.assertLessEqual(RECEIVE_TIMEOUT_SECONDS, 3)
 
     def test_silent_director_triggers_clean_reconnect(self):
-        director = SilentDirector()
+        director = SilentDirector(self.tls_server_context)
         self.addCleanup(director.close)
         jitters, logs, sleeps = [], [], []
 
@@ -80,7 +93,8 @@ class ReconnectTests(unittest.TestCase):
 
         started = time.monotonic()
         run_with_reconnect(*director.address, session, receive_timeout=0.5,
-                           reconnect_delay=0.01, max_sessions=2,
+                           tls_context=self.tls_client_context,
+                           reconnect_delay=0.01, reconnect_jitter=0, max_sessions=2,
                            log=logs.append, sleep=sleeps.append)
         elapsed = time.monotonic() - started
 
@@ -102,6 +116,7 @@ class ReconnectTests(unittest.TestCase):
 
         def director():
             conn, _ = server.accept()
+            conn = accept_tls(conn, self.tls_server_context)
             with conn:
                 for seq in range(10):
                     if seq == 5:
@@ -118,6 +133,7 @@ class ReconnectTests(unittest.TestCase):
             pump_frames(connection, jitter, DelayTracker(), report=None)
 
         run_with_reconnect(*server.getsockname(), session, receive_timeout=1.0,
+                           tls_context=self.tls_client_context,
                            reconnect_delay=0, max_sessions=1, log=logs.append, sleep=lambda s: None)
         self.assertEqual(len(jitters), 1)
         self.assertEqual(len(jitters[0]), 10, "χάθηκαν blocks στο σύντομο κενό")

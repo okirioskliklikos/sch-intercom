@@ -102,5 +102,35 @@ class TLSTransportTests(unittest.TestCase):
         self.assertTrue(errors)
 
 
+    def test_frames_buffered_in_tls_are_read_without_waiting(self):
+        """Δύο μηνύματα σε μία εγγραφή TLS: το δεύτερο περιμένει ήδη
+        αποκρυπτογραφημένο στο SSL buffer, όπου το select() δεν το βλέπει."""
+        import time
+        from shared.audio import BLOCK_BYTES, encode_frame, receive_message
+        listener = socket.socket()
+        listener.bind(("127.0.0.1", 0))
+        listener.listen(1)
+        listener.settimeout(3)
+        self.addCleanup(listener.close)
+        frames = encode_frame(b"a" * BLOCK_BYTES, 1, 0) + encode_frame(b"b" * BLOCK_BYTES, 2, 0)
+        done = threading.Event()
+        def server():
+            raw, _ = listener.accept()
+            with accept_tls(raw, server_context(self.cert, self.key)) as stream:
+                stream.sendall(frames)        # μία εγγραφή TLS, μετά σιωπή
+                done.wait(3)
+        worker = threading.Thread(target=server, daemon=True)
+        worker.start()
+        raw = socket.create_connection(listener.getsockname(), timeout=3)
+        with connect_tls(raw, client_context(self.cert)) as stream:
+            first = receive_message(stream, deadline=time.monotonic() + 2)
+            started = time.monotonic()
+            second = receive_message(stream, deadline=time.monotonic() + 0.5)
+            self.assertLess(time.monotonic() - started, 0.2)
+        done.set()
+        worker.join(timeout=3)
+        self.assertEqual((first.seq, second.seq), (1, 2))
+
+
 if __name__ == "__main__":
     unittest.main()

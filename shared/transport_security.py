@@ -45,6 +45,11 @@ class TLSConnection:
     def fileno(self) -> int:
         return self._stream.fileno()
 
+    def pending(self) -> int:
+        """Αποκρυπτογραφημένα bytes ήδη στο SSL buffer (το select δεν τα βλέπει)."""
+        with self._lock:
+            return self._stream.pending()
+
     def shutdown(self, how: int) -> None:
         self._stream.shutdown(how)
 
