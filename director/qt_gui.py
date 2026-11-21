@@ -17,7 +17,7 @@ from PySide6.QtCore import (QElapsedTimer, QPointF, QRectF, QSize, Qt, QTimer,
 from PySide6.QtGui import QColor, QFontMetrics, QPainter, QPen
 from PySide6.QtWidgets import (QAbstractButton, QApplication, QButtonGroup, QCheckBox,
                                QFrame, QGridLayout, QHBoxLayout, QLabel, QMainWindow,
-                               QPushButton, QRadioButton, QScrollArea, QSizePolicy, QStyle,
+                               QPushButton, QRadioButton, QScrollArea, QSizePolicy,
                                QVBoxLayout, QWidget)
 
 from director.broadcast import AudioBroadcaster, MAX_CLIENTS
@@ -767,8 +767,7 @@ class DirectorWindow(QMainWindow):
         for row in self.room_rows.values():
             row.setFixedWidth(width)
         scrolls = rows > rows_fit
-        scrollbar = (self.room_scroll.style().pixelMetric(QStyle.PixelMetric.PM_ScrollBarExtent)
-                     + px(6)) if scrolls else 0
+        scrollbar = px(theme.SCROLLBAR) + px(6) if scrolls else 0
         self.room_scroll.setVerticalScrollBarPolicy(
             Qt.ScrollBarPolicy.ScrollBarAsNeeded if scrolls else
             Qt.ScrollBarPolicy.ScrollBarAlwaysOff)

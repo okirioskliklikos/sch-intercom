@@ -20,6 +20,7 @@ APP_ICON_SVG = ASSETS_DIR / "app_icon.svg"
 # --- Χρώματα (ui-style.md §1) -------------------------------------------
 PRIMARY = "#1d5a99"
 PRIMARY_LIGHT = "#dde7f4"
+PRIMARY_DARK = "#164a80"
 WINDOW_BG = "#f3f5f9"
 SIDEBAR_BG = "#e6ebf3"
 CARD_BG = "#ffffff"
@@ -37,6 +38,7 @@ APP_ICON = "#0e7490"
 TOKENS: dict[str, str] = {
     "primary": PRIMARY,
     "primary_light": PRIMARY_LIGHT,
+    "primary_dark": PRIMARY_DARK,
     "window_bg": WINDOW_BG,
     "sidebar_bg": SIDEBAR_BG,
     "card_bg": CARD_BG,
@@ -132,6 +134,8 @@ BRAND_ICON = 22
 DOT = 8
 METER_BAR = 6
 METER_GAP = 4
+SCROLLBAR = 10              # πλάτος scroll bar, χωρίς βελάκια
+SCROLLBAR_HANDLE_MIN = 32   # ελάχιστο μήκος λαβής
 
 
 def stylesheet(metrics: Metrics | None = None) -> str:
@@ -273,6 +277,42 @@ QCheckBox::indicator:unchecked:disabled, QRadioButton::indicator:unchecked:disab
 }}
 #roomName {{
     font-size: {m.font_pt(FONT_ROOM)}pt;
+}}
+QScrollBar:vertical {{
+    background: {SIDEBAR_BG};
+    width: {px(SCROLLBAR)}px;
+    margin: 0;
+    border: none;
+    border-radius: {px(SCROLLBAR) // 2}px;
+}}
+QScrollBar:horizontal {{
+    background: {SIDEBAR_BG};
+    height: {px(SCROLLBAR)}px;
+    margin: 0;
+    border: none;
+    border-radius: {px(SCROLLBAR) // 2}px;
+}}
+QScrollBar::handle:vertical {{
+    background: {PRIMARY};
+    min-height: {px(SCROLLBAR_HANDLE_MIN)}px;
+    border-radius: {px(SCROLLBAR) // 2}px;
+}}
+QScrollBar::handle:horizontal {{
+    background: {PRIMARY};
+    min-width: {px(SCROLLBAR_HANDLE_MIN)}px;
+    border-radius: {px(SCROLLBAR) // 2}px;
+}}
+QScrollBar::handle:hover, QScrollBar::handle:pressed {{
+    background: {PRIMARY_DARK};
+}}
+QScrollBar::add-line, QScrollBar::sub-line {{
+    width: 0;
+    height: 0;
+    border: none;
+    background: none;
+}}
+QScrollBar::add-page, QScrollBar::sub-page {{
+    background: none;
 }}
 QScrollArea, #roomGrid {{
     background: transparent;

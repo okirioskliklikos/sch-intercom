@@ -199,6 +199,21 @@ class DirectorWindowTests(TestCase):
             with self.subTest(name=name):
                 self.assertEqual(window.room_rows[name].label.text(), name)
 
+    def test_room_scrollbar_styled_and_always_visible(self):
+        status = [(f"id-{i}", f"Αίθουσα {i:02d}", True, 0.1) for i in range(60)]
+        window = self.make(status)
+        window.show()
+        QApplication.processEvents()
+        window._layout_rooms()
+        QApplication.processEvents()
+        bar = window.room_scroll.verticalScrollBar()
+        self.assertTrue(bar.isVisible())          # χωρίς να περάσει το ποντίκι
+        self.assertGreater(bar.maximum(), 0)
+        self.assertEqual(bar.width(), current_metrics().px(theme.SCROLLBAR))
+        qss = theme.stylesheet(current_metrics())
+        self.assertIn("QScrollBar::handle:vertical", qss)
+        self.assertIn(theme.PRIMARY_DARK, qss)
+
     def test_room_columns_have_fixed_scaled_width(self):
         window = self.make(self.STATUS)
         window.show()
