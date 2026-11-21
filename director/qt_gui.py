@@ -22,7 +22,7 @@ from PySide6.QtWidgets import (QAbstractButton, QApplication, QButtonGroup, QChe
 
 from director.broadcast import AudioBroadcaster, MAX_CLIENTS
 from director.gui import (MODE_ALL, MODE_ROOMS, DirectorMicrophone, choose_targets,
-                          meter_fraction, room_display_name, room_rows_per_column,
+                          meter_fraction, room_rows_per_column,
                           room_states)
 from shared.discovery import announce, director_id
 from shared.ui import icons, theme
@@ -262,6 +262,35 @@ class StatusDot(QWidget):
         painter.end()
 
 
+class ElidedLabel(QLabel):
+    """Κείμενο που κόβεται με «…» όταν δεν χωρά στο πλάτος (tooltip το πλήρες)."""
+
+    def __init__(self, text: str, parent=None):
+        super().__init__(text, parent)
+        self.full_text = text
+        self.setToolTip(text)
+        self.setMinimumWidth(1)
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        self._elide()
+
+    def changeEvent(self, event) -> None:
+        super().changeEvent(event)
+        if event.type() in (event.Type.FontChange, event.Type.StyleChange):
+            self._elide()
+
+    def _elide(self) -> None:
+        text = self.fontMetrics().elidedText(
+            self.full_text, Qt.TextElideMode.ElideRight, self.contentsRect().width())
+        if text != self.text():
+            self.setText(text)
+
+    def sizeHint(self) -> QSize:
+        hint = super().sizeHint()
+        return QSize(self.fontMetrics().horizontalAdvance(self.full_text) + 2, hint.height())
+
+
 class RoomRow(QWidget):
     """Γραμμή αίθουσας ~30px: checkbox, όνομα, κουκκίδα κατάστασης δεξιά."""
 
@@ -277,9 +306,9 @@ class RoomRow(QWidget):
         self.checkbox = QCheckBox()
         self.checkbox.setFixedWidth(px(18))  # χωρίς κείμενο: όχι κενό spacing
         self.checkbox.setAccessibleName(room)
-        self.label = QLabel(room_display_name(room, theme.ROOM_NAME_MAX_CHARS))
+        # Το όνομα κόβεται με «…» μόνο όταν φτάνει στην κουκκίδα (ui-style.md §5).
+        self.label = ElidedLabel(room)
         self.label.setObjectName("roomName")
-        self.label.setToolTip(room)
         self.dot = StatusDot(theme.ROOM_DOT_OFFLINE)
         layout.addWidget(self.checkbox)
         layout.addWidget(self.label, 1)
@@ -711,17 +740,8 @@ class DirectorWindow(QMainWindow):
         self._layout_rooms()
 
     def _room_column_width(self) -> int:
-        """Ίσες στήλες, όσο το μεγαλύτερο όνομα (με όριο), checkbox και κουκκίδα."""
-        rows = list(self.room_rows.values())
-        rows[0].label.ensurePolished()
-        metrics = QFontMetrics(rows[0].label.font())
-        name = max(metrics.horizontalAdvance(r.label.text()) for r in rows) + px(2)
-        spacing = px(9)
-        natural = px(2) * 2 + px(18) + spacing + name + px(theme.ROOM_DOT_GAP) + px(theme.DOT)
-        # Ελάχιστο πλάτος ώστε η κουκκίδα να φτάνει στο δεξί άκρο
-        # και σε γραμμή με μικρό όνομα αίθουσας.
-        return max(natural, px(theme.LEFT_COLUMN_WIDTH) -
-                   2 * (px(theme.CARD_PADDING) + px(2)))
+        """Σταθερό πλάτος στήλης αιθουσών, κλιμακωμένο (ui-style.md §5)."""
+        return px(theme.ROOM_COLUMN_WIDTH)
 
     def _layout_rooms(self) -> None:
         """Πρώτη στήλη ως το διαθέσιμο ύψος, μετά δεύτερη (ui-style.md §5)."""
