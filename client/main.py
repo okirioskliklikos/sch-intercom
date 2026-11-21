@@ -7,6 +7,7 @@
 import argparse
 from pathlib import Path
 import socket
+import ssl
 import threading
 import time
 from collections.abc import Callable
@@ -16,6 +17,7 @@ from shared.audio import (BLOCK_BYTES, BLOCK_MS, BLOCK_SAMPLES, CHANNELS, DEFAUL
                           receive_message)
 from shared.jitter import DelayTracker, JitterBuffer
 from shared.identity import load_identity, receive_welcome, send_hello
+from shared.transport_security import client_context, connect_tls, DEFAULT_SERVER_NAME
 from shared.discovery import discover, DISCOVERY_PORT
 from shared.control import heartbeat_sender
 from client.windows_volume import (AnnouncementVolume, AudioPolicyWorker,
@@ -211,12 +213,16 @@ def parse_latency(value: str) -> str | float:
 
 
 def open_connection(host: str, port: int, *,
-                    receive_timeout: float = RECEIVE_TIMEOUT_SECONDS) -> socket.socket:
+                    receive_timeout: float = RECEIVE_TIMEOUT_SECONDS,
+                    tls_context: ssl.SSLContext | None = None,
+                    tls_server_name: str = DEFAULT_SERVER_NAME) -> socket.socket:
     """Συνδέεται στον Director με όριο αναμονής για κάθε λήψη."""
     connection = socket.create_connection((host, port), timeout=CONNECT_TIMEOUT_SECONDS)
     try:
-        connection.settimeout(receive_timeout)
         connection.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        if tls_context is not None:
+            connection = connect_tls(connection, tls_context, tls_server_name)
+        connection.settimeout(receive_timeout)
     except OSError:
         connection.close()
         raise
@@ -231,6 +237,8 @@ def run_with_reconnect(
     receive_timeout: float = RECEIVE_TIMEOUT_SECONDS,
     reconnect_delay: float = RECONNECT_DELAY_SECONDS,
     discovery_port: int = DISCOVERY_PORT,
+    tls_context: ssl.SSLContext | None = None,
+    tls_server_name: str = DEFAULT_SERVER_NAME,
     discovery: Callable[..., tuple[str, int, str] | None] = discover,
     max_sessions: int | None = None,
     log: Callable[[str], None] = lambda line: print(line, flush=True),
@@ -257,7 +265,9 @@ def run_with_reconnect(
                     preferred_id = found_id
                 log(f"Discovery: Director {target_host}:{target_port} ({found_id})")
             log(f"Σύνδεση στον Director {target_host}:{target_port}...")
-            with open_connection(target_host, target_port, receive_timeout=receive_timeout) as connection:
+            with open_connection(target_host, target_port, receive_timeout=receive_timeout,
+                                 tls_context=tls_context,
+                                 tls_server_name=tls_server_name) as connection:
                 session(connection)
         except socket.timeout:
             log(f"Δεν ήρθε έγκυρο μήνυμα από τον Director για {receive_timeout:g}s· "
@@ -279,6 +289,10 @@ def main() -> None:
                         default=Path.home() / ".school-intercom" / "client.json",
                         help="Τοπικό αρχείο σταθερής ταυτότητας")
     parser.add_argument("--port", type=int, default=DEFAULT_PORT)
+    parser.add_argument("--tls-ca", type=Path, required=True,
+                        help="Έμπιστο πιστοποιητικό/CA Director (PEM)")
+    parser.add_argument("--tls-server-name", default=DEFAULT_SERVER_NAME,
+                        help="DNS όνομα στο SAN του πιστοποιητικού Director")
     parser.add_argument("--device", type=int, default=None, help="Αριθμός συσκευής εξόδου PortAudio")
     parser.add_argument(
         "--buffer-ms", type=int, default=DEFAULT_BUFFER_MS,
@@ -314,6 +328,7 @@ def main() -> None:
     if args.announcement_volume is not None and args.device is not None:
         parser.error("--announcement-volume δεν συνδυάζεται ακόμη με --device")
 
+    trusted_director = client_context(args.tls_ca)
     client_id, room = load_identity(args.identity_file, room_override=args.room)
     print(f"Client ID: {client_id} | Αίθουσα: {room}", flush=True)
 
@@ -336,7 +351,9 @@ def main() -> None:
 
     try:
         run_with_reconnect(args.host, args.port, session,
-                           discovery_port=args.discovery_port)
+                           discovery_port=args.discovery_port,
+                           tls_context=trusted_director,
+                           tls_server_name=args.tls_server_name)
     except KeyboardInterrupt:
         print("\nΟ Client τερματίστηκε.", flush=True)
 

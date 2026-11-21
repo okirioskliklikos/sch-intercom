@@ -1,10 +1,12 @@
 """Director: μία λήψη μικροφώνου, μετάδοση σε πολλούς TCP Clients.
 
-ΠΡΟΣΟΧΗ: πειραματικό πρωτόκολλο χωρίς TLS/πιστοποίηση.
+ΠΡΟΣΟΧΗ: TLS με επαλήθευση Director, αλλά χωρίς έγκριση Clients.
 Χρήση μόνο σε ελεγχόμενο δίκτυο δοκιμών.
 """
 
 import argparse
+from functools import partial
+import ssl
 from pathlib import Path
 import queue
 import socket
@@ -14,6 +16,7 @@ import time
 from director.broadcast import AudioBroadcaster, MAX_CLIENTS
 from shared.discovery import announce, director_id, DISCOVERY_PORT
 from shared.identity import ProtocolMismatch, receive_hello, send_welcome
+from shared.transport_security import accept_tls, server_context
 from shared.audio import BLOCK_BYTES, BLOCK_SAMPLES, CHANNELS, DEFAULT_PORT, DTYPE, SAMPLE_RATE
 
 # Κοινή ουρά λήψης του μικροφώνου (5 x 20 ms = 100 ms).
@@ -138,7 +141,7 @@ def stream_microphone(broadcaster: AudioBroadcaster, *, device: int | None = Non
 
 
 def accept_clients(server: socket.socket, broadcaster: AudioBroadcaster,
-                   stop: threading.Event) -> None:
+                   stop: threading.Event, *, tls_context: ssl.SSLContext | None = None) -> None:
     """Αποδέχεται νέους Clients ανεξάρτητα από την καταγραφή ήχου."""
     server.settimeout(0.2)
     while not stop.is_set():
@@ -150,9 +153,12 @@ def accept_clients(server: socket.socket, broadcaster: AudioBroadcaster,
             if not stop.is_set():
                 raise
             break
-        # Πειραματική δήλωση Client: μη πιστοποιημένα στοιχεία.
-        connection.settimeout(2.0)
+        # Το TLS ολοκληρώνεται πριν επιτραπεί οποιοδήποτε HELLO/PCM.
         try:
+            if tls_context is None:
+                raise ValueError("TLS context required for incoming Clients")
+            connection = accept_tls(connection, tls_context)
+            connection.settimeout(2.0)
             client_id, room = receive_hello(connection)
             send_welcome(connection, accepted=True)
         except ProtocolMismatch as exc:
@@ -243,12 +249,18 @@ def main() -> None:
     parser.add_argument("--device", type=int, default=None, help="Αριθμός συσκευής εισόδου PortAudio")
     parser.add_argument("--latency", type=parse_latency, default="low",
                         help="Καθυστέρηση κάρτας ήχου: low, high ή δευτερόλεπτα")
+    parser.add_argument("--tls-cert", type=Path, required=True,
+                        help="Πιστοποιητικό TLS Director (PEM, SAN DNS)")
+    parser.add_argument("--tls-key", type=Path, required=True,
+                        help="Ιδιωτικό κλειδί TLS Director (εκτός repository)")
     parser.add_argument("--gui", action="store_true",
                         help="Κεντρική οθόνη Director (PySide6, pip install -e .[gui])")
     args = parser.parse_args()
+    tls_context = server_context(args.tls_cert, args.tls_key)
+    secure_accept = partial(accept_clients, tls_context=tls_context)
     if args.gui:
         from director.gui import run_gui
-        run_gui(args, accept_clients=accept_clients, stream_microphone=stream_microphone)
+        run_gui(args, accept_clients=secure_accept, stream_microphone=stream_microphone)
         return
 
     broadcaster = AudioBroadcaster(max_clients=MAX_CLIENTS, on_event=lambda s: print(s, flush=True))
@@ -265,7 +277,7 @@ def main() -> None:
                                   kwargs={"udp_port": args.discovery_port},
                                   daemon=True, name="director-discovery")
         beacon.start()
-        receiver = threading.Thread(target=accept_clients, args=(server, broadcaster, stop),
+        receiver = threading.Thread(target=secure_accept, args=(server, broadcaster, stop),
                                     daemon=True, name="accept-clients")
         receiver.start()
         commands = threading.Thread(target=command_loop, args=(broadcaster, stop, stats),
