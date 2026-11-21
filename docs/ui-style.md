@@ -2,7 +2,7 @@
 
 Κατάσταση: **εγκεκριμένος** (21/11/2026). Ισχύει για **όλο** το UI (Director, Client, popup, tray) και για κάθε μελλοντική οθόνη. Πριν από οποιαδήποτε αλλαγή UI διαβάζεται αυτό το αρχείο· νέα οθόνη δεν εισάγει δικά της χρώματα, γραμματοσειρές ή στυλ στοιχείων αν υπάρχει ήδη κανόνας εδώ. Τι εμφανίζει κάθε οθόνη: [ui-design.md](ui-design.md).
 
-Mockup αναφοράς της κεντρικής οθόνης Director: [αναμονή](mockups/director-main-idle.png), [ζωντανή ανακοίνωση](mockups/director-main-live.png), πηγή HTML [director-main.html](mockups/director-main.html) (`#live` για τη ζωντανή κατάσταση). Το mockup δείχνει διάταξη και στυλ· δεν είναι κώδικας εφαρμογής.
+Mockup αναφοράς της κεντρικής οθόνης Director: [αναμονή](mockups/director-main-idle.png), [ζωντανή ανακοίνωση](mockups/director-main-live.png), [ζωντανή με Mute](mockups/director-main-live-muted.png), πηγή HTML [director-main.html](mockups/director-main.html) (`#live`, `#live-muted`· τα κύματα τρέχουν ως CSS animation). Η εξέλιξη των κυμάτων «Live» στην εφαρμογή: [director-live-waves.png](mockups/director-live-waves.png). Το mockup δείχνει στυλ και το κουμπί ανακοίνωσης· η διάταξη των καρτών και της κάρτας «Αίθουσες» ακολουθεί το §5, που υπερισχύει όπου διαφέρει. Δεν είναι κώδικας εφαρμογής.
 
 ## 1. Χρώματα (tokens)
 

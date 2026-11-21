@@ -25,13 +25,22 @@ body{margin:0;font-family:"Segoe UI","Noto Sans",Arial,sans-serif;color:var(--te
 .card{background:#fff;border:1px solid var(--card-b);border-radius:8px;padding:12px 14px}
 .card h2{font-size:15px;font-weight:600;margin:0 0 10px}
 .micwrap{display:flex;flex-direction:column;align-items:center;padding:6px 0 4px}
-.ring{width:176px;height:176px;border-radius:50%;background:var(--blue-l);display:flex;align-items:center;justify-content:center}
+.ring{position:relative;width:176px;height:176px;border-radius:50%;background:var(--blue-l);display:flex;align-items:center;justify-content:center;margin:2px;transition:background-color .3s}
 .ring.live{background:var(--red-l)}
+.ring.waves{background:transparent}
+.wave{position:absolute;left:50%;top:50%;width:140px;height:140px;margin:-70px 0 0 -70px;border:2px solid var(--red);border-radius:50%;opacity:0;pointer-events:none}
+.ring.waves .wave{animation:wave 2.4s cubic-bezier(.33,1,.68,1) infinite}
+.ring.waves .wave:nth-child(2){animation-delay:.8s}
+.ring.waves .wave:nth-child(3){animation-delay:1.6s}
+@keyframes wave{from{transform:scale(1);opacity:.7}to{transform:scale(1.28);opacity:0}}
+.btn{position:relative}
+.badge{display:flex;align-items:center;gap:6px;color:var(--red);font-weight:600;font-size:15px;height:20px;margin-bottom:6px;visibility:hidden}
+.badge i{width:8px;height:8px;border-radius:50%;background:var(--red);display:inline-block}
+.badge.on{visibility:visible}
 .btn{width:140px;height:140px;border-radius:50%;background:var(--blue);display:flex;align-items:center;justify-content:center}
 .btn.live{background:var(--red)}
 .btn svg{width:60px;height:60px;stroke:#fff;fill:none;stroke-width:2.2;stroke-linecap:round}
 .state{font-size:12.5px;color:var(--muted);margin-top:8px;height:16px}
-.state.live{color:var(--red);font-weight:700;letter-spacing:.3px}
 .lvl-h{display:flex;align-items:center;width:100%;margin-top:10px;font-size:12.5px;color:var(--muted)}
 .prev{margin-left:auto;font-size:12px;border:1px solid var(--grey);border-radius:12px;padding:2px 9px;color:var(--text);background:#fff}
 .meter{display:flex;gap:4px;width:100%;margin-top:6px}
@@ -71,7 +80,8 @@ body{margin:0;font-family:"Segoe UI","Noto Sans",Arial,sans-serif;color:var(--te
     <div class="left">
      <div class="card"><h2>Ανακοίνωση</h2>
       <div class="micwrap">
-       <div class="ring" id="ring"><div class="btn" id="btn"><svg viewBox="0 0 24 24"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5.5 11a6.5 6.5 0 0 0 13 0M12 17.5V21M8.5 21h7"/></svg></div></div>
+       <div class="badge" id="badge">Live<i></i></div>
+       <div class="ring" id="ring"><span class="wave"></span><span class="wave"></span><span class="wave"></span><div class="btn" id="btn"><svg viewBox="0 0 24 24"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5.5 11a6.5 6.5 0 0 0 13 0M12 17.5V21M8.5 21h7"/><path id="slash" d="M20 3L4 21" style="display:none"/></svg></div></div>
        <div class="state" id="state">Πατήστε για έναρξη</div>
        <div class="lvl-h">Στάθμη μικροφώνου<span class="prev" id="prev">Προεπισκόπηση</span></div>
        <div class="meter" id="meter"></div>
@@ -94,8 +104,12 @@ const icon=s=>`<svg width="${s}" height="${s}" viewBox="0 0 24 24"><rect width="
 ico1.innerHTML=icon(18);ico2.innerHTML=icon(22);
 const names=["Α1","Α2","Β1","Β2","Γ1","Γ2","Δ1","Δ2","Ε1","Ε2","Στ1","Στ2","Τμ. Ένταξης 1","Τμ. Ένταξης 2","Τμήμα Υποδοχής","Εργ. Υπολογιστών","Κεντρική Αίθουσα"];
 const tick='<svg viewBox="0 0 12 12"><path d="M2.5 6.2l2.3 2.3 4.7-5"/></svg>';
-const live=location.hash==="#live";
+// #live: ζωντανή ανακοίνωση (κύματα) · #live-muted: ζωντανή με σίγαση.
+const muted=location.hash==="#live-muted";
+const live=location.hash==="#live"||muted;
 rooms.innerHTML=names.map(n=>`<div class="room"><span class="cb on">${tick}</span>${n}<span class="dot"></span></div>`).join("");
 const lv=live?7:0;meter.innerHTML=Array.from({length:12},(_,i)=>`<b class="${i<lv?'on':''}"></b>`).join("");
-if(live){ring.classList.add("live");btn.classList.add("live");state.classList.add("live");state.textContent="ΖΩΝΤΑΝΑ · πατήστε για λήξη";prev.style.opacity=.45;}
+if(live){ring.classList.add("live");btn.classList.add("live");badge.classList.add("on");prev.style.opacity=.45;
+ state.textContent=muted?"Σίγαση · πατήστε για λήξη":"Πατήστε για λήξη";
+ if(muted){slash.style.display="";}else{ring.classList.add("waves");}}
 </script></body></html>

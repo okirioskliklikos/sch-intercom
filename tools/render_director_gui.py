@@ -3,7 +3,8 @@
 Χρήση (Linux/Windows, χρειάζεται PySide6):
     python -m tools.render_director_gui --out-dir screenshots
 
-Γράφει director-main-idle.png και director-main-live.png με ψεύτικους
+Γράφει director-main-idle.png, director-main-live.png και
+director-main-live-muted.png με ψεύτικους
 Clients (τα 17 ενδεικτικά ονόματα του ui-design.md) και ψεύτικο μικρόφωνο.
 Χρησιμεύει για σύγκριση με το docs/mockups/ και για τα PR. Δεν είναι δοκιμή
 πραγματικού ήχου ή εμφάνισης στα Windows.
@@ -77,6 +78,9 @@ def main() -> None:
     window.toggle_announcement()
     settle()
     window.grab().save(str(args.out_dir / "director-main-live.png"))
+    window.mute_button.click()
+    settle(500)
+    window.grab().save(str(args.out_dir / "director-main-live-muted.png"))
     window.close()
     release_window(window)
     app.processEvents()
