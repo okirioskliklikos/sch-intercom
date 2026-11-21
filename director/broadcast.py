@@ -15,7 +15,9 @@ from shared.control import (HEARTBEAT_TIMEOUT_SECONDS, KEEPALIVE_INTERVAL_SECOND
                             heartbeat_receiver)
 from shared.identity import validate_identity
 
-MAX_CLIENTS = 32
+#: Συνδεδεμένοι Clients ταυτόχρονα. Ροή ανά Client ~0,3 Mbps στο καλώδιο
+#: (PCM 16 kHz mono + TLS/TCP/IP): 60 Clients ≈ 18 Mbps στη σύνδεση του Director.
+MAX_CLIENTS = 60
 MAX_CLIENT_PENDING_BLOCKS = 5
 SEND_TIMEOUT_SECONDS = 1.0
 

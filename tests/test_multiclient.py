@@ -132,8 +132,9 @@ class MultiClientTests(LocalTLSFixture, unittest.TestCase):
         with self.assertRaises(ValueError):
             accept_clients(self.server, self.broadcast, threading.Event())
 
-    def test_2_5_10_15_20_clients_receive_identical_frames(self):
-        for count in (2, 5, 10, 15, 20):
+    def test_up_to_60_clients_receive_identical_frames(self):
+        self.assertEqual(self.broadcast.max_clients, 60)
+        for count in (2, 5, 10, 20, 40, 60):
             with self.subTest(clients=count):
                 self.connect_clients(count)
                 received = [None] * count
