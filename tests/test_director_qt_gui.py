@@ -74,6 +74,41 @@ class DirectorWindowTests(TestCase):
         return {room: window.room_grid.getItemPosition(window.room_grid.indexOf(row))[:2]
                 for room, row in window.room_rows.items()}
 
+    def test_landscape_layout_expands_announcement_and_stacks_right_cards(self):
+        window = self.make(self.STATUS)
+        window.show()
+        QApplication.processEvents()
+        window._layout_rooms()
+        QApplication.processEvents()
+
+        announce = window.announcement_card
+        rooms = window.rooms_card
+        selection = window.selection_card
+        self.assertLess(announce.geometry().right(), rooms.mapTo(window, rooms.rect().topLeft()).x())
+        self.assertLess(rooms.mapTo(window, rooms.rect().bottomLeft()).y(),
+                        selection.mapTo(window, selection.rect().topLeft()).y())
+        self.assertAlmostEqual(announce.height(), window.rooms_area.height(), delta=2)
+        self.assertAlmostEqual(
+            announce.mapTo(window, announce.rect().bottomLeft()).y(),
+            selection.mapTo(window, selection.rect().bottomLeft()).y(), delta=2)
+
+        # Ο κύκλος διατηρεί την εγκεκριμένη διάμετρο και κεντράρεται.
+        button = window.announce_button
+        self.assertEqual(button.width(), button.RING + 4)
+        self.assertAlmostEqual(button.mapTo(window, button.rect().center()).x(),
+                               announce.mapTo(window, announce.rect().center()).x(),
+                               delta=3)
+        self.assertGreater(announce.width(), button.width())
+
+    def test_status_dot_at_far_right_even_with_short_room_name(self):
+        window = self.make([("id-1", "Γ1", True, 0.1)])
+        window.show()
+        QApplication.processEvents()
+        row = window.room_rows["Γ1"]
+        self.assertGreater(row.dot.x() - (row.label.x() + row.label.width()), 8)
+        self.assertLessEqual(row.width() - (row.dot.x() + row.dot.width()),
+                             current_metrics().px(10))
+
     def test_first_column_fills_before_second(self):
         status = [(f"id-{i}", f"Αίθουσα {i:02d}", True, 0.1) for i in range(12)]
         window = self.make(status)

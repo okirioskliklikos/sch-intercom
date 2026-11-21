@@ -336,41 +336,56 @@ class DirectorWindow(QMainWindow):
 
         columns = QHBoxLayout()
         columns.setSpacing(px(theme.CARD_SPACING))
-        left = QVBoxLayout()
-        left.setSpacing(px(theme.CARD_SPACING))
-        left_widget = QWidget()
-        left_widget.setFixedWidth(px(theme.LEFT_COLUMN_WIDTH))
-        left_widget.setLayout(left)
-        left.setContentsMargins(0, 0, 0, 0)
-        left.addWidget(self._build_announcement_card())
-        left.addWidget(self._build_selection_card())
-        left.addStretch(1)
-        columns.addWidget(left_widget, 0, Qt.AlignmentFlag.AlignTop)
 
-        # Ο χώρος δεξιά: η κάρτα πάνω αριστερά, στο πλάτος των δύο στηλών της.
-        # Το ύψος του ορίζει πόσες αίθουσες χωρούν στην πρώτη στήλη.
+        # Η ανακοίνωση γεμίζει όλο το διαθέσιμο πλάτος/ύψος αριστερά.
+        # Δεξιά η λίστα αιθουσών βρίσκεται πάνω από τις επιλογές.
+        self.announcement_card = self._build_announcement_card()
+        self.announcement_card.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        columns.addWidget(self.announcement_card, 1)
+
         self.rooms_area = _ResizeNotifier(self._layout_rooms)
+        self.rooms_area.setSizePolicy(
+            QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Expanding)
         right = QVBoxLayout(self.rooms_area)
         right.setContentsMargins(0, 0, 0, 0)
-        right.addWidget(self._build_rooms_card(), 0,
-                        Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
-        right.addStretch(1)
-        columns.addWidget(self.rooms_area, 1)
+        right.setSpacing(px(theme.CARD_SPACING))
+
+        self.rooms_card = self._build_rooms_card()
+        self.rooms_card.setSizePolicy(
+            QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Expanding)
+        right.addWidget(self.rooms_card, 1)
+
+        self.selection_card = self._build_selection_card()
+        self.selection_card.setSizePolicy(
+            QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
+        right.addWidget(self.selection_card, 0)
+        columns.addWidget(self.rooms_area, 0)
+
         layout.addLayout(columns, 1)
         return page
 
     def _build_announcement_card(self) -> QWidget:
         card, layout = _card("Ανακοίνωση")
+        # Η ομάδα χειριστηρίων διατηρεί το σημερινό μέγεθος και
+        # κεντράρεται μέσα στην επεκτεινόμενη κάρτα.
+        controls = QWidget()
+        controls.setFixedWidth(
+            px(theme.LEFT_COLUMN_WIDTH) - 2 * (px(theme.CARD_PADDING) + px(2)))
+        group = QVBoxLayout(controls)
+        group.setContentsMargins(0, 0, 0, 0)
+        group.setSpacing(px(8))
+
         self.announce_button = AnnounceButton()
         self.announce_button.clicked.connect(self.toggle_announcement)
-        layout.addWidget(self.announce_button, 0, Qt.AlignmentFlag.AlignHCenter)
+        group.addWidget(self.announce_button, 0, Qt.AlignmentFlag.AlignHCenter)
 
         self.hint = QLabel(HINT_IDLE)
         self.hint.setObjectName("announceHint")
         self.hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.hint.setWordWrap(True)
-        layout.addWidget(self.hint)
-        layout.addSpacing(px(4))
+        group.addWidget(self.hint)
+        group.addSpacing(px(4))
 
         level_row = QHBoxLayout()
         level_label = QLabel("Στάθμη μικροφώνου")
@@ -383,19 +398,22 @@ class DirectorWindow(QMainWindow):
         self.preview_button.setToolTip("Τοπική μέτρηση στάθμης, χωρίς μετάδοση")
         self.preview_button.toggled.connect(self.mic_preview_toggled)
         level_row.addWidget(self.preview_button)
-        layout.addLayout(level_row)
+        group.addLayout(level_row)
 
         self.meter = LevelMeter()
-        layout.addWidget(self.meter)
-        layout.addSpacing(px(6))
+        group.addWidget(self.meter)
+        group.addSpacing(px(6))
 
         self.mute_button = QPushButton()
         self.mute_button.setObjectName("pill")
         self.mute_button.setCheckable(True)
         self.mute_button.setIconSize(QSize(px(theme.ICON), px(theme.ICON)))
         self.mute_button.toggled.connect(self.mute_toggled)
-        layout.addWidget(self.mute_button, 0, Qt.AlignmentFlag.AlignHCenter)
+        group.addWidget(self.mute_button, 0, Qt.AlignmentFlag.AlignHCenter)
         self._update_mute_button()
+        layout.addStretch(1)
+        layout.addWidget(controls, 0, Qt.AlignmentFlag.AlignHCenter)
+        layout.addStretch(1)
         return card
 
     def _build_selection_card(self) -> QWidget:
@@ -430,7 +448,7 @@ class DirectorWindow(QMainWindow):
         title_layout.addWidget(self.online_count)
         title_layout.addStretch(1)
         card, layout = _card(title_row)
-        card.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Maximum)
+        card.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Expanding)
         self.rooms_card, self.rooms_card_layout, self.rooms_title = card, layout, title_row
 
         self.empty_rooms = QLabel("Δεν έχει συνδεθεί ακόμη κανένας Client.")
@@ -557,7 +575,11 @@ class DirectorWindow(QMainWindow):
         metrics = QFontMetrics(rows[0].label.font())
         name = max(metrics.horizontalAdvance(r.label.text()) for r in rows) + px(2)
         spacing = px(9)
-        return px(2) * 2 + px(18) + spacing + name + px(theme.ROOM_DOT_GAP) + px(theme.DOT)
+        natural = px(2) * 2 + px(18) + spacing + name + px(theme.ROOM_DOT_GAP) + px(theme.DOT)
+        # Ελάχιστο πλάτος ώστε η κουκκίδα να φτάνει στο δεξί άκρο
+        # και σε γραμμή με μικρό όνομα αίθουσας.
+        return max(natural, px(theme.LEFT_COLUMN_WIDTH) -
+                   2 * (px(theme.CARD_PADDING) + px(2)))
 
     def _layout_rooms(self) -> None:
         """Πρώτη στήλη ως το διαθέσιμο ύψος, μετά δεύτερη (ui-style.md §5)."""
@@ -567,7 +589,10 @@ class DirectorWindow(QMainWindow):
         margins = self.rooms_card_layout.contentsMargins()
         chrome = (margins.top() + margins.bottom() + self.rooms_card_layout.spacing()
                   + self.rooms_title.sizeHint().height() + 2)
-        rows_fit = max(1, (self.rooms_area.height() - chrome) // row_height)
+        selection_height = self.selection_card.sizeHint().height()
+        available = (self.rooms_area.height() - selection_height -
+                     px(theme.CARD_SPACING) - chrome)
+        rows_fit = max(1, available // row_height)
         names = list(self.room_rows)
         rows = room_rows_per_column(len(names), rows_fit)
         width = self._room_column_width()
@@ -590,6 +615,10 @@ class DirectorWindow(QMainWindow):
         grid_width = width * columns + self.room_grid.horizontalSpacing() * (columns - 1)
         self.room_grid_widget.setFixedSize(grid_width, rows * row_height)
         self.room_scroll.setFixedSize(grid_width + scrollbar, min(rows, rows_fit) * row_height)
+        # Η δεξιά στήλη παίρνει μόνο όσο πλάτος χρειάζεται.
+        self.rooms_area.setFixedWidth(max(
+            self.rooms_card.sizeHint().width(),
+            self.selection_card.sizeHint().width()))
 
     def _refresh_announcement(self) -> None:
         mic = self.mic
