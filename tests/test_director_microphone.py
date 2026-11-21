@@ -5,6 +5,7 @@
 director.main.stream_microphone.
 """
 from unittest import TestCase
+from tests.tls_support import LocalTLSFixture
 import threading
 import time
 
@@ -288,10 +289,11 @@ class TargetChoiceTests(TestCase):
         self.assertEqual(meter_fraction(1e-6), 0.0)
 
 
-class LoopbackAnnouncementTests(TestCase):
+class LoopbackAnnouncementTests(LocalTLSFixture, TestCase):
     """Πραγματικός AudioBroadcaster και TCP Client στο loopback, ψεύτικο μικρόφωνο."""
 
     def setUp(self):
+        super().setUp()
         import socket
         import uuid
         from director.broadcast import AudioBroadcaster
@@ -306,6 +308,7 @@ class LoopbackAnnouncementTests(TestCase):
         self.stop = threading.Event()
         self.listener = threading.Thread(target=accept_clients,
                                          args=(self.server, self.broadcaster, self.stop),
+                                         kwargs={"tls_context": self.tls_server_context},
                                          daemon=True)
         self.listener.start()
 
@@ -315,8 +318,7 @@ class LoopbackAnnouncementTests(TestCase):
                 gate.publish(bytes([7]) * BLOCK_BYTES, time.monotonic_ns() // 1000)
 
         self.mic = DirectorMicrophone(speaking_stream, self.broadcaster)
-        self.client = socket.create_connection(self.server.getsockname(), timeout=2)
-        self.client.settimeout(3)
+        self.client = self.connect_tls_client(self.server.getsockname())
         send_hello(self.client, str(uuid.UUID(int=1)), "C2627-Γ1")
         receive_welcome(self.client)
         self.assertTrue(wait_until(lambda: self.broadcaster.client_count == 1))
