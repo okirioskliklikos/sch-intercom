@@ -180,12 +180,31 @@ class DirectorWindowTests(TestCase):
         widths = {r.width() for r in window.room_rows.values()}
         self.assertEqual(len(widths), 1)  # ίσες στήλες
 
-    def test_long_room_name_is_cut_after_18_characters(self):
-        long_name = "Εργαστήριο Φυσικής Β΄ τάξης"
-        window = self.make([("id-1", long_name, True, 0.1)])
-        label = window.room_rows[long_name].label
-        self.assertEqual(label.text(), "Εργαστήριο Φυσικής…")
-        self.assertEqual(label.toolTip(), long_name)
+    def test_long_room_name_is_elided_at_status_dot(self):
+        long_name = "Εργαστήριο Φυσικής και Χημείας Β΄ τάξης"
+        names = [long_name, "Αίθουσα Εικαστικών", "Γραφείο Καθηγητών"]
+        window = self.make([(f"id-{i}", n, True, 0.1) for i, n in enumerate(names)])
+        window.show()
+        QApplication.processEvents()
+        row = window.room_rows[long_name]
+        self.assertTrue(row.label.text().endswith("…"))
+        self.assertTrue(long_name.startswith(row.label.text()[:-1]))
+        # Κόβεται βάσει πλάτους: το κείμενο γεμίζει τον χώρο ως την κουκκίδα.
+        advance = row.label.fontMetrics().horizontalAdvance(row.label.text())
+        self.assertLessEqual(advance, row.label.contentsRect().width())
+        self.assertGreater(advance, row.label.contentsRect().width() * 0.8)
+        self.assertEqual(row.label.toolTip(), long_name)
+        self.assertLessEqual(row.label.x() + row.label.width(), row.dot.x())
+        for name in names[1:]:
+            with self.subTest(name=name):
+                self.assertEqual(window.room_rows[name].label.text(), name)
+
+    def test_room_columns_have_fixed_scaled_width(self):
+        window = self.make(self.STATUS)
+        window.show()
+        QApplication.processEvents()
+        width = current_metrics().px(theme.ROOM_COLUMN_WIDTH)
+        self.assertEqual({r.width() for r in window.room_rows.values()}, {width})
 
     def test_start_and_stop_from_round_button(self):
         window = self.make(self.STATUS)

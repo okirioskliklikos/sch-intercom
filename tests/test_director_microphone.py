@@ -9,7 +9,7 @@ import threading
 import time
 
 from director.gui import (MODE_ALL, MODE_ROOMS, DirectorMicrophone, VoiceGate,
-                          choose_targets, meter_fraction, room_display_name,
+                          choose_targets, meter_fraction,
                           room_rows_per_column, room_states)
 
 WAIT = 2.0
@@ -278,13 +278,6 @@ class TargetChoiceTests(TestCase):
         self.assertEqual(room_rows_per_column(30, 15), 15)   # δύο γεμάτες
         self.assertEqual(room_rows_per_column(40, 15), 20)   # κύλιση, ισόποσα
         self.assertEqual(room_rows_per_column(3, 0), 2)   # ούτε μία δεν χωρά: κύλιση
-
-    def test_room_display_name(self):
-        self.assertEqual(room_display_name("Α1"), "Α1")
-        self.assertEqual(room_display_name("Τμήμα Υποδοχής"), "Τμήμα Υποδοχής")
-        self.assertEqual(room_display_name("Εργ. Υπολογιστών"), "Εργ. Υπολογιστών")
-        self.assertEqual(room_display_name("Κεντρική Αίθουσα 12"), "Κεντρική Αίθουσα 1…")
-        self.assertEqual(room_display_name("Εργαστήριο Φυσικής Β"), "Εργαστήριο Φυσικής…")
 
     def test_meter_scale(self):
         self.assertEqual(meter_fraction(0.0), 0.0)

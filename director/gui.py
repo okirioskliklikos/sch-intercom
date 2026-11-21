@@ -87,11 +87,6 @@ def choose_targets(mode: str, checked: set[str], status) -> set[str] | None:
     return set(checked)
 
 
-def room_display_name(room: str, max_chars: int = 18) -> str:
-    """Όνομα αίθουσας ως 18 χαρακτήρες· από τον 19ο «…» (ui-style.md §5)."""
-    return room if len(room) <= max_chars else room[:max_chars].rstrip() + "…"
-
-
 def room_rows_per_column(count: int, rows_fit: int) -> int:
     """Γραμμές ανά στήλη στην κάρτα αιθουσών (2 στήλες, ui-style.md §5).
 
