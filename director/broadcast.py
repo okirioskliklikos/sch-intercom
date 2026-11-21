@@ -137,6 +137,13 @@ class AudioBroadcaster:
                 if session.selected and session.enqueue(voice):
                     self.dropped += 1
 
+    def disconnect_client(self, client_id: str) -> None:
+        """Drop an authenticated Client immediately on registry revocation."""
+        with self._lock:
+            session = self._sessions.get(client_id)
+        if session is not None:
+            self._remove_client(session)
+
     def close(self) -> None:
         with self._lock:
             self._closed = True
