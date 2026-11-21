@@ -30,7 +30,7 @@ class TLSTransportTests(unittest.TestCase):
         ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
 
     def _exchange(self, *, client_ca=None, server_name=DEFAULT_SERVER_NAME,
-                  plaintext=False, untrusted=False):
+                  plaintext=False, untrusted=False, bidirectional=False):
         listener = socket.socket()
         listener.bind(("127.0.0.1", 0))
         listener.listen(1)
@@ -45,6 +45,8 @@ class TLSTransportTests(unittest.TestCase):
                     with accept_tls(raw, server_context(self.cert, self.key)) as stream:
                         received.append(stream.recv(16))
                         stream.sendall(b"encrypted-pcm")
+                        if bidirectional:
+                            received.append(stream.recv(16))
             except (OSError, ssl.SSLError) as exc:
                 errors.append(exc)
         worker = threading.Thread(target=server, daemon=True)
@@ -62,7 +64,14 @@ class TLSTransportTests(unittest.TestCase):
                 else:
                     with connect_tls(raw, ssl.create_default_context() if untrusted else client_context(client_ca or self.cert), server_name) as stream:
                         stream.sendall(b"pcm-block")
+                        if bidirectional:
+                            heartbeat = threading.Thread(target=stream.sendall,
+                                                         args=(b"client-heartbeat",), daemon=True)
+                            heartbeat.start()
                         self.assertEqual(stream.recv(32), b"encrypted-pcm")
+                        if bidirectional:
+                            heartbeat.join(timeout=2)
+                            self.assertFalse(heartbeat.is_alive())
         finally:
             worker.join(timeout=4)
             self.assertFalse(worker.is_alive(), "server handshake blocked")
@@ -71,6 +80,11 @@ class TLSTransportTests(unittest.TestCase):
     def test_valid_certificate_transfers_audio_payload(self):
         received, errors = self._exchange()
         self.assertEqual(received, [b"pcm-block"])
+        self.assertFalse(errors)
+
+    def test_bidirectional_audio_and_heartbeat_over_one_tls_socket(self):
+        received, errors = self._exchange(bidirectional=True)
+        self.assertEqual(received, [b"pcm-block", b"client-heartbeat"])
         self.assertFalse(errors)
 
     def test_wrong_server_name_rejected(self):
