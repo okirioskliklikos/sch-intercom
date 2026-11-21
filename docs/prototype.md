@@ -59,14 +59,13 @@ python -m unittest discover -s tests -v
 
 ## Εκτέλεση — Φάση 4 (TLS απαιτείται)
 
-Δημιουργήστε **τοπικά** στον Director δοκιμαστικό self-signed πιστοποιητικό με OpenSSL (μία φορά, σε ασφαλή φάκελο εκτός repository):
+Δημιουργήστε **τοπικά** στον Director την ταυτότητα TLS εγκατάστασης (μία φορά, σε ασφαλή φάκελο εκτός repository). Το πιστοποιητικό **δεν λήγει** (`notAfter 99991231235959Z`, απόφαση 21/11/2026) και η εντολή δεν αντικαθιστά ποτέ υπάρχοντα αρχεία:
 
 ```bash
-openssl req -x509 -newkey rsa:3072 -sha256 -nodes -days 365 \
-  -keyout director-tls.key -out director-tls.crt \
-  -subj "/CN=school-intercom-director" \
-  -addext "subjectAltName=DNS:school-intercom-director"
+python -m director.tls_identity --cert director-tls.crt --key director-tls.key
 ```
+
+Η εντολή τυπώνει το αποτύπωμα SHA-256 για επιβεβαίωση στους Clients. **Αλλαγή από παλαιότερο πιστοποιητικό 365 ημερών:** νέο πιστοποιητικό σημαίνει νέα διανομή του `director-tls.crt` σε όλους τους Clients, και το υπάρχον μητρώο Clients (υπογεγραμμένο με το παλιό κλειδί) δεν γίνεται πια δεκτό· σε εργαστηριακές δοκιμές διαγράψτε το `clients-registry.json` και εγκρίνετε ξανά τους Clients.
 
 Το `director-tls.key` παραμένει **μόνο** στον Director· δώστε περιορισμένα δικαιώματα πρόσβασης και μη το ανεβάσετε ποτέ στο GitHub. Αντιγράψτε **μόνο** το `director-tls.crt` στον Client μέσω αξιόπιστου τρόπου (επιβεβαιώστε το αποτύπωμα εκτός δικτύου). Αντικαταστήστε αυτό το εργαστηριακό πιστοποιητικό με κατάλληλη διαχείριση πιστοποιητικών πριν από τη διανομή.
 
