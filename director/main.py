@@ -1,7 +1,7 @@
 """Director: μία λήψη μικροφώνου, μετάδοση σε πολλούς TCP Clients.
 
-ΠΡΟΣΟΧΗ: TLS με επαλήθευση Director, αλλά χωρίς έγκριση Clients.
-Χρήση μόνο σε ελεγχόμενο δίκτυο δοκιμών.
+ΠΡΟΣΟΧΗ: πειραματικό mTLS v5 με υπογεγραμμένο μητρώο Clients.
+Η δικτυακή εγγραφή και το GUI έγκρισης δεν έχουν υλοποιηθεί ακόμη.
 """
 
 import argparse
@@ -14,6 +14,7 @@ import threading
 import time
 
 from director.broadcast import AudioBroadcaster, MAX_CLIENTS
+from shared.client_registry import SignedClientRegistry
 from shared.discovery import announce, director_id, DISCOVERY_PORT
 from shared.identity import ProtocolMismatch, receive_hello, send_welcome
 from shared.transport_security import accept_tls, server_context
@@ -77,6 +78,7 @@ def show_help() -> str:
   none          Παύση ομιλίας προς όλους
   room <όνομα>  Μετάδοση σε μία ή περισσότερες αίθουσες
   client <UUID> Μετάδοση σε έναν ή περισσότερους Clients
+  revoke <UUID> Ανάκληση Client και άμεση αποσύνδεσή του
   quit          Τερματισμός Director"""
 
 
@@ -150,13 +152,25 @@ HELLO_TIMEOUT_SECONDS = 2.0
 
 
 def _admit_client(connection: socket.socket, address, broadcaster: AudioBroadcaster,
-                  tls_context: ssl.SSLContext) -> None:
+                  tls_context: ssl.SSLContext, *,
+                  registry: SignedClientRegistry | None = None) -> None:
     """TLS και HELLO ενός Client, σε δικό του νήμα ώστε να μην καθυστερεί τους άλλους."""
     # Το TLS ολοκληρώνεται πριν επιτραπεί οποιοδήποτε HELLO/PCM.
     try:
         connection = accept_tls(connection, tls_context)
         connection.settimeout(HELLO_TIMEOUT_SECONDS)
         client_id, room = receive_hello(connection)
+        if registry is not None:
+            with registry.lock:
+                if not registry.authorize(connection.getpeercert(binary_form=True), client_id, room):
+                    print(f"[Director] Μη εγκεκριμένος Client {address}: {client_id}", flush=True)
+                    connection.close()
+                    return
+                send_welcome(connection, accepted=True)
+                if not broadcaster.add_client(connection, client_id, room, address):
+                    print(f"[Director] Όριο Clients: {broadcaster.max_clients}", flush=True)
+                return
+        # Legacy isolated transport tests only; production always supplies registry.
         send_welcome(connection, accepted=True)
     except ProtocolMismatch as exc:
         print(f"[Director] Απόρριψη {address}: {exc}", flush=True)
@@ -178,7 +192,9 @@ def _admit_client(connection: socket.socket, address, broadcaster: AudioBroadcas
 
 def accept_clients(server: socket.socket, broadcaster: AudioBroadcaster,
                    stop: threading.Event, *, tls_context: ssl.SSLContext | None = None,
-                   max_pending: int = MAX_PENDING_HANDSHAKES) -> None:
+                   max_pending: int = MAX_PENDING_HANDSHAKES,
+                   registry: SignedClientRegistry | None = None,
+                   context_provider=None) -> None:
     """Αποδέχεται νέους Clients ανεξάρτητα από την καταγραφή ήχου.
 
     Το νήμα αυτό μόνο δέχεται συνδέσεις. Το TLS και το HELLO κάθε Client γίνονται
@@ -214,7 +230,8 @@ def accept_clients(server: socket.socket, broadcaster: AudioBroadcaster,
 
         def admit(connection=connection, address=address):
             try:
-                _admit_client(connection, address, broadcaster, tls_context)
+                current_tls = context_provider() if context_provider is not None else tls_context
+                _admit_client(connection, address, broadcaster, current_tls, registry=registry)
             finally:
                 pending.release()
 
@@ -222,7 +239,7 @@ def accept_clients(server: socket.socket, broadcaster: AudioBroadcaster,
 
 
 def command_loop(broadcaster: AudioBroadcaster, stop: threading.Event,
-                 stats: DirectorStats) -> None:
+                 stats: DirectorStats, *, revoke=None) -> None:
     """Προσωρινός έλεγχος παραληπτών από το τερματικό του Director."""
     print("Πληκτρολογήστε help για τις διαθέσιμες εντολές.", flush=True)
     while not stop.is_set():
@@ -255,6 +272,9 @@ def command_loop(broadcaster: AudioBroadcaster, stop: threading.Event,
                 for client_id, room, active, age in clients:
                     state = "Online" if active else "Offline"
                     print(f"  {client_id} | {room} | {state} | τελευταίο heartbeat πριν {age:.1f}s", flush=True)
+            elif command == "revoke" and len(values) == 1 and revoke is not None:
+                revoke(values[0])
+                print(f"Ανακλήθηκε ο Client {values[0]}", flush=True)
             elif command == "all" and not values:
                 broadcaster.set_targets()
                 print("Μετάδοση σε όλους τους Clients", flush=True)
@@ -295,11 +315,57 @@ def main() -> None:
                         help="Πιστοποιητικό TLS Director (PEM, SAN DNS)")
     parser.add_argument("--tls-key", type=Path, required=True,
                         help="Ιδιωτικό κλειδί TLS Director (εκτός repository)")
+    parser.add_argument("--registry-file", type=Path,
+                        default=Path.home() / ".school-intercom" / "clients-registry.json",
+                        help="Υπογεγραμμένο μητρώο Clients")
+    actions = parser.add_mutually_exclusive_group()
+    actions.add_argument("--approve-client-cert", type=Path,
+                         help="Έγκριση από τοπικό πιστοποιητικό PEM (εκτός σύνδεσης)")
+    actions.add_argument("--revoke-client", metavar="UUID",
+                         help="Ανάκληση πιστοποίησης Client (εκτός σύνδεσης)")
+    actions.add_argument("--list-clients", action="store_true",
+                         help="Προβολή μητρώου Clients")
+    parser.add_argument("--approve-room", default=None,
+                        help="Αίθουσα που αντιστοιχεί στο πιστοποιητικό")
     parser.add_argument("--gui", action="store_true",
                         help="Κεντρική οθόνη Director (PySide6, pip install -e .[gui])")
     args = parser.parse_args()
     tls_context = server_context(args.tls_cert, args.tls_key)
-    secure_accept = partial(accept_clients, tls_context=tls_context)
+    registry = SignedClientRegistry(args.registry_file, args.tls_cert, args.tls_key)
+    if args.approve_client_cert:
+        from cryptography import x509
+        from cryptography.x509.oid import NameOID
+        if args.approve_room is None:
+            parser.error("--approve-client-cert απαιτεί --approve-room")
+        pem = args.approve_client_cert.read_bytes()
+        cert = x509.load_pem_x509_certificate(pem)
+        client_id = cert.subject.get_attributes_for_oid(NameOID.COMMON_NAME)[0].value
+        registry.approve(client_id, args.approve_room, pem)
+        print(f"Εγκρίθηκε Client {client_id} (v{registry.version})", flush=True)
+        return
+    if args.revoke_client:
+        registry.revoke(args.revoke_client)
+        print(f"Ανακλήθηκε Client {args.revoke_client} (v{registry.version})", flush=True)
+        return
+    if args.list_clients:
+        for entry in registry.snapshot()["clients"]:
+            print("{} | {} | {}".format(entry["client_id"], entry["room"], entry["status"]))
+        return
+    secure_context = registry.tls_server_context(args.tls_cert, args.tls_key)
+    current_context = [secure_context]
+
+    def get_context():
+        with registry.lock:
+            return current_context[0]
+
+    def live_revoke(client_id: str, broadcaster: AudioBroadcaster):
+        with registry.lock:
+            registry.revoke(client_id)
+            broadcaster.disconnect_client(client_id)
+            current_context[0] = registry.tls_server_context(args.tls_cert, args.tls_key)
+
+    secure_accept = partial(accept_clients, tls_context=secure_context,
+                            registry=registry, context_provider=get_context)
     if args.gui:
         from director.gui import run_gui
         run_gui(args, accept_clients=secure_accept, stream_microphone=stream_microphone)
@@ -323,6 +389,7 @@ def main() -> None:
                                     daemon=True, name="accept-clients")
         receiver.start()
         commands = threading.Thread(target=command_loop, args=(broadcaster, stop, stats),
+                                    kwargs={"revoke": lambda client_id: live_revoke(client_id, broadcaster)},
                                     daemon=True, name="director-commands")
         commands.start()
         reporter = threading.Thread(target=periodic_stats,

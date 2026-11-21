@@ -1,6 +1,7 @@
 """Διανομή μίας ροής PCM σε επιλεγμένες αίθουσες ή Clients.
 
-Πρωτότυπο χωρίς αυθεντικοποίηση: οι δηλωμένες ταυτότητες ΔΕΝ είναι έμπιστες.
+Ο broadcaster δεν πιστοποιεί ο ίδιος ταυτότητες: ο Manager οφείλει
+να ελέγξει το πιστοποιητικό πριν από την προσθήκη Client.
 """
 
 import queue
@@ -136,6 +137,13 @@ class AudioBroadcaster:
                 session.set_selected(self._is_selected(session))
                 if session.selected and session.enqueue(voice):
                     self.dropped += 1
+
+    def disconnect_client(self, client_id: str) -> None:
+        """Drop an authenticated Client immediately on registry revocation."""
+        with self._lock:
+            session = self._sessions.get(client_id)
+        if session is not None:
+            self._remove_client(session)
 
     def close(self) -> None:
         with self._lock:

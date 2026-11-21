@@ -1,6 +1,6 @@
 # Πρωτότυπο School Intercom — οδηγίες εκτέλεσης και δοκιμές
 
-**Πειραματική υλοποίηση για εργαστηριακή δοκιμή.** Η Φάση 4 προσθέτει TLS και επαλήθευση πιστοποιητικού Director στην κανονική εκκίνηση, **όχι ακόμη έγκριση ή πιστοποίηση Clients**. Δεν υποστηρίζονται ακόμη απουσίες, System Tray ή τελική εγκατάσταση. **Μην τη χρησιμοποιείτε σε παραγωγή ή με πραγματικά δεδομένα μαθητών.**
+**Πειραματική υλοποίηση για εργαστηριακή δοκιμή.** Η Φάση 4.2A1 (PR υπό έλεγχο) προσθέτει υποχρεωτικό mTLS και μητρώο εγκεκριμένων Clients στην κανονική εκκίνηση. Η δικτυακή πρώτη εγγραφή και το GUI έγκρισης παραμένουν για μεταγενέστερα βήματα. Δεν υποστηρίζονται ακόμη απουσίες, System Tray ή τελική εγκατάσταση. **Μην τη χρησιμοποιείτε σε παραγωγή ή με πραγματικά δεδομένα μαθητών.**
 
 ## Προϋποθέσεις
 - Για πραγματική δοκιμή: Director και ένας ή περισσότεροι Clients στο ίδιο LAN, με Python 3.10+.
@@ -18,6 +18,44 @@ py -m venv .venv
 ```
 
 Σε Linux: `python3 -m venv .venv` και `.venv/bin/python -m pip install -e .`.
+
+## Φάση 4.2A1 — Πιστοποίηση Client μέσω CLI (πειραματικό PR)
+
+**Πριν από τη χρήση:** Ενημερώστε *και τις δύο* εφαρμογές σε v5. Το v4 δεν συνδέεται με v5. Η Φάση 4.2A1 δεν παρέχει ακόμη αυτόματη εγγραφή από το LAN, GUI εγκρίσεων ή κρυπτογραφημένο backup.
+
+1. **Client:** Εκκινήστε τον Client με τις γνωστές επιλογές `--tls-ca` και `--room`. Στην πρώτη εκκίνηση δημιουργείται το προσωπικό πιστοποιητικό στον φάκελο `~/.school-intercom/credentials/client-cert.pem` (Windows: `%USERPROFILE%\\.school-intercom\\credentials\\client-cert.pem`). Η σύνδεση θα απορριφθεί μέχρι να εγκριθεί ο Client.
+2. Μεταφέρετε **μόνο το δημόσιο** `client-cert.pem` στον Manager με αξιόπιστο τρόπο. **Μην αντιγράψετε** `client-key.pem` ή `client-password.bin` — παραμένουν στον Client.
+3. **Manager, με σταματημένη εξυπηρέτηση:** Εγκρίνετε τον Client με την ίδια ταυτότητα TLS Manager που χρησιμοποιείτε κατά την εκκίνηση:
+
+```bash
+python -m director.main --tls-cert director-tls.crt --tls-key director-tls.key --approve-client-cert /path/to/client-cert.pem --approve-room C2627-Γ1
+```
+
+4. Εκκινήστε τον Manager με τις συνήθεις επιλογές TLS. Το προεπιλεγμένο μητρώο `~/.school-intercom/clients-registry.json` δημιουργείται **τοπικά** και υπογράφεται με το ιδιωτικό κλειδί εγκατάστασης Manager.
+5. Εκκινήστε/επανασυνδέστε τον Client. Ο Manager επιτρέπει μόνο εγκεκριμένα κλειδιά, ενώ ελέγχει και UUID/αίθουσα στο HELLO.
+
+**Προβολή μητρώου:**
+
+```bash
+python -m director.main --tls-cert director-tls.crt --tls-key director-tls.key --list-clients
+```
+
+**Ανάκληση:** στο CLI *ενεργού* Manager γράψτε `revoke UUID`· ο Client αποσυνδέεται αμέσως και οι επόμενες συνδέσεις απορρίπτονται. Εναλλακτικά, **με σταματημένη εξυπηρέτηση**, χρησιμοποιήστε:
+
+```bash
+python -m director.main --tls-cert director-tls.crt --tls-key director-tls.key --revoke-client UUID
+```
+
+**Σημαντικό:** Δεν τροποποιούμε το μητρώο από δεύτερη διεργασία όσο ο Manager εξυπηρετεί Clients: η ήδη εκτελούμενη διεργασία διατηρεί τη δική της κατάσταση μνήμης. Η ταυτότητα Manager και το υπογεγραμμένο μητρώο πρέπει να παραμείνουν μαζί σε μελλοντικό backup. Χωρίς εγγραφή μέσω GUI, οι παραπάνω εντολές είναι προσωρινό εργαστηριακό workflow.
+
+**Δοκιμές:**
+
+```bash
+python -m unittest tests.test_client_credentials tests.test_authenticated_admission tests.test_mtls_trust_anchors -v
+python -m unittest discover -s tests -v
+```
+
+Σε Windows χρησιμοποιήστε `.venv\\Scripts\\python.exe` αντί για `python`. Να δοκιμαστεί ειδικά DPAPI CurrentUser, CA:FALSE TLS handshake, έγκριση και ανάκληση. Η προσθήκη των δοκιμών στο repository **δεν σημαίνει ότι έχουν ήδη εκτελεστεί**.
 
 ## Εκτέλεση — Φάση 4 (TLS απαιτείται)
 

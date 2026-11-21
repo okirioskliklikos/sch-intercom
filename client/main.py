@@ -1,6 +1,7 @@
 """Client: σύνδεση στον Director και αναπαραγωγή PCM.
 
-ΠΡΟΣΟΧΗ: πειραματικό πρωτόκολλο χωρίς TLS/πιστοποίηση.
+ΠΡΟΣΟΧΗ: πειραματικό TLS v5 με πιστοποιημένη ταυτότητα Client.
+Αρχική έγκριση προσωρινά από το CLI Manager.
 Χρήση μόνο σε ελεγχόμενο δίκτυο δοκιμών.
 """
 
@@ -18,6 +19,7 @@ from shared.audio import (BLOCK_BYTES, BLOCK_MS, BLOCK_SAMPLES, CHANNELS, DEFAUL
                           receive_message)
 from shared.jitter import DelayTracker, JitterBuffer
 from shared.identity import load_identity, receive_welcome, send_hello
+from shared.device_identity import create_device_identity
 from shared.transport_security import client_context, connect_tls, DEFAULT_SERVER_NAME
 from shared.discovery import discover, DISCOVERY_PORT
 from shared.control import heartbeat_sender
@@ -318,6 +320,9 @@ def main() -> None:
     parser.add_argument("--port", type=int, default=DEFAULT_PORT)
     parser.add_argument("--tls-ca", type=Path, required=True,
                         help="Έμπιστο πιστοποιητικό/CA Director (PEM)")
+    parser.add_argument("--client-credentials-dir", type=Path,
+                        default=Path.home() / ".school-intercom" / "credentials",
+                        help="Φάκελος κρυπτογραφημένου κλειδιού Client")
     parser.add_argument("--tls-server-name", default=DEFAULT_SERVER_NAME,
                         help="DNS όνομα στο SAN του πιστοποιητικού Director")
     parser.add_argument("--device", type=int, default=None, help="Αριθμός συσκευής εξόδου PortAudio")
@@ -355,8 +360,12 @@ def main() -> None:
     if args.announcement_volume is not None and args.device is not None:
         parser.error("--announcement-volume δεν συνδυάζεται ακόμη με --device")
 
-    trusted_director = client_context(args.tls_ca)
     client_id, room = load_identity(args.identity_file, room_override=args.room)
+    certfile, keyfile, password = create_device_identity(args.client_credentials_dir, client_id)
+    trusted_director = client_context(args.tls_ca, certfile=certfile, keyfile=keyfile,
+                                      password=password)
+    print(f"Πιστοποιητικό Client: {certfile}", flush=True)
+    print("Απαιτείται μία αρχική έγκριση του PEM από τον Director.", flush=True)
     print(f"Client ID: {client_id} | Αίθουσα: {room}", flush=True)
 
     def session(connection: socket.socket) -> None:
