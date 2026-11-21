@@ -150,14 +150,14 @@ class ControlProtocolTests(unittest.TestCase):
             receiver.close()
 
     def test_pre_tls_versions_rejected_both_directions(self):
-        self.assertEqual(CONNECTION_PROTOCOL, 5)
-        for old in (2, 3, 4):
+        self.assertEqual(CONNECTION_PROTOCOL, 6)
+        for old in (2, 3, 4, 5):
             with self.subTest(old_client=old):
                 sender, receiver = socket.socketpair()
                 try:
                     send_hello(sender, str(uuid.uuid4()), "C2627-Γ1", protocol=old)
                     with self.assertRaisesRegex(ProtocolMismatch,
-                                                f"Client v{old}, Director v5"):
+                                                f"Client v{old}, Director v6"):
                         receive_hello(receiver)
                 finally:
                     sender.close()
@@ -167,7 +167,7 @@ class ControlProtocolTests(unittest.TestCase):
                 try:
                     sender.sendall(WELCOME.pack(WELCOME_MAGIC, old, WELCOME_OK))
                     with self.assertRaisesRegex(ProtocolMismatch,
-                                                f"Client v5, Director v{old}"):
+                                                f"Client v6, Director v{old}"):
                         receive_welcome(receiver)
                 finally:
                     sender.close()
