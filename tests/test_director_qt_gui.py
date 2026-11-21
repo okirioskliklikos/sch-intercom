@@ -11,7 +11,8 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 try:
     from PySide6.QtWidgets import QApplication
     from director.qt_gui import (HINT_IDLE, HINT_LIVE, HINT_LIVE_MUTED, HINT_MUTED,
-                                 DirectorWindow, create_application, release_window)
+                                 DirectorWindow, create_application, current_metrics,
+                                 release_window)
 except ImportError as exc:  # pragma: no cover - εξαρτάται από το περιβάλλον
     QT_ERROR = str(exc)
 else:
@@ -163,13 +164,25 @@ class DirectorWindowTests(TestCase):
         window.refresh()
         self.assertEqual(window.connection_label.text(), "Εκτός λειτουργίας")
 
+    def test_sizes_follow_font_metrics(self):
+        window = self.make(self.STATUS)
+        m = current_metrics()
+        self.assertGreaterEqual(m.base_pt, theme.FONT_MIN_PT)
+        self.assertEqual(window.announce_button.RING, m.px(theme.ANNOUNCE_RING))
+        self.assertEqual(window.room_rows["Α1"].height(), m.px(theme.ROW_HEIGHT) + 1)
+        self.assertEqual(QApplication.font().pointSizeF(), m.font_pt())
+        available = window.screen().availableGeometry().size()
+        self.assertLessEqual(window.minimumWidth(), available.width())
+        self.assertLessEqual(window.minimumHeight(), available.height())
+
     def test_offscreen_render(self):
         window = self.make(self.STATUS)
         window.show()
         QApplication.processEvents()
         image = window.grab().toImage()
-        self.assertGreaterEqual(image.width(), 860)
-        self.assertGreaterEqual(image.height(), 600)
+        self.assertFalse(image.isNull())
+        self.assertGreaterEqual(image.width(), window.minimumWidth())
+        self.assertGreaterEqual(image.height(), window.minimumHeight())
 
 
 if __name__ == "__main__":

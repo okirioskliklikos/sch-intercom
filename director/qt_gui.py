@@ -46,6 +46,14 @@ NAV_ITEMS = [
 ]
 
 
+_metrics = theme.metrics_for(None)
+
+
+def px(mockup_px: float) -> int:
+    """Διάσταση του mockup στην κλίμακα της εφαρμογής (βλ. theme.Metrics)."""
+    return _metrics.px(mockup_px)
+
+
 def _repolish(widget: QWidget, **properties) -> None:
     changed = False
     for name, value in properties.items():
@@ -60,11 +68,10 @@ def _repolish(widget: QWidget, **properties) -> None:
 class AnnounceButton(QAbstractButton):
     """Μεγάλος κυκλικός διακόπτης ανακοίνωσης (ui-style.md §4)."""
 
-    RING = 176
-    CIRCLE = 140
-
     def __init__(self, parent=None):
         super().__init__(parent)
+        self.RING = px(theme.ANNOUNCE_RING)
+        self.CIRCLE = px(theme.ANNOUNCE_CIRCLE)
         self.live = False
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.setFixedSize(self.RING + 4, self.RING + 4)
@@ -93,7 +100,7 @@ class AnnounceButton(QAbstractButton):
         painter.drawEllipse(center, self.RING / 2, self.RING / 2)
         painter.setBrush(QColor(fill))
         painter.drawEllipse(center, self.CIRCLE / 2, self.CIRCLE / 2)
-        size = 60
+        size = px(theme.ANNOUNCE_ICON)
         icons.render(painter, "mic", theme.WHITE,
                      QRectF(center.x() - size / 2, center.y() - size / 2, size, size), 2.2)
         painter.end()
@@ -103,11 +110,11 @@ class LevelMeter(QWidget):
     """Σειρά στρογγυλεμένων τμημάτων· ενεργά σε `online`."""
 
     SEGMENTS = 12
-    GAP = 4
-    BAR = 6
 
     def __init__(self, parent=None):
         super().__init__(parent)
+        self.GAP = px(theme.METER_GAP)
+        self.BAR = px(theme.METER_BAR)
         self.fraction = 0.0
         self.setFixedHeight(self.BAR)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
@@ -135,8 +142,9 @@ class LevelMeter(QWidget):
 
 
 class StatusDot(QWidget):
-    def __init__(self, color: str, size: int = 8, parent=None):
+    def __init__(self, color: str, size: int | None = None, parent=None):
         super().__init__(parent)
+        size = size or px(theme.DOT)
         self.color = color
         self.setFixedSize(size, size)
 
@@ -162,7 +170,7 @@ class ElidedLabel(QLabel):
         self.full_text = text
         self.setToolTip(text)
         self.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
-        self.setMinimumWidth(40)
+        self.setMinimumWidth(px(40))
         self._elide()
 
     def resizeEvent(self, event) -> None:
@@ -183,12 +191,12 @@ class RoomRow(QWidget):
         self.room = room
         self.setObjectName("roomRow")
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
-        self.setFixedHeight(theme.ROW_HEIGHT + 1)
+        self.setFixedHeight(px(theme.ROW_HEIGHT) + 1)
         layout = QHBoxLayout(self)
-        layout.setContentsMargins(2, 0, 2, 0)
-        layout.setSpacing(9)
+        layout.setContentsMargins(px(2), 0, px(2), 0)
+        layout.setSpacing(px(9))
         self.checkbox = QCheckBox()
-        self.checkbox.setFixedWidth(18)  # χωρίς κείμενο: όχι κενό spacing
+        self.checkbox.setFixedWidth(px(18))  # χωρίς κείμενο: όχι κενό spacing
         self.checkbox.setAccessibleName(room)
         self.label = ElidedLabel(room)
         self.dot = StatusDot(theme.ROOM_DOT_OFFLINE)
@@ -216,9 +224,9 @@ def _card(title: QWidget | str) -> tuple[QFrame, QVBoxLayout]:
     card = QFrame()
     card.setObjectName("card")
     layout = QVBoxLayout(card)
-    pad = theme.CARD_PADDING
-    layout.setContentsMargins(pad + 2, pad, pad + 2, pad)
-    layout.setSpacing(8)
+    pad = px(theme.CARD_PADDING)
+    layout.setContentsMargins(pad + px(2), pad, pad + px(2), pad)
+    layout.setSpacing(px(8))
     if isinstance(title, str):
         label = QLabel(title)
         label.setObjectName("cardTitle")
@@ -245,8 +253,7 @@ class DirectorWindow(QMainWindow):
 
         self.setWindowTitle(WINDOW_TITLE)
         self.setWindowIcon(icons.app_icon())
-        self.resize(960, 680)
-        self.setMinimumSize(860, 600)
+        self._fit_to_screen(QSize(px(960), px(680)), QSize(px(860), px(600)))
 
         root = QWidget()
         root.setObjectName("page")
@@ -262,20 +269,30 @@ class DirectorWindow(QMainWindow):
         self.timer.start(REFRESH_MS)
         self.refresh()
 
+    def _fit_to_screen(self, size: QSize, minimum: QSize) -> None:
+        """Με μεγάλη γραμματοσειρά σε οθόνη 1366×768 το παράθυρο πρέπει να χωρά."""
+        screen = self.screen() or QApplication.primaryScreen()
+        if screen is not None:
+            available = screen.availableGeometry().size()
+            minimum = minimum.boundedTo(available)
+            size = size.boundedTo(available)
+        self.setMinimumSize(minimum)
+        self.resize(size)
+
     # --- κατασκευή ---------------------------------------------------------
     def _build_sidebar(self) -> QWidget:
         sidebar = QFrame()
         sidebar.setObjectName("sidebar")
-        sidebar.setFixedWidth(theme.SIDEBAR_WIDTH)
+        sidebar.setFixedWidth(px(theme.SIDEBAR_WIDTH))
         layout = QVBoxLayout(sidebar)
-        layout.setContentsMargins(10, 14, 10, 14)
-        layout.setSpacing(4)
+        layout.setContentsMargins(px(10), px(14), px(10), px(14))
+        layout.setSpacing(px(4))
 
         brand = QHBoxLayout()
-        brand.setContentsMargins(4, 2, 4, 14)
-        brand.setSpacing(8)
+        brand.setContentsMargins(px(4), px(2), px(4), px(14))
+        brand.setSpacing(px(8))
         logo = QLabel()
-        logo.setPixmap(icons.app_pixmap(22))
+        logo.setPixmap(icons.app_pixmap(px(theme.BRAND_ICON)))
         name = QLabel("School Intercom")
         name.setObjectName("brand")
         brand.addWidget(logo)
@@ -288,8 +305,8 @@ class DirectorWindow(QMainWindow):
             button.setObjectName("navItem")
             button.setCheckable(True)
             button.setIcon(icons.icon(key, theme.TEXT, selected_color=theme.PRIMARY,
-                                      disabled_color=theme.TEXT_MUTED))
-            button.setIconSize(QSize(16, 16))
+                                      disabled_color=theme.TEXT_MUTED, size=px(theme.ICON)))
+            button.setIconSize(QSize(px(theme.ICON), px(theme.ICON)))
             if key == "home":
                 button.setChecked(True)
                 # Η τρέχουσα σελίδα μένει επιλεγμένη.
@@ -307,8 +324,8 @@ class DirectorWindow(QMainWindow):
         page = QWidget()
         page.setObjectName("page")
         layout = QVBoxLayout(page)
-        layout.setContentsMargins(18, 14, 18, 16)
-        layout.setSpacing(theme.CARD_SPACING)
+        layout.setContentsMargins(px(18), px(14), px(18), px(16))
+        layout.setSpacing(px(theme.CARD_SPACING))
 
         header = QHBoxLayout()
         title = QLabel(PAGE_TITLE)
@@ -318,17 +335,17 @@ class DirectorWindow(QMainWindow):
         self.connection_dot = StatusDot(theme.CONNECTED)
         self.connection_label = QLabel("Συνδεδεμένος")
         self.connection_label.setObjectName("connection")
-        header.setSpacing(6)
+        header.setSpacing(px(6))
         header.addWidget(self.connection_dot)
         header.addWidget(self.connection_label)
         layout.addLayout(header)
 
         columns = QHBoxLayout()
-        columns.setSpacing(theme.CARD_SPACING)
+        columns.setSpacing(px(theme.CARD_SPACING))
         left = QVBoxLayout()
-        left.setSpacing(theme.CARD_SPACING)
+        left.setSpacing(px(theme.CARD_SPACING))
         left_widget = QWidget()
-        left_widget.setFixedWidth(theme.LEFT_COLUMN_WIDTH)
+        left_widget.setFixedWidth(px(theme.LEFT_COLUMN_WIDTH))
         left_widget.setLayout(left)
         left.setContentsMargins(0, 0, 0, 0)
         left.addWidget(self._build_announcement_card())
@@ -355,7 +372,7 @@ class DirectorWindow(QMainWindow):
         self.hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.hint.setWordWrap(True)
         layout.addWidget(self.hint)
-        layout.addSpacing(4)
+        layout.addSpacing(px(4))
 
         level_row = QHBoxLayout()
         level_label = QLabel("Στάθμη μικροφώνου")
@@ -372,12 +389,12 @@ class DirectorWindow(QMainWindow):
 
         self.meter = LevelMeter()
         layout.addWidget(self.meter)
-        layout.addSpacing(6)
+        layout.addSpacing(px(6))
 
         self.mute_button = QPushButton()
         self.mute_button.setObjectName("pill")
         self.mute_button.setCheckable(True)
-        self.mute_button.setIconSize(QSize(16, 16))
+        self.mute_button.setIconSize(QSize(px(theme.ICON), px(theme.ICON)))
         self.mute_button.toggled.connect(self.mute_toggled)
         layout.addWidget(self.mute_button, 0, Qt.AlignmentFlag.AlignHCenter)
         self._update_mute_button()
@@ -385,7 +402,7 @@ class DirectorWindow(QMainWindow):
 
     def _build_selection_card(self) -> QWidget:
         card, layout = _card("Επιλογή αιθουσών")
-        layout.setSpacing(6)
+        layout.setSpacing(px(6))
         self.radio_all = QRadioButton()
         self.radio_rooms = QRadioButton("Συγκεκριμένες αίθουσες")
         self.radio_group = QRadioButton("Ομάδα / Σενάριο")
@@ -406,7 +423,7 @@ class DirectorWindow(QMainWindow):
         title_row = QWidget()
         title_layout = QHBoxLayout(title_row)
         title_layout.setContentsMargins(0, 0, 0, 0)
-        title_layout.setSpacing(5)
+        title_layout.setSpacing(px(5))
         title = QLabel("Αίθουσες")
         title.setObjectName("cardTitle")
         self.online_count = QLabel()
@@ -425,7 +442,7 @@ class DirectorWindow(QMainWindow):
         self.room_grid_widget.setObjectName("roomGrid")
         self.room_grid = QGridLayout(self.room_grid_widget)
         self.room_grid.setContentsMargins(0, 0, 0, 0)
-        self.room_grid.setHorizontalSpacing(16)
+        self.room_grid.setHorizontalSpacing(px(16))
         self.room_grid.setVerticalSpacing(0)
         self.room_scroll = QScrollArea()
         self.room_scroll.setWidgetResizable(True)
@@ -578,7 +595,8 @@ class DirectorWindow(QMainWindow):
         self.mute_button.setText("Άρση σίγασης" if muted else "Σίγαση μικροφώνου")
         name = "mic" if muted else "mic_off"
         self.mute_button.setIcon(icons.icon(name, theme.PRIMARY if muted else theme.TEXT,
-                                            disabled_color=theme.TEXT_MUTED))
+                                            disabled_color=theme.TEXT_MUTED,
+                                            size=px(theme.ICON)))
 
     def closeEvent(self, event) -> None:
         self.timer.stop()
@@ -586,13 +604,36 @@ class DirectorWindow(QMainWindow):
         super().closeEvent(event)
 
 
-def create_application(argv: list[str] | None = None) -> QApplication:
+def system_font_pt(app: QApplication) -> float | None:
+    """Μέγεθος γραμματοσειράς συστήματος σε points (None αν είναι άγνωστο)."""
+    font = app.font()
+    if font.pointSizeF() > 0:
+        return font.pointSizeF()
+    screen = app.primaryScreen()
+    if font.pixelSize() > 0 and screen is not None:
+        return font.pixelSize() * 72 / screen.logicalDotsPerInch()
+    return None
+
+
+def create_application(argv: list[str] | None = None, *,
+                       base_pt: float | None = None) -> QApplication:
+    """QApplication με το κοινό στυλ. `base_pt` μόνο για δοκιμές/στιγμιότυπα."""
+    global _metrics
     app = QApplication.instance() or QApplication(argv or [])
     app.setApplicationName("School Intercom")
     app.setWindowIcon(icons.app_icon())
     app.setStyle("Fusion")  # ίδια σχεδίαση στοιχείων σε Windows/Linux
-    app.setStyleSheet(theme.stylesheet())
+    _metrics = (theme.Metrics(base_pt) if base_pt else
+                theme.metrics_for(system_font_pt(app)))
+    font = app.font()
+    font.setPointSizeF(_metrics.font_pt())
+    app.setFont(font)
+    app.setStyleSheet(theme.stylesheet(_metrics))
     return app
+
+
+def current_metrics() -> theme.Metrics:
+    return _metrics
 
 
 def release_window(window: QWidget) -> None:

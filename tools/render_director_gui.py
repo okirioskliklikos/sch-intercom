@@ -45,18 +45,25 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--out-dir", type=Path, default=Path("screenshots"))
     parser.add_argument("--scale", type=float, default=2.0, help="device pixel ratio")
+    parser.add_argument("--base-pt", type=float, default=None,
+                        help="βάση γραμματοσειράς σε pt (προεπιλογή: του συστήματος, ελάχιστο 12)")
     args = parser.parse_args()
     os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
     os.environ["QT_SCALE_FACTOR"] = str(args.scale)
 
     from PySide6.QtCore import QEventLoop, QTimer
     from director import gui
-    from director.qt_gui import DirectorWindow, create_application, release_window
+    from director.qt_gui import (DirectorWindow, create_application, current_metrics,
+                                 release_window)
 
-    app = create_application()
+    app = create_application(base_pt=args.base_pt)
     broadcaster = FakeBroadcaster(MOCKUP_ROOMS)
     microphone = gui.DirectorMicrophone(fake_stream(0.12), broadcaster)
     window = DirectorWindow(broadcaster, microphone)
+    # Η offscreen «οθόνη» είναι 800×800· χωρίς περιορισμό, όπως σε κανονική οθόνη.
+    m = current_metrics()
+    window.setMinimumSize(m.px(860), m.px(600))
+    window.resize(m.px(960), m.px(680))
     window.show()
 
     def settle(ms: int = 300) -> None:

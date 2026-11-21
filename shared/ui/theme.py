@@ -9,6 +9,8 @@ tests/test_ui_theme.py ελέγχει ότι τα δύο συμφωνούν.
 """
 from __future__ import annotations
 
+import math
+from dataclasses import dataclass
 from pathlib import Path
 
 #: Αρχεία SVG (εικονίδιο εφαρμογής, τικ checkbox, κουκκίδα radio).
@@ -62,7 +64,45 @@ METER_OFF = CARD_BORDER
 DISABLED_FILL = TEXT_MUTED
 DISABLED_RING = CARD_BORDER
 
-# --- Διαστάσεις (ui-style.md §2, §5) ------------------------------------
+# --- Μέγεθος γραμμάτων και κλίμακα (ui-style.md §2) ---------------------
+# Βάση = γραμματοσειρά του συστήματος σε points, αλλά όχι κάτω από
+# FONT_MIN_PT. Όλες οι διαστάσεις παρακάτω είναι σε pixel του mockup (βάση
+# 13px = 9,75pt) και πολλαπλασιάζονται με την ίδια κλίμακα, ώστε μεγαλύτερα
+# γράμματα να μη χωρούν σε στενότερα στοιχεία.
+FONT_MIN_PT = 12.0
+MOCKUP_BASE_PT = 9.75
+FONT_SMALL = 0.92        # pill «Προεπισκόπηση»
+FONT_NAV = 1.08          # αριστερό μενού
+FONT_CARD_TITLE = 1.15   # τίτλος κάρτας
+FONT_PAGE_TITLE = 1.4    # τίτλος σελίδας
+
+
+@dataclass(frozen=True)
+class Metrics:
+    """Μεγέθη γραμμάτων/στοιχείων για μια βάση γραμματοσειράς (points)."""
+
+    base_pt: float
+
+    @property
+    def scale(self) -> float:
+        return self.base_pt / MOCKUP_BASE_PT
+
+    def px(self, mockup_px: float) -> int:
+        """Διάσταση του mockup (px) στην τρέχουσα κλίμακα."""
+        return max(1, math.floor(mockup_px * self.scale + 0.5))
+
+    def font_pt(self, ratio: float = 1.0) -> float:
+        return round(self.base_pt * ratio, 2)
+
+
+def metrics_for(system_pt: float | None) -> Metrics:
+    """Βάση από το σύστημα· άγνωστο ή μικρότερο από FONT_MIN_PT → FONT_MIN_PT."""
+    if system_pt is None or system_pt <= 0:
+        system_pt = FONT_MIN_PT
+    return Metrics(max(float(system_pt), FONT_MIN_PT))
+
+
+# --- Διαστάσεις στο μέγεθος του mockup (ui-style.md §2, §5) --------------
 CARD_RADIUS = 8
 NAV_RADIUS = 6
 CHECK_RADIUS = 3
@@ -71,19 +111,29 @@ CARD_SPACING = 14
 ROW_HEIGHT = 30
 SIDEBAR_WIDTH = 200
 LEFT_COLUMN_WIDTH = 290
-FONT_BASE_PX = 13
-FONT_CARD_TITLE_PX = 15
-FONT_PAGE_TITLE_PX = 18
+ANNOUNCE_RING = 176
+ANNOUNCE_CIRCLE = 140
+ANNOUNCE_ICON = 60
+ICON = 16
+BRAND_ICON = 22
+DOT = 8
+METER_BAR = 6
+METER_GAP = 4
 
 
-def stylesheet() -> str:
+def stylesheet(metrics: Metrics | None = None) -> str:
     """Κοινό QSS. Τα widgets ορίζουν μόνο objectName/ιδιότητες, όχι χρώματα."""
+    m = metrics or metrics_for(None)
+    px = m.px
+    # Πλήρως στρογγυλεμένα pill: ακτίνα = μισό ελάχιστο ύψος (Qt αγνοεί μεγαλύτερη).
+    pill_radius = (2 * px(6) + px(20) + 2) // 2
+    pill_small_radius = (2 * px(2) + px(16) + 2) // 2
     check = (ASSETS_DIR / "check.svg").as_posix()
     radio_dot = (ASSETS_DIR / "radio_dot.svg").as_posix()
     return f"""
 QWidget {{
     color: {TEXT};
-    font-size: {FONT_BASE_PX}px;
+    font-size: {m.font_pt()}pt;
 }}
 QMainWindow, #page {{
     background: {WINDOW_BG};
@@ -93,17 +143,17 @@ QMainWindow, #page {{
     border-right: 1px solid {CARD_BORDER};
 }}
 #brand {{
-    font-size: {FONT_CARD_TITLE_PX}px;
+    font-size: {m.font_pt(FONT_CARD_TITLE)}pt;
     font-weight: 600;
 }}
 #navItem {{
     text-align: left;
-    padding: 7px 10px;
+    padding: {px(7)}px {px(10)}px;
     border: 1px solid transparent;
-    border-radius: {NAV_RADIUS}px;
+    border-radius: {px(NAV_RADIUS)}px;
     background: transparent;
     color: {TEXT};
-    font-size: 14px;
+    font-size: {m.font_pt(FONT_NAV)}pt;
 }}
 #navItem:checked {{
     background: {PRIMARY_LIGHT};
@@ -115,20 +165,20 @@ QMainWindow, #page {{
     color: {TEXT_MUTED};
 }}
 #pageTitle {{
-    font-size: {FONT_PAGE_TITLE_PX}px;
+    font-size: {m.font_pt(FONT_PAGE_TITLE)}pt;
     font-weight: 600;
 }}
 #card {{
     background: {CARD_BG};
     border: 1px solid {CARD_BORDER};
-    border-radius: {CARD_RADIUS}px;
+    border-radius: {px(CARD_RADIUS)}px;
 }}
 #cardTitle {{
-    font-size: {FONT_CARD_TITLE_PX}px;
+    font-size: {m.font_pt(FONT_CARD_TITLE)}pt;
     font-weight: 600;
 }}
 #onlineCount {{
-    font-size: {FONT_CARD_TITLE_PX}px;
+    font-size: {m.font_pt(FONT_CARD_TITLE)}pt;
     font-weight: 600;
     color: {ONLINE};
 }}
@@ -155,15 +205,15 @@ QMainWindow, #page {{
     color: {TEXT};
 }}
 #pill {{
-    border-radius: 17px;
-    padding: 6px 16px;
-    min-height: 20px;
+    border-radius: {pill_radius}px;
+    padding: {px(6)}px {px(16)}px;
+    min-height: {px(20)}px;
 }}
 #pillSmall {{
-    border-radius: 10px;
-    padding: 2px 9px;
-    min-height: 16px;
-    font-size: 12px;
+    border-radius: {pill_small_radius}px;
+    padding: {px(2)}px {px(9)}px;
+    min-height: {px(16)}px;
+    font-size: {m.font_pt(FONT_SMALL)}pt;
 }}
 #pill:checked, #pillSmall:checked {{
     background: {PRIMARY_LIGHT};
@@ -176,23 +226,23 @@ QMainWindow, #page {{
     border-color: {CARD_BORDER};
 }}
 QCheckBox, QRadioButton {{
-    spacing: 9px;
+    spacing: {px(9)}px;
     background: transparent;
 }}
 QRadioButton:disabled {{
     color: {TEXT_MUTED};
 }}
 QCheckBox::indicator, QRadioButton::indicator {{
-    width: 14px;
-    height: 14px;
+    width: {px(14)}px;
+    height: {px(14)}px;
     background: {CARD_BG};
     border: 1.5px solid {CONTROL_BORDER};
 }}
 QCheckBox::indicator {{
-    border-radius: {CHECK_RADIUS}px;
+    border-radius: {px(CHECK_RADIUS)}px;
 }}
 QRadioButton::indicator {{
-    border-radius: 8px;
+    border-radius: {px(8)}px;
 }}
 QCheckBox::indicator:checked, QRadioButton::indicator:checked {{
     background: {PRIMARY};
