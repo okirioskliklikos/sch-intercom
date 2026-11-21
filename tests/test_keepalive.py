@@ -147,24 +147,29 @@ class ControlProtocolTests(unittest.TestCase):
             sender.close()
             receiver.close()
 
-    def test_version_2_and_3_rejected_both_directions(self):
-        self.assertEqual(CONNECTION_PROTOCOL, 3)
-        sender, receiver = socket.socketpair()
-        try:
-            send_hello(sender, str(uuid.uuid4()), "C2627-Γ1", protocol=2)
-            with self.assertRaisesRegex(ProtocolMismatch, "Client v2, Director v3"):
-                receive_hello(receiver)
-        finally:
-            sender.close()
-            receiver.close()
-        sender, receiver = socket.socketpair()
-        try:
-            sender.sendall(WELCOME.pack(WELCOME_MAGIC, 2, WELCOME_OK))
-            with self.assertRaisesRegex(ProtocolMismatch, "Client v3, Director v2"):
-                receive_welcome(receiver)
-        finally:
-            sender.close()
-            receiver.close()
+    def test_pre_tls_versions_rejected_both_directions(self):
+        self.assertEqual(CONNECTION_PROTOCOL, 4)
+        for old in (2, 3):
+            with self.subTest(old_client=old):
+                sender, receiver = socket.socketpair()
+                try:
+                    send_hello(sender, str(uuid.uuid4()), "C2627-Γ1", protocol=old)
+                    with self.assertRaisesRegex(ProtocolMismatch,
+                                                f"Client v{old}, Director v4"):
+                        receive_hello(receiver)
+                finally:
+                    sender.close()
+                    receiver.close()
+            with self.subTest(old_director=old):
+                sender, receiver = socket.socketpair()
+                try:
+                    sender.sendall(WELCOME.pack(WELCOME_MAGIC, old, WELCOME_OK))
+                    with self.assertRaisesRegex(ProtocolMismatch,
+                                                f"Client v4, Director v{old}"):
+                        receive_welcome(receiver)
+                finally:
+                    sender.close()
+                    receiver.close()
 
     def test_standby_announcement_stop_standby_without_reconnect(self):
         sender, receiver = socket.socketpair()
