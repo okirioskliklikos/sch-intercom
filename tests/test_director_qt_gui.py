@@ -84,7 +84,8 @@ class DirectorWindowTests(TestCase):
         announce = window.announcement_card
         rooms = window.rooms_card
         selection = window.selection_card
-        self.assertLess(announce.geometry().right(), rooms.mapTo(window, rooms.rect().topLeft()).x())
+        self.assertLess(announce.mapTo(window, announce.rect().topRight()).x(),
+                        rooms.mapTo(window, rooms.rect().topLeft()).x())
         self.assertLess(rooms.mapTo(window, rooms.rect().bottomLeft()).y(),
                         selection.mapTo(window, selection.rect().topLeft()).y())
         self.assertAlmostEqual(announce.height(), window.rooms_area.height(), delta=2)
