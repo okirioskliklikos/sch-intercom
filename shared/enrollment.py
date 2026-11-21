@@ -194,8 +194,9 @@ class EnrollmentServer:
             if listener is not None:
                 listener.close()
             for pending in self._pending.values():
-                pending.result = "denied"
-                pending.event.set()
+                if not pending.event.is_set():
+                    pending.result = "denied"
+                    pending.event.set()
         if thread is not None and threading.current_thread() is not thread:
             thread.join(timeout=1)
         self.log("[Εγγραφή] Η λειτουργία εγγραφής σταμάτησε.")
@@ -254,9 +255,9 @@ class EnrollmentServer:
                                           "director_nonce": nonce})
                     self.log(f"[Εγγραφή] {request_id} | {unsigned['name']} | "
                              f"{unsigned['room']} | SAS {code}")
-                    pending.event.wait(REQUEST_TTL)
+                    completed = pending.event.wait(REQUEST_TTL)
                     with self._lock:
-                        if time.monotonic() - pending.created >= REQUEST_TTL:
+                        if not completed:
                             pending.result = "expired"
                         result = pending.result
                     send_message(stream, {"type": result, "request_id": request_id})
