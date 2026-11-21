@@ -88,10 +88,13 @@ class DirectorWindowTests(TestCase):
                         rooms.mapTo(window, rooms.rect().topLeft()).x())
         self.assertLess(rooms.mapTo(window, rooms.rect().bottomLeft()).y(),
                         selection.mapTo(window, selection.rect().topLeft()).y())
-        self.assertAlmostEqual(announce.height(), window.rooms_area.height(), delta=2)
+        self.assertAlmostEqual(announce.height(), window.rooms_card.height(), delta=2)
         self.assertAlmostEqual(
             announce.mapTo(window, announce.rect().bottomLeft()).y(),
-            selection.mapTo(window, selection.rect().bottomLeft()).y(), delta=2)
+            rooms.mapTo(window, rooms.rect().bottomLeft()).y(), delta=2)
+        self.assertLess(
+            announce.mapTo(window, announce.rect().bottomLeft()).y(),
+            selection.mapTo(window, selection.rect().topLeft()).y())
 
         # Ο κύκλος διατηρεί την εγκεκριμένη διάμετρο και κεντράρεται.
         button = window.announce_button
@@ -100,6 +103,47 @@ class DirectorWindowTests(TestCase):
                                announce.mapTo(window, announce.rect().center()).x(),
                                delta=3)
         self.assertGreater(announce.width(), button.width())
+
+    def test_meter_top_right_and_mute_near_microphone(self):
+        window = self.make(self.STATUS)
+        window.show()
+        QApplication.processEvents()
+        button = window.announce_button
+        preview = window.preview_button
+        meter = window.meter
+        mute = window.mute_button
+        hint = window.hint
+
+        self.assertLess(preview.mapTo(window, preview.rect().topLeft()).y(),
+                        button.mapTo(window, button.rect().topLeft()).y())
+        self.assertGreater(preview.mapTo(window, preview.rect().topLeft()).x(),
+                           button.mapTo(window, button.rect().center()).x())
+        self.assertLess(meter.mapTo(window, meter.rect().bottomLeft()).y(),
+                        button.mapTo(window, button.rect().topLeft()).y())
+        gap = (mute.mapTo(window, mute.rect().topLeft()).y() -
+               hint.mapTo(window, hint.rect().bottomLeft()).y())
+        self.assertGreaterEqual(gap, 0)
+        self.assertLess(gap, current_metrics().px(20))
+        self.assertEqual(button.width(), button.RING + 4)
+
+    def test_room_title_and_first_row_always_at_top(self):
+        window = self.make([("id-1", "Γ1", True, 0.1)])
+        window.show()
+        QApplication.processEvents()
+        window._layout_rooms()
+        QApplication.processEvents()
+        title = window.rooms_title
+        row = window.room_rows["Γ1"]
+        card = window.rooms_card
+        title_y = title.mapTo(window, title.rect().topLeft()).y()
+        row_y = row.mapTo(window, row.rect().topLeft()).y()
+        card_y = card.mapTo(window, card.rect().topLeft()).y()
+        self.assertGreaterEqual(title_y, card_y)
+        self.assertLess(title_y - card_y, current_metrics().px(40))
+        self.assertGreater(row_y, title_y)
+        self.assertLess(row_y - title_y, current_metrics().px(95))
+        self.assertLess(row.mapTo(window, row.rect().topLeft()).x(),
+                        card.mapTo(window, card.rect().center()).x())
 
     def test_status_dot_at_far_right_even_with_short_room_name(self):
         window = self.make([("id-1", "Γ1", True, 0.1)])
