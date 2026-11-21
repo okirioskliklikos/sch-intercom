@@ -1,43 +1,32 @@
-"""Προσωρινό παράθυρο δοκιμών Director. Χωρίς αλλαγή πρωτοκόλλου.
+"""Λογική της κεντρικής οθόνης Director, ανεξάρτητη από Qt. Χωρίς αλλαγή πρωτοκόλλου.
 
-Το tkinter τρέχει στο main thread. Οι εργασίες δικτύου/μικροφώνου παραμένουν
-στα υπάρχοντα worker threads. Δεν καλούνται tkinter widgets από workers.
+Το παράθυρο PySide6 βρίσκεται στο `director/qt_gui.py` και καλεί μόνο τις
+κλάσεις αυτού του αρχείου, ώστε η συμπεριφορά (στόχοι, μικρόφωνο, Mute,
+προεπισκόπηση, σφάλματα) να ελέγχεται χωρίς οθόνη και χωρίς κάρτα ήχου.
+
+Μικρόφωνο (development.md §8, requirements.md §9):
+- Στην αναμονή η συσκευή είναι κλειστή. Ανοίγει μόνο για ζωντανή ανακοίνωση ή
+  προεπισκόπηση, και ποτέ για προεπισκόπηση όσο ισχύει Mute.
+- Mute κατά την ανακοίνωση: η συσκευή μένει ανοιχτή, απλώς δεν στέλνεται φωνή
+  (χωρίς STREAM_STOP). Mute εκτός ανακοίνωσης κλείνει τη συσκευή.
+- Σφάλμα μικροφώνου σταματά την ανακοίνωση/προεπισκόπηση και εμφανίζεται.
 """
 from __future__ import annotations
 
-import socket
+import math
 import threading
 import time
+from collections.abc import Callable
 
-from director.broadcast import AudioBroadcaster, MAX_CLIENTS
-from shared.discovery import announce, director_id
+from director.broadcast import AudioBroadcaster
 
+#: Στάθμη παλαιότερη από αυτό θεωρείται σιωπή (ο μετρητής μηδενίζεται).
+LEVEL_STALE_SECONDS = 0.3
+#: Κλίμακα μετρητή: -48 dBFS (κενός) έως 0 dBFS (γεμάτος).
+METER_FLOOR_DB = -48.0
 
-MIC_RETRY_SECONDS = 2.0
-
-
-def run_microphone(stream_microphone, broadcaster, *, stop: threading.Event,
-                   ready: threading.Event, set_error,
-                   retry_seconds: float = MIC_RETRY_SECONDS, **kwargs) -> None:
-    """Τρέχει το μικρόφωνο μέχρι το stop και ξαναδοκιμάζει μετά από σφάλμα.
-
-    Σφάλμα μικροφώνου ΔΕΝ σταματά discovery/accept: οι Clients συνεχίζουν να
-    βρίσκουν και να συνδέονται στον Director. Το GUI βλέπει το σφάλμα και
-    σταματά την ανακοίνωση· μόλις το μικρόφωνο ανοίξει ξανά, το σφάλμα σβήνει.
-    """
-    def on_ready() -> None:
-        set_error(None)
-        ready.set()
-
-    while not stop.is_set():
-        try:
-            stream_microphone(broadcaster, stop=stop, ready_callback=on_ready, **kwargs)
-        except Exception as exc:
-            ready.clear()
-            set_error(str(exc) or exc.__class__.__name__)
-        else:
-            ready.clear()
-        stop.wait(retry_seconds)
+MODE_ALL = "all"
+MODE_ROOMS = "rooms"
 
 
 class AnnouncementControls:
@@ -77,206 +66,284 @@ def summarize_rooms(status):
     return [(room, online, offline) for room, (online, offline) in sorted(rooms.items())]
 
 
-def run_gui(args, *, accept_clients, stream_microphone) -> None:
-    import tkinter as tk
-    from tkinter import ttk, messagebox
+def room_states(status) -> list[tuple[str, bool]]:
+    """(αίθουσα, online). Αρκεί ένας online Client για online αίθουσα."""
+    return [(room, online > 0) for room, online, _ in summarize_rooms(status)]
 
-    root = tk.Tk()
-    root.title("School Intercom — Director (δοκιμές)")
-    root.minsize(680, 560)
-    root.geometry("820x650")
 
-    stop = threading.Event()
-    broadcaster = AudioBroadcaster(max_clients=MAX_CLIENTS,
-                                   on_event=lambda s: print(s, flush=True))
-    controls = AnnouncementControls(broadcaster)
-    identifier = director_id(args.director_id_file)
-    threads = []
-    peak_lock = threading.Lock()
-    peak = [0.0, 0.0]  # στιγμιαία στάθμη / monotonic τελευταίας λήψης
-    mic_error = [None]
-    mic_ready = threading.Event()
+def choose_targets(mode: str, checked: set[str], status) -> set[str] | None:
+    """Στόχοι για `AnnouncementControls.start`· ValueError με μήνυμα για τον χρήστη."""
+    online_rooms = {room for room, online in room_states(status) if online}
+    if not online_rooms:
+        raise ValueError("Δεν υπάρχει συνδεδεμένος Client.")
+    if mode == MODE_ALL:
+        return None
+    if mode != MODE_ROOMS:
+        raise ValueError("Μη διαθέσιμη επιλογή αποδεκτών.")
+    if not checked:
+        raise ValueError("Επίλεξε τουλάχιστον μία αίθουσα.")
+    if not checked & online_rooms:
+        raise ValueError("Καμία επιλεγμένη αίθουσα δεν έχει online Client.")
+    return set(checked)
 
-    def update_peak(value: float) -> None:
-        with peak_lock:
-            peak[:] = [value, time.monotonic()]
 
-    def set_mic_error(message: str | None) -> None:
-        mic_error[0] = message
+def room_display_name(room: str, max_chars: int = 18) -> str:
+    """Όνομα αίθουσας ως 18 χαρακτήρες· από τον 19ο «…» (ui-style.md §5)."""
+    return room if len(room) <= max_chars else room[:max_chars].rstrip() + "…"
 
-    def mic_worker() -> None:
-        run_microphone(stream_microphone, broadcaster, stop=stop, ready=mic_ready,
-                       set_error=set_mic_error, device=args.device,
-                       latency=args.latency, level_callback=update_peak)
 
-    main = ttk.Frame(root, padding=20)
-    main.pack(fill="both", expand=True)
-    heading = ttk.Label(main, text="School Intercom", font=("Sans", 20, "bold"))
-    heading.pack(anchor="w")
-    ttk.Label(main, text="Director · Προσωρινό περιβάλλον πραγματικών δοκιμών").pack(anchor="w", pady=(0, 18))
+def room_rows_per_column(count: int, rows_fit: int) -> int:
+    """Γραμμές ανά στήλη στην κάρτα αιθουσών (2 στήλες, ui-style.md §5).
 
-    state_var = tk.StringVar(value="Αναμονή — δεν μεταδίδεται φωνή")
-    state_label = ttk.Label(main, textvariable=state_var, font=("Sans", 13, "bold"))
-    state_label.pack(anchor="w", pady=(0, 10))
+    Η πρώτη στήλη γεμίζει όσο χωρά στο ύψος (`rows_fit`) και μόνο τα υπόλοιπα
+    πάνε στη δεύτερη. Αν δεν χωρούν ούτε σε δύο γεμάτες στήλες, μοιράζονται
+    ισόποσα και η λίστα κυλά κατακόρυφα.
+    """
+    if count <= 0:
+        return 0
+    rows_fit = max(1, rows_fit)
+    if count <= 2 * rows_fit:
+        return min(count, rows_fit)
+    return -(-count // 2)
 
-    choice = tk.StringVar(value="all")
-    recipient_frame = ttk.LabelFrame(main, text="Παραλήπτες", padding=12)
-    recipient_frame.pack(fill="x", pady=(0, 14))
-    radio_all = ttk.Radiobutton(recipient_frame, text="Όλες οι διαθέσιμες αίθουσες",
-                                variable=choice, value="all")
-    radio_all.pack(anchor="w")
-    radio_rooms = ttk.Radiobutton(recipient_frame, text="Επιλεγμένες αίθουσες",
-                                  variable=choice, value="rooms")
-    radio_rooms.pack(anchor="w", pady=(5, 4))
-    room_list = tk.Listbox(recipient_frame, height=5, selectmode="multiple",
-                           exportselection=False)
-    room_list.pack(fill="x", pady=(2, 0))
-    ttk.Label(recipient_frame, text="Ctrl/Shift + κλικ για πολλαπλή επιλογή. "
-              "Η επιλογή κλειδώνει όσο διαρκεί η ανακοίνωση.").pack(anchor="w", pady=(5, 0))
 
-    announce_button = tk.Button(main, text="Έναρξη ανακοίνωσης", font=("Sans", 15, "bold"),
-                                padx=18, pady=12, bg="#165b40", fg="white",
-                                activebackground="#237450", activeforeground="white")
-    announce_button.pack(fill="x", pady=(0, 16))
+def meter_fraction(peak: float) -> float:
+    """Κορυφή 0..1 → 0..1 σε λογαριθμική κλίμακα, όπως ακούγεται η φωνή."""
+    if peak <= 0:
+        return 0.0
+    db = 20 * math.log10(min(1.0, peak))
+    return max(0.0, min(1.0, 1 - db / METER_FLOOR_DB))
 
-    meter_frame = ttk.LabelFrame(main, text="Στάθμη μικροφώνου", padding=10)
-    meter_frame.pack(fill="x", pady=(0, 16))
-    meter = ttk.Progressbar(meter_frame, orient="horizontal", maximum=100)
-    meter.pack(fill="x")
-    meter_label = ttk.Label(meter_frame, text="Μικρόφωνο: αναμονή")
-    meter_label.pack(anchor="w", pady=(5, 0))
 
-    clients_frame = ttk.LabelFrame(main, text="Συνδεδεμένοι Clients", padding=10)
-    clients_frame.pack(fill="both", expand=True)
-    count_var = tk.StringVar(value="Online: 0 · Offline: 0")
-    ttk.Label(clients_frame, textvariable=count_var).pack(anchor="w")
-    tree = ttk.Treeview(clients_frame, columns=("room", "state", "heartbeat"), show="headings", height=7)
-    tree.heading("room", text="Αίθουσα")
-    tree.heading("state", text="Κατάσταση")
-    tree.heading("heartbeat", text="Τελευταίο heartbeat")
-    tree.column("room", width=180)
-    tree.column("state", width=110)
-    tree.column("heartbeat", width=185)
-    tree.pack(fill="both", expand=True, pady=(6, 0))
+def _now_us() -> int:
+    # Ίδιο ρολόι με το timestamp λήψης του director.main.stream_microphone.
+    return time.monotonic_ns() // 1000
 
-    room_names = []
 
-    def toggle():
-        try:
-            if controls.active:
-                controls.stop()
-            else:
-                if not mic_ready.is_set() or mic_error[0]:
-                    messagebox.showwarning("Μικρόφωνο", "Το μικρόφωνο δεν είναι διαθέσιμο.")
-                    return
-                status = broadcaster.status_snapshot()
-                online_rooms = {room for _, room, online, _ in status if online}
-                if not online_rooms:
-                    messagebox.showwarning("Παραλήπτες", "Δεν υπάρχει συνδεδεμένος Client.")
-                    return
-                if choice.get() == "all":
-                    controls.start()
-                else:
-                    selected = {room_names[i] for i in room_list.curselection()}
-                    if not selected:
-                        messagebox.showwarning("Παραλήπτες", "Επίλεξε τουλάχιστον μία αίθουσα.")
-                        return
-                    if not (selected & online_rooms):
-                        messagebox.showwarning("Παραλήπτες", "Καμία επιλεγμένη αίθουσα δεν έχει Online Client.")
-                        return
-                    controls.start(selected)
-        except Exception as exc:
-            messagebox.showerror("Ανακοίνωση", str(exc))
-        redraw_state()
+class VoiceGate:
+    """Μπαίνει στη θέση του broadcaster για το μικρόφωνο.
 
-    announce_button.configure(command=toggle)
+    Περνά μπλοκ μόνο όταν είναι ανοιχτή, και μόνο αν το μπλοκ καταγράφηκε
+    *μετά* το τελευταίο άνοιγμα: ήχος της προεπισκόπησης ή του Mute που
+    περίμενε στην ουρά του μικροφώνου δεν στέλνεται ποτέ. Το κλείσιμο κρατά
+    το ίδιο lock με το publish, άρα μετά το `close()` δεν περνά κανένα μπλοκ.
+    """
 
-    def redraw_state():
-        if controls.active:
-            state_var.set("ΑΝΑΚΟΙΝΩΣΗ ΣΕ ΕΞΕΛΙΞΗ")
-            announce_button.configure(text="Λήξη ανακοίνωσης", bg="#ae3333",
-                                      activebackground="#c94444")
-        else:
-            state_var.set("Αναμονή — δεν μεταδίδεται φωνή")
-            announce_button.configure(text="Έναρξη ανακοίνωσης", bg="#165b40",
-                                      activebackground="#237450")
-        room_list.configure(state="disabled" if controls.active else "normal")
-        radio_all.configure(state="disabled" if controls.active else "normal")
-        radio_rooms.configure(state="disabled" if controls.active else "normal")
+    def __init__(self, broadcaster, clock_us: Callable[[], int] = _now_us):
+        self.broadcaster = broadcaster
+        self._clock_us = clock_us
+        self._lock = threading.Lock()
+        self._open = False
+        self._since_us = 0
 
-    def refresh():
-        if not root.winfo_exists():
+    @property
+    def is_open(self) -> bool:
+        with self._lock:
+            return self._open
+
+    def open(self) -> None:
+        with self._lock:
+            self._open = True
+            self._since_us = self._clock_us()
+
+    def close(self) -> None:
+        with self._lock:
+            self._open = False
+
+    def publish(self, pcm: bytes, captured_us: int) -> None:
+        with self._lock:
+            if self._open and captured_us >= self._since_us:
+                self.broadcaster.publish(pcm, captured_us)
+
+
+class _MicSession:
+    def __init__(self, previous: "_MicSession | None"):
+        self.stop = threading.Event()
+        self.ready = threading.Event()
+        self.previous = previous
+        self.thread: threading.Thread | None = None
+
+
+class DirectorMicrophone:
+    """Ανακοίνωση, προεπισκόπηση και Mute. Οι μέθοδοι καλούνται από το GUI thread.
+
+    Το worker thread του μικροφώνου επικοινωνεί μόνο μέσω lock/Events· το GUI
+    καλεί `poll()` περιοδικά για να δει σφάλματα.
+    """
+
+    def __init__(self, stream_microphone, broadcaster, *,
+                 controls: AnnouncementControls | None = None,
+                 clock: Callable[[], float] = time.monotonic, **stream_kwargs):
+        self._stream = stream_microphone
+        self.controls = controls or AnnouncementControls(broadcaster)
+        self.gate = VoiceGate(broadcaster)
+        self._stream_kwargs = stream_kwargs
+        self._clock = clock
+        self._lock = threading.Lock()
+        self._session: _MicSession | None = None
+        self._last: _MicSession | None = None
+        self._failure: tuple[_MicSession, str] | None = None
+        self._peak = (0.0, -math.inf)
+        self.muted = False
+        self.preview = False
+        self.error: str | None = None
+
+    # --- κατάσταση ---------------------------------------------------------
+    @property
+    def live(self) -> bool:
+        return self.controls.active
+
+    @property
+    def device_open(self) -> bool:
+        """Ζητήθηκε ανοιχτή συσκευή (μπορεί να ανοίγει ακόμη)."""
+        return self._session is not None
+
+    @property
+    def ready(self) -> bool:
+        session = self._session
+        return session is not None and session.ready.is_set()
+
+    @property
+    def can_start(self) -> bool:
+        return not self.live and not self.muted
+
+    @property
+    def can_preview(self) -> bool:
+        return not self.live and not self.muted
+
+    def level(self) -> float:
+        """Κορυφή 0..1 μόνο όταν υπάρχει ενεργή, μη σιγασμένη λήψη· αλλιώς 0."""
+        if self.muted or not self.ready:
+            return 0.0
+        with self._lock:
+            value, when = self._peak
+        if self._clock() - when > LEVEL_STALE_SECONDS:
+            return 0.0
+        return value
+
+    # --- ενέργειες ---------------------------------------------------------
+    def start_announcement(self, rooms: set[str] | None) -> None:
+        if self.live:
             return
-        status = broadcaster.status_snapshot()
-        online = sum(1 for _, _, is_online, _ in status if is_online)
-        count_var.set(f"Online: {online} · Offline: {len(status) - online}")
-        existing = set(tree.get_children())
-        current = set()
-        for uid, room, is_online, age in status:
-            current.add(uid)
-            values = (room, "Online" if is_online else "Offline",
-                      f"{age:.1f} s πριν")
-            if uid in existing:
-                tree.item(uid, values=values)
+        if self.muted:
+            raise ValueError("Η σίγαση είναι ενεργή. Άρση σίγασης για έναρξη.")
+        self.controls.start(rooms)   # ValueError: τίποτα δεν άλλαξε
+        self.preview = False         # η έναρξη σταματά την προεπισκόπηση
+        self.gate.open()
+        self._sync()
+
+    def stop_announcement(self) -> None:
+        # Πρώτα κλείνει η πύλη, μετά STREAM_STOP: κανένα PCM μετά τη λήξη.
+        self.gate.close()
+        self.controls.stop()
+        self._sync()
+
+    def set_preview(self, enabled: bool) -> None:
+        if enabled and not self.can_preview:
+            return
+        self.preview = enabled
+        self._sync()
+
+    def set_muted(self, muted: bool) -> None:
+        self.muted = muted
+        if self.live:
+            # Η συσκευή μένει ανοιχτή· κόβεται μόνο η φωνή, χωρίς λήξη.
+            if muted:
+                self.gate.close()
             else:
-                tree.insert("", "end", iid=uid, values=values)
-        for uid in existing - current:
-            tree.delete(uid)
+                self.gate.open()
+        elif muted:
+            self.preview = False
+        self._sync()
 
-        names = [room for room, online_count, offline_count in summarize_rooms(status)]
-        if names != room_names and not controls.active:
-            selected = {room_names[i] for i in room_list.curselection()}
-            room_names[:] = names
-            room_list.delete(0, "end")
-            for index, room in enumerate(room_names):
-                count = next(online_count for name, online_count, _ in summarize_rooms(status) if name == room)
-                room_list.insert("end", f"{room} · Online: {count}")
-                if room in selected:
-                    room_list.selection_set(index)
+    def poll(self) -> str | None:
+        """Σφάλμα του τρέχοντος ανοίγματος, μία φορά· σταματά ό,τι το χρειαζόταν."""
+        with self._lock:
+            failure, self._failure = self._failure, None
+        if failure is None or failure[0] is not self._session:
+            return None
+        _, message = failure
+        self.error = message
+        self._close()
+        self.preview = False
+        if self.live:
+            self.gate.close()
+            self.controls.stop()
+        return message
 
-        with peak_lock:
-            value, last = peak
-        if time.monotonic() - last > 0.6:
-            value = 0.0
-        meter.configure(value=min(100, value * 100))
-        if mic_error[0]:
-            meter_label.configure(text=f"Σφάλμα μικροφώνου: {mic_error[0]} — νέα προσπάθεια σε λίγο")
-            if controls.active:
-                controls.stop()
-                redraw_state()
+    def shutdown(self) -> None:
+        self.gate.close()
+        self.controls.stop()
+        self.preview = False
+        self._close()
+        last = self._last
+        if last is not None and last.thread is not None:
+            last.thread.join(timeout=1)
+
+    # --- εσωτερικά ---------------------------------------------------------
+    def _wanted(self) -> bool:
+        return self.live or (self.preview and not self.muted)
+
+    def _sync(self) -> None:
+        if self._wanted() and self._session is None:
+            self._open()
+        elif not self._wanted() and self._session is not None:
+            self._close()
+
+    def _open(self) -> None:
+        session = _MicSession(self._last)
+        self._session = self._last = session
+        session.thread = threading.Thread(target=self._run, args=(session,), daemon=True,
+                                          name="director-gui-microphone")
+        session.thread.start()
+
+    def _close(self) -> None:
+        session, self._session = self._session, None
+        if session is not None:
+            session.stop.set()
+
+    def _run(self, session: _MicSession) -> None:
+        # Το προηγούμενο άνοιγμα κλείνει πρώτα: ποτέ δύο streams μαζί, και το
+        # GUI thread δεν περιμένει ποτέ τη συσκευή.
+        previous, session.previous = session.previous, None
+        if previous is not None and previous.thread is not None:
+            previous.thread.join()
+        if session.stop.is_set():
+            return
+
+        def on_ready() -> None:
+            session.ready.set()
+
+        def on_level(value: float) -> None:
+            with self._lock:
+                self._peak = (value, self._clock())
+
+        try:
+            self._stream(self.gate, stop=session.stop, ready_callback=on_ready,
+                         level_callback=on_level, **self._stream_kwargs)
+        except Exception as exc:
+            message = str(exc) or exc.__class__.__name__
         else:
-            meter_label.configure(text="Μικρόφωνο: " +
-                                  ("ενεργό" if mic_ready.is_set() else "αναμονή"))
-        root.after(250, refresh)
+            if session.stop.is_set():
+                return
+            message = "Η λήψη μικροφώνου σταμάτησε απροσδόκητα."
+        finally:
+            session.ready.clear()
+        with self._lock:
+            self._failure = (session, message)
 
-    def on_close():
-        controls.stop()
-        stop.set()
-        root.destroy()
+    def clear_error_if_ready(self) -> None:
+        """Το σφάλμα σβήνει μόλις η συσκευή ανοίξει ξανά επιτυχώς."""
+        if self.error and self.ready:
+            self.error = None
 
-    root.protocol("WM_DELETE_WINDOW", on_close)
 
+def run_gui(args, *, accept_clients, stream_microphone) -> None:
+    """Σημείο εισόδου του `director --gui`. Το PySide6 φορτώνεται μόνο εδώ."""
     try:
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as server:
-            server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            server.bind((args.host, args.port))
-            server.listen(MAX_CLIENTS)
-            for name, target, kwargs in [
-                ("discovery", announce, {"args": (stop, identifier, args.port),
-                                         "kwargs": {"udp_port": args.discovery_port}}),
-                ("accept", accept_clients, {"args": (server, broadcaster, stop)}),
-                ("microphone", mic_worker, {"args": ()}),
-            ]:
-                thread = threading.Thread(target=target, daemon=True,
-                                          name=f"director-gui-{name}", **kwargs)
-                thread.start()
-                threads.append(thread)
-            refresh()
-            root.mainloop()
-    finally:
-        # Πρώτα STOP στους Clients, μετά κλείσιμο sockets και worker threads.
-        controls.stop()
-        stop.set()
-        broadcaster.close()
-        for thread in threads:
-            thread.join(timeout=1)
+        from director.qt_gui import run_qt_gui
+    except ImportError as exc:
+        raise SystemExit(
+            "Το --gui χρειάζεται PySide6: pip install -e .[gui]  "
+            f"({exc})") from exc
+    run_qt_gui(args, accept_clients=accept_clients, stream_microphone=stream_microphone)

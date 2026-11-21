@@ -244,7 +244,7 @@ def main() -> None:
     parser.add_argument("--latency", type=parse_latency, default="low",
                         help="Καθυστέρηση κάρτας ήχου: low, high ή δευτερόλεπτα")
     parser.add_argument("--gui", action="store_true",
-                        help="Προσωρινό γραφικό περιβάλλον δοκιμών (tkinter)")
+                        help="Κεντρική οθόνη Director (PySide6, pip install -e .[gui])")
     args = parser.parse_args()
     if args.gui:
         from director.gui import run_gui
