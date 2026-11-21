@@ -7,6 +7,7 @@ Type 0 = PCM (640 bytes), 1 = KEEPALIVE, 2 = STREAM_STOP (χωρίς payload).
 """
 
 import select
+import json
 from array import array
 import socket
 import struct
@@ -26,6 +27,8 @@ PROTOCOL_VERSION = 1
 MESSAGE_PCM = 0
 MESSAGE_KEEPALIVE = 1
 MESSAGE_STREAM_STOP = 2
+MESSAGE_CLIENT_SETTINGS = 3
+MAX_SETTINGS_BYTES = 512
 _HEADER = struct.Struct("!2sBBIIQ")
 HEADER_BYTES = _HEADER.size
 
@@ -38,6 +41,7 @@ class Frame(NamedTuple):
 
 class ControlMessage(NamedTuple):
     kind: int
+    payload: bytes = b""
 
 
 def _buffered(connection) -> bool:
@@ -84,6 +88,37 @@ def encode_control(kind: int) -> bytes:
     return _HEADER.pack(PROTOCOL_MAGIC, PROTOCOL_VERSION, kind, 0, 0, 0)
 
 
+def encode_client_settings(room: str, name: str) -> bytes:
+    """Authenticated Manager assignment on the existing TLS audio channel."""
+    from shared.identity import validate_identity, ROOM_PATTERN
+    if not isinstance(room, str) or not ROOM_PATTERN.fullmatch(room) or room.strip() != room:
+        raise ValueError("Invalid room")
+    if not isinstance(name, str) or not (0 <= len(name) <= 64) or name.strip() != name:
+        raise ValueError("Invalid computer name")
+    if any(ord(ch) < 32 for ch in name):
+        raise ValueError("Invalid computer name")
+    payload = json.dumps({"room": room, "name": name},
+                         ensure_ascii=False, sort_keys=True).encode("utf-8")
+    if len(payload) > MAX_SETTINGS_BYTES:
+        raise ValueError("Settings payload too large")
+    return _HEADER.pack(PROTOCOL_MAGIC, PROTOCOL_VERSION,
+                        MESSAGE_CLIENT_SETTINGS, len(payload), 0, 0) + payload
+
+
+def decode_client_settings(payload: bytes) -> dict:
+    if len(payload) > MAX_SETTINGS_BYTES:
+        raise ValueError("Settings too large")
+    try:
+        data = json.loads(payload.decode("utf-8"))
+    except (UnicodeError, ValueError) as exc:
+        raise ValueError("Invalid Client settings") from exc
+    if not isinstance(data, dict) or set(data) != {"room", "name"}:
+        raise ValueError("Invalid Client settings keys")
+    # The canonical encoder also enforces both field limits.
+    encode_client_settings(data["room"], data["name"])
+    return data
+
+
 def send_frame(connection: socket.socket, pcm: bytes, seq: int = 0,
                timestamp_us: int = 0) -> None:
     connection.sendall(encode_frame(pcm, seq, timestamp_us))
@@ -102,6 +137,12 @@ def receive_message(connection: socket.socket, *,
         if length != BLOCK_BYTES or length > MAX_FRAME_BYTES:
             raise ValueError(f"Μη έγκυρο μήκος block ήχου: {length}")
         return Frame(seq, timestamp_us, read_exact(connection, length, deadline=deadline))
+    if kind == MESSAGE_CLIENT_SETTINGS:
+        if length > MAX_SETTINGS_BYTES or seq != 0 or timestamp_us != 0:
+            raise ValueError("Invalid settings control frame")
+        payload = read_exact(connection, length, deadline=deadline)
+        decode_client_settings(payload)
+        return ControlMessage(kind, payload)
     if kind in (MESSAGE_KEEPALIVE, MESSAGE_STREAM_STOP):
         if length != 0 or seq != 0 or timestamp_us != 0:
             raise ValueError("Μη έγκυρο μήνυμα ελέγχου")

@@ -299,14 +299,16 @@ class DirectorRun:
             joined = director.wait_for(client_id, JOINED, timeout=40)
             self.result("9. Σύνδεση με το νέο κλειδί", joined is not None)
 
-            # 10. Λάθος αίθουσα: απόρριψη με εξήγηση στο log
+            # 10. Από v6 η αίθουσα είναι στοιχείο Manager, όχι αυθεντικοποίηση.
             self.ask_client("stop_client")
             mark = director.mark()
             self.ask_client("start_client", room=OTHER_ROOM, new_key=False)
-            reason = director.wait_for(client_id, f"δηλώθηκε {OTHER_ROOM}", since=mark,
+            reason = director.wait_for(client_id, f"δηλώνει {OTHER_ROOM}", since=mark,
                                        timeout=40)
-            self.result("10. Λάθος αίθουσα απορρίπτεται με λόγο στο log",
-                        reason is not None and not director.seen(JOINED, since=mark))
+            joined = director.wait_for(client_id, f"({ROOM}) συνδέθηκε",
+                                       since=mark, timeout=10)
+            self.result("10. Διαφορετική δήλωση αίθουσας: υπερισχύει ο Manager",
+                        reason is not None and joined is not None)
             self.ask_client("stop_client")
         except Exception as exc:  # η δοκιμή αναφέρει, δεν κρύβει
             self.result("Απρόσμενο σφάλμα δοκιμής", False, f"{type(exc).__name__}: {exc}")

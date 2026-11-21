@@ -70,8 +70,8 @@ class SignedRegistryTests(LocalTLSFixture, unittest.TestCase):
                                                 self.client_id, "Α1"))
         self.assertFalse(self.registry.authorize(peer.public_bytes(serialization.Encoding.DER),
                                                  str(uuid.uuid4()), "Α1"))
-        self.assertFalse(self.registry.authorize(peer.public_bytes(serialization.Encoding.DER),
-                                                 self.client_id, "Α2"))
+        self.assertTrue(self.registry.authorize(peer.public_bytes(serialization.Encoding.DER),
+                                                self.client_id, "Α2"))
         reloaded = SignedClientRegistry(self.registry_path, self.manager_cert, self.manager_key)
         self.assertEqual(reloaded.version, 2)
         reloaded.revoke(self.client_id)
@@ -138,9 +138,21 @@ class SignedRegistryTests(LocalTLSFixture, unittest.TestCase):
         self.registry.approve(self.client_id, "Α1", self.cert.read_bytes())
         self.assertIsNone(self.registry.rejection_reason(der, self.client_id, "Α1"))
         self.assertIn("UUID", self.registry.rejection_reason(der, str(uuid.uuid4()), "Α1"))
-        self.assertIn("Α1", self.registry.rejection_reason(der, self.client_id, "Α2"))
+        # Manager owns room metadata; a Client's stale room hint is not rejection.
+        self.assertIsNone(self.registry.rejection_reason(der, self.client_id, "Α2"))
         self.registry.revoke(self.client_id)
         self.assertIn("revoked", self.registry.rejection_reason(der, self.client_id, "Α1"))
+
+    def test_update_room_and_name_keeps_key_and_signature(self):
+        cert_bytes = self.cert.read_bytes()
+        self.registry.approve(self.client_id, "Α1", cert_bytes, name="PC")
+        original_fingerprint = self.registry.approved_entry(self.client_id)["spki_sha256"]
+        info = self.registry.update_client_info(self.client_id, room="Α2", name="Board1")
+        self.assertEqual(info, {"room": "Α2", "name": "Board1"})
+        updated = self.registry.approved_entry(self.client_id)
+        self.assertEqual(updated["spki_sha256"], original_fingerprint)
+        self.assertEqual(updated["cert_pem"], cert_bytes.decode("ascii"))
+        SignedClientRegistry(self.registry_path, self.manager_cert, self.manager_key)
 
     def der(self, cert_path):
         return x509.load_pem_x509_certificate(cert_path.read_bytes()).public_bytes(
