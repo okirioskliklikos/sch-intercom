@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Αυτόματη δοκιμή backup σε προσωρινούς φακέλους Linux.
+# Αυτόματη πραγματική δοκιμή 4.2C (ίδια 18 βήματα με το .ps1) στο Linux ανάπτυξης.
+# Κύριο σενάριο: tools\backup_live_test.ps1 σε Windows.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 PYTHON=python3

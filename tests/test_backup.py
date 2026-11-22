@@ -51,8 +51,8 @@ class BackupTests(unittest.TestCase):
                       tls_cert=self.cert, tls_key=self.key, media_dir=self.media,
                       kdf_n=N, **extra)
 
-    def transfer(self, **extra):
-        return restore(self.backup, PASSWORD, registry_file=self.new / "clients-registry.json",
+    def transfer(self, source: Path | None = None, **extra):
+        return restore(source or self.backup, PASSWORD, registry_file=self.new / "clients-registry.json",
                        tls_cert=self.new / "tls" / "director-tls.crt",
                        tls_key=self.new / "tls" / "director-tls.key",
                        media_dir=self.new / "media", **extra)
@@ -216,19 +216,144 @@ class BackupTests(unittest.TestCase):
         self.assertEqual(cm.exception.status, 5)
         self.transfer(accept_older=True)
 
-    def test_rollback_after_interruption(self):
+    def snapshot(self) -> dict[str, bytes]:
+        """Όλα τα αρχεία του νέου υπολογιστή, εκτός από pre-restore/staging/lock."""
+        files = {}
+        for path in self.new.rglob("*"):
+            relative = path.relative_to(self.new)
+            if (path.is_file() and relative.parts[0] != "manager.lock"
+                    and not relative.parts[0].startswith(("pre-restore-", ".restore-staging-"))):
+                files[relative.as_posix()] = path.read_bytes()
+        return files
+
+    def second_backup(self) -> Path:
+        """Νεότερο backup με διαφορετικό περιεχόμενο σε ΟΛΕΣ τις ενότητες."""
+        import uuid
+        from shared.device_identity import create_device_identity
+        client_id = str(uuid.uuid4())
+        client_cert, _, _ = create_device_identity(self.root / "client-2", client_id)
+        SignedClientRegistry(self.registry, self.cert, self.key).approve(
+            client_id, "C2627-Γ2", client_cert.read_bytes())
+        (self.old / "director.id").write_text("changed-director", encoding="utf-8")
+        (self.old / "director-gui.json").write_text('{"width":999}', encoding="utf-8")
+        (self.old / "clients-last-seen.json").write_text('{"version":2}', encoding="utf-8")
+        (self.old / "enrollment-pending.json").write_text('{"requests":[1]}', encoding="utf-8")
+        second = self.root / "second.sib"
+        create(second, PASSWORD, registry_file=self.registry, tls_cert=self.cert,
+               tls_key=self.key, media_dir=self.media, kdf_n=N)
+        return second
+
+    def assert_clean(self):
+        self.assertFalse((self.new / "restore-journal.json").exists())
+        self.assertFalse((self.new / "restore-journal.json.tmp").exists())
+        self.assertEqual(list(self.new.glob(".restore-staging-*")), [])
+
+    def test_rollback_after_interruption_at_every_step(self):
+        """Τεχνητό kill μετά από ΚΑΘΕ μετακίνηση (και ανάμεσα στις δύο μιας εγγραφής)."""
         self.make()
         self.transfer()
-        original = (self.new / "clients-registry.json").read_bytes()
-        try:
-            self.transfer(fail_after=2)
-        except KeyboardInterrupt:
-            # Simulates a terminated restore: the recovery journal must remain.
-            self.assertTrue((self.new / "restore-journal.json").exists())
-            self.assertTrue(rollback(self.new))
-        self.assertEqual((self.new / "clients-registry.json").read_bytes(), original)
-        self.assertFalse((self.new / "restore-journal.json").exists())
-        self.assertFalse(rollback(self.new))
+        before = self.snapshot()
+        second = self.second_backup()
+        interrupted = 0
+        for fail_after in range(1, 40):
+            try:
+                self.transfer(second, fail_after=fail_after)
+            except KeyboardInterrupt:
+                interrupted += 1
+                self.assertTrue((self.new / "restore-journal.json").exists())
+                with self.assertRaises(BackupError):
+                    ensure_no_interrupted_restore(self.new)
+                self.assertTrue(rollback(self.new))
+                self.assertEqual(self.snapshot(), before, f"fail_after={fail_after}")
+                self.assert_clean()
+                self.assertFalse(rollback(self.new))
+                continue
+            break
+        # 2 κινήσεις ανά υπάρχον αρχείο (παλιό → pre-restore, νέο → θέση) × 7 αρχεία.
+        self.assertEqual(interrupted, 14)
+        after = self.snapshot()
+        self.assertNotEqual(after, before)
+        self.assertEqual(after["director-gui.json"], b'{"width":999}')
+
+    def test_error_during_moves_rolls_back_automatically(self):
+        import director.backup as backup
+        self.make()
+        self.transfer()
+        before = self.snapshot()
+        second = self.second_backup()
+        real = backup._replace_with_retry
+        calls = []
+
+        def failing(source, target):
+            calls.append(source)
+            if len(calls) == 5:  # 1 = journal, 2.. = μετακινήσεις
+                raise PermissionError("simulated antivirus lock")
+            return real(source, target)
+
+        with patch.object(backup, "_replace_with_retry", failing):
+            with self.assertRaises(PermissionError):
+                self.transfer(second)
+        self.assertEqual(self.snapshot(), before)
+        self.assert_clean()
+
+    def test_failure_before_journal_leaves_no_plaintext_key(self):
+        import director.backup as backup
+        self.make()
+        real = backup._write_exclusive
+        calls = []
+
+        def failing(path, content):
+            calls.append(path)
+            if len(calls) == 2:  # το κλειδί ή το πιστοποιητικό έχει ήδη γραφτεί στο staging
+                raise OSError("simulated disk full")
+            return real(path, content)
+
+        with patch.object(backup, "_write_exclusive", failing):
+            with self.assertRaises(OSError):
+                self.transfer()
+        self.assert_clean()
+        self.assertEqual(list(self.new.glob("pre-restore-*")), [])
+        secret = self.key.read_bytes()
+        for path in self.new.rglob("*"):
+            if path.is_file():
+                self.assertNotIn(secret, path.read_bytes(), str(path))
+
+    def test_corrupt_journal_and_orphan_staging_are_cleaned(self):
+        self.make()
+        self.transfer()
+        before = self.snapshot()
+        orphan = self.new / ".restore-staging-crash"
+        (orphan / "tls_identity").mkdir(parents=True)
+        (orphan / "tls_identity" / "key.pem").write_bytes(self.key.read_bytes())
+        (self.new / "restore-journal.json").write_bytes(b'{"moves": [')  # κομμένο
+        with self.assertRaises(BackupError):
+            ensure_no_interrupted_restore(self.new)
+        self.assertTrue(rollback(self.new))
+        ensure_no_interrupted_restore(self.new)
+        self.assertEqual(self.snapshot(), before)
+        self.assertFalse(orphan.exists())
+        self.assert_clean()
+
+    def test_pre_restore_notice_only_when_old_files_exist(self):
+        self.make()
+        first = self.transfer()
+        self.assertIsNone(first["previous"])
+        self.assertEqual(list(self.new.glob("pre-restore-*")), [])
+        second = self.transfer()
+        self.assertTrue(Path(second["previous"]).is_dir())
+        self.assertTrue(any("ιδιωτικό κλειδί" in w for w in second["warnings"]))
+
+    def test_media_report_reflects_restore_media(self):
+        self.make(media_copy="yes")
+        result = self.transfer(restore_media=True)
+        self.assertEqual(result["media"]["missing"], [])
+        self.assertEqual(result["media"]["copied"], ["test.mp3"])
+        result = self.transfer(replace_identity=False)
+        self.assertEqual(result["media"]["missing"], [])
+        (self.new / "media" / "test.mp3").unlink()
+        result = self.transfer()
+        self.assertEqual(result["media"]["missing"], ["test.mp3"])
+        self.assertEqual(result["media"]["copied"], [])
 
     def test_journal_prevents_start_and_rollback_idempotent(self):
         self.make()
@@ -299,6 +424,71 @@ class BackupTests(unittest.TestCase):
                     self.assertEqual(channel.recv(4), b"PONG")
             thread.join(timeout=5)
             self.assertEqual(status, [True])
+
+    def test_running_manager_holds_lock_for_its_whole_lifetime(self):
+        """Πραγματικός director.main (χωρίς μικρόφωνο): restore → 4 όσο τρέχει."""
+        import socket
+        import subprocess
+        import sys
+        import time
+        self.make()
+        ports = []
+        for kind in (socket.SOCK_STREAM, socket.SOCK_DGRAM, socket.SOCK_STREAM):
+            with socket.socket(socket.AF_INET, kind) as probe:
+                probe.bind(("127.0.0.1", 0))
+                ports.append(str(probe.getsockname()[1]))
+        script = (
+            "import sys, time, director.main as m\n"
+            "def mic(broadcaster, stop=None, **kw):\n"
+            "    while not stop.wait(0.1):\n"
+            "        pass\n"
+            "m.stream_microphone = mic\n"
+            "sys.argv = ['director'] + sys.argv[1:]\n"
+            "m.main()\n")
+        root = Path(__file__).resolve().parents[1]
+        env = dict(os.environ, PYTHONIOENCODING="utf-8", PYTHONUNBUFFERED="1",
+                   PYTHONPATH=str(root))
+        director = subprocess.Popen(
+            [sys.executable, "-c", script, "--host", "127.0.0.1", "--port", ports[0],
+             "--discovery-port", ports[1], "--enrollment-port", ports[2],
+             "--tls-cert", str(self.cert), "--tls-key", str(self.key),
+             "--registry-file", str(self.registry),
+             "--director-id-file", str(self.root / "runtime-director.id")],
+            cwd=root, env=env, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT, text=True, encoding="utf-8")
+        try:
+            line = ""
+            deadline = time.monotonic() + 20
+            while "Director ακούει" not in line and time.monotonic() < deadline:
+                line = director.stdout.readline()
+                if not line and director.poll() is not None:
+                    break
+            self.assertIn("Director ακούει", line)
+            time.sleep(0.5)
+            with self.assertRaises(BackupLocked):
+                restore(self.backup, PASSWORD, registry_file=self.registry,
+                        tls_cert=self.cert, tls_key=self.key, media_dir=self.media)
+            # Οι σύντομες offline εντολές δουλεύουν δίπλα στον ενεργό Manager.
+            listing = subprocess.run(
+                [sys.executable, "-m", "director.main", "--tls-cert", str(self.cert),
+                 "--tls-key", str(self.key), "--registry-file", str(self.registry),
+                 "--list-clients"], cwd=root, env=env, capture_output=True, timeout=60)
+            self.assertEqual(listing.returncode, 0, listing.stderr)
+        finally:
+            try:
+                director.stdin.write("quit\n")
+                director.stdin.flush()
+            except OSError:
+                pass  # ο Director έχει ήδη τερματίσει
+            try:
+                director.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                director.kill()
+                director.wait(timeout=5)
+            director.stdout.close()
+        # Μετά τον τερματισμό το κλείδωμα ελευθερώνεται.
+        restore(self.backup, PASSWORD, registry_file=self.registry,
+                tls_cert=self.cert, tls_key=self.key, media_dir=self.media)
 
     def test_existing_backup_not_replaced(self):
         self.make()

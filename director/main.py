@@ -5,6 +5,7 @@
 """
 
 import argparse
+from contextlib import ExitStack
 from functools import partial
 import ssl
 from pathlib import Path
@@ -423,9 +424,16 @@ def main() -> None:
     parser.add_argument("--gui", action="store_true",
                         help="Κεντρική οθόνη Director (PySide6, pip install -e .[gui])")
     args = parser.parse_args()
+    data_dir = args.registry_file.parent
+    runtime = ExitStack()
     try:
-        with manager_lock(args.registry_file.parent):
-            ensure_no_interrupted_restore(args.registry_file.parent)
+        if not (args.approve_client_cert or args.revoke_client or args.list_clients):
+            # Ο Manager κρατά το κλείδωμα σε ΟΛΗ τη λειτουργία του (CLI και --gui), ώστε
+            # το «python -m director.backup restore» να αρνείται όσο τρέχει (4.2C §6.2).
+            # Οι σύντομες offline εντολές (approve/revoke/list) δεν το κρατούν, γιατί
+            # τρέχουν και δίπλα σε ενεργό Manager· ελέγχουν μόνο το journal.
+            runtime.enter_context(manager_lock(data_dir))
+        ensure_no_interrupted_restore(data_dir)
         tls_context = server_context(args.tls_cert, args.tls_key)
         try:
             registry = SignedClientRegistry(args.registry_file, args.tls_cert, args.tls_key)
@@ -516,6 +524,9 @@ def main() -> None:
 
     except BackupError as exc:
         parser.exit(exc.status, str(exc) + "\n")
+    finally:
+        runtime.close()
+
 
 if __name__ == "__main__":
     main()
