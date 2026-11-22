@@ -371,6 +371,8 @@ class LiveTest:
         before = self.new.registry.read_bytes()
         rc, _ = self.new.backup("restore", str(self.file), "--accept-older",
                                 extra_env={"SCH_BACKUP_TEST_FAIL_AFTER": "3"})
+        print("    (Αναμενόμενη τεχνητή διακοπή στη μέση του restore, για έλεγχο rollback.)",
+              flush=True)
         journal = (self.new.dir / "restore-journal.json").exists()
         refused = self.new.start()
         refused.proc.wait(timeout=20)
@@ -384,7 +386,7 @@ class LiveTest:
         joined = director.wait_for(self.a.client_id, JOINED, since=mark, timeout=40)
         self.a.stop()
         self.new.stop()
-        return (rc != 0 and journal and blocked and rb == 0 and restored and joined is not None,
+        return (rc == 130 and journal and blocked and rb == 0 and restored and joined is not None,
                 f"διακοπή rc {rc}, journal {journal}, άρνηση εκκίνησης {blocked}, "
                 f"rollback rc {rb}, ίδιο μητρώο {restored}, σύνδεση {joined is not None}")
 

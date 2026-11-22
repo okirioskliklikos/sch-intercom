@@ -282,6 +282,28 @@ class BackupTests(unittest.TestCase):
         self.assertNotEqual(after, before)
         self.assertEqual(after["director-gui.json"], b'{"width":999}')
 
+    def test_cli_interruption_prints_clean_message_not_traceback(self):
+        import contextlib
+        import io
+        from director.backup import INTERRUPTED, main
+        self.make()
+        self.transfer()
+        stderr = io.StringIO()
+        env = {"SCH_TEST_PASS": PASSWORD, "SCH_BACKUP_TEST_FAIL_AFTER": "3"}
+        with patch.dict(os.environ, env), contextlib.redirect_stderr(stderr), \
+                contextlib.redirect_stdout(io.StringIO()):
+            status = main(["restore", str(self.backup), "--accept-older",
+                           "--registry-file", str(self.new / "clients-registry.json"),
+                           "--tls-cert", str(self.new / "tls" / "director-tls.crt"),
+                           "--tls-key", str(self.new / "tls" / "director-tls.key"),
+                           "--passphrase-env", "SCH_TEST_PASS"])
+        self.assertEqual(status, INTERRUPTED)
+        self.assertNotIn("Traceback", stderr.getvalue())
+        self.assertIn("αναμενόμενη", stderr.getvalue())
+        self.assertIn("rollback", stderr.getvalue())
+        self.assertTrue((self.new / "restore-journal.json").exists())
+        self.assertTrue(rollback(self.new))
+
     def test_error_during_moves_rolls_back_automatically(self):
         import director.backup as backup
         self.make()

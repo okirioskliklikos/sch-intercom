@@ -40,6 +40,7 @@ FORMAT = 1
 MAX_FILE = 16 * 1024 * 1024
 MAX_HEADER = 4096
 KDF_N = 1 << 17
+INTERRUPTED = 130  # κωδικός εξόδου μετά από Ctrl+C/διακοπή (όπως τα shells)
 ERROR_SECRET = "Λάθος κωδικός ή αλλοιωμένο αρχείο. Ελέγξτε και τη γλώσσα του πληκτρολογίου."
 
 
@@ -706,6 +707,16 @@ def main(argv: list[str] | None = None) -> int:
     except (OSError, ValueError, KeyError, TypeError, RuntimeError) as exc:
         print("Αποτυχία backup/restore: " + str(exc), file=sys.stderr)
         return 2
+    except KeyboardInterrupt:
+        # Ctrl+C ή η τεχνητή διακοπή των scripts δοκιμής: καθαρό μήνυμα, όχι traceback.
+        reason = ("Τεχνητή διακοπή δοκιμής (αναμενόμενη)"
+                  if "SCH_BACKUP_TEST_FAIL_AFTER" in os.environ else "Διακοπή από τον χρήστη")
+        if args.command == "restore":
+            print(f"{reason}: η επαναφορά έμεινε μισή. Τρέξτε python -m director.backup "
+                  "rollback πριν ξεκινήσει ο Manager.", file=sys.stderr)
+        else:
+            print(reason + ".", file=sys.stderr)
+        return INTERRUPTED
     return 0
 
 
