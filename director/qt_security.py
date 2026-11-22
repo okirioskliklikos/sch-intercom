@@ -277,7 +277,8 @@ class SecurityPage(QWidget):
         body = QWidget()
         body.setObjectName("securityBody")
         self.columns = QGridLayout(body)
-        self.columns.setContentsMargins(0, 0, 0, 0)
+        # Κενό ανάμεσα στις κάρτες και τη γραμμή κύλισης (απόφαση χρήστη 22/11/2026).
+        self.columns.setContentsMargins(0, 0, px(theme.SCROLL_GAP), 0)
         self.columns.setHorizontalSpacing(px(theme.SECTION_GAP))
         self.columns.setVerticalSpacing(px(theme.SECTION_GAP))
         self._build_requests_section()
@@ -298,7 +299,7 @@ class SecurityPage(QWidget):
 
     # --- διάταξη ------------------------------------------------------------
     def _available_width(self) -> int:
-        return max(0, self.width() - px(theme.SCROLLBAR) - px(6))
+        return max(0, self.width() - px(theme.SCROLLBAR) - px(theme.SCROLL_GAP) - px(6))
 
     def _left_minimum(self) -> int:
         return max(px(theme.LEFT_COLUMN_MIN), self.requests_section.minimumSizeHint().width())
