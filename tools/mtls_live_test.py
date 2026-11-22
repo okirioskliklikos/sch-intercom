@@ -168,9 +168,9 @@ class DirectorRun:
             raise RuntimeError(f"Client: {reply['error']}")
         return reply
 
-    def start_director(self) -> Process:
+    def start_director(self, *extra: str) -> Process:
         self.director = Process(["-m", "director.main", *self.tls(),
-                                 "--director-id-file", str(self.director_id)],
+                                 "--director-id-file", str(self.director_id), *extra],
                                 label="Director")
         if self.director.wait_for("Director ακούει", timeout=15) is None:
             raise RuntimeError("Ο Director δεν ξεκίνησε (θύρα 50555 κατειλημμένη;)")
@@ -345,10 +345,9 @@ class DirectorRun:
                         reason is not None and joined is not None)
             self.ask_client("stop_client")
 
-            # 11. Εγγραφή 4.2A2: 3 λάθος κωδικοί απορρίπτουν το συγκεκριμένο αίτημα
-            mark = director.mark()
-            director.send("enroll on")
-            opened = director.wait_for("[Εγγραφή] Ενεργή TLS θύρα", since=mark, timeout=10)
+            # 11. Εγγραφή 4.2A2: 3 λάθος κωδικοί απορρίπτουν το συγκεκριμένο αίτημα.
+            # Η θύρα εγγραφής είναι ανοιχτή από την εκκίνηση (χωρίς enroll on).
+            opened = director.wait_for("[Εγγραφή] Ενεργή TLS θύρα", timeout=10)
             reply, line, _ = self.enroll(director)
             short = reply["short"]
             outcomes = []
@@ -427,17 +426,25 @@ class DirectorRun:
                         f"hints {hints}")
             self.ask_client("stop_client")
 
-            # 17. Με κλειστή θύρα δεν γίνεται νέα εγγραφή
+            # 17. Όριο εκκρεμών αιτημάτων (50 στην κανονική χρήση, 1 εδώ για συντομία):
+            # πάνω από το όριο ο Client παίρνει μήνυμα· μόλις απαντηθεί ένα, χωρά νέο.
+            self.stop_director()
+            director = self.start_director("--max-pending-requests", "1")
+            opened = director.wait_for("[Εγγραφή] Ενεργή TLS θύρα", timeout=10)
+            first, first_line, _ = self.enroll(director, profile="late1", name="Late1")
+            full, full_line, _ = self.enroll(director, profile="late2", name="Late2")
             mark = director.mark()
-            director.send("enroll on")
-            director.wait_for("[Εγγραφή] Ενεργή TLS θύρα", since=mark, timeout=10)
-            director.send("enroll off")
-            closed = director.wait_for("[Εγγραφή] Η λειτουργία εγγραφής σταμάτησε",
-                                       since=mark, timeout=10)
-            reply, line, _ = self.enroll(director, profile="late", name="Late1")
-            self.result("17. enroll off: νέα εγγραφή δεν γίνεται δεκτή",
-                        closed is not None and reply.get("sas") is None
-                        and reply["rc"] != 0 and line is None)
+            director.send(f"deny {first['short']}")
+            denied = director.wait_for("Απορρίφθηκε", since=mark, timeout=10)
+            again, again_line, _ = self.enroll(director, profile="late2", name="Late2")
+            self.result("17. Όριο αιτημάτων: το επιπλέον απορρίπτεται με μήνυμα, "
+                        "μετά χωρά νέο",
+                        opened is not None and first_line is not None
+                        and full.get("sas") is None and full["rc"] != 0
+                        and full.get("full") and full_line is None
+                        and denied is not None and again_line is not None,
+                        f"Late1 {first_line is not None}, Late2 πλήρες {full.get('full')}, "
+                        f"μετά την απόρριψη {again_line is not None}")
         except Exception as exc:  # η δοκιμή αναφέρει, δεν κρύβει
             self.result("Απρόσμενο σφάλμα δοκιμής", False, f"{type(exc).__name__}: {exc}")
         finally:
@@ -523,7 +530,9 @@ class ClientRun:
                                    < line.index("Κωδικός:") < line.index("Λήξη:"))
         sas = line.split("Κωδικός:")[1].split("|")[0].strip() if ok else None
         identity = json.loads(Path(self.paths(profile)[3]).read_text(encoding="utf-8"))
-        return {"client_id": identity["client_id"], "sas": sas, "rc": rc, "seconds": seconds}
+        full = process.seen("Πάρα πολλά αιτήματα εγγραφής")
+        return {"client_id": identity["client_id"], "sas": sas, "rc": rc, "seconds": seconds,
+                "full": full}
 
 
     def read_hints(self, profile: str, **expected) -> dict:

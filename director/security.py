@@ -19,7 +19,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from shared.client_registry import RegistryError, _atomic_write
-from shared.enrollment import REQUEST_TTL, EnrollmentError, IncorrectCodeError
+from shared.enrollment import (MAX_PENDING, REQUEST_TTL, EnrollmentError,
+                               IncorrectCodeError)
 from shared.identity import ROOM_PATTERN
 
 LAST_SEEN_VERSION = 1
@@ -34,6 +35,11 @@ TEXT_EXPIRED = "Το αίτημα δεν υπάρχει πια (έληξε ή α
 TEXT_REJECTED = ("Λάθος κωδικός: το αίτημα απορρίφθηκε. "
                  "Ζητήστε νέα εγγραφή από τον υπολογιστή.")
 TEXT_NEVER = "Δεν έχει συνδεθεί"
+def full_notice(limit: int) -> str:
+    return f"Όριο {limit} αιτημάτων: νέα αιτήματα απορρίπτονται"
+
+
+TEXT_FULL_NOTICE = full_notice(MAX_PENDING)
 
 
 def last_seen_path(registry_file: Path) -> Path:
@@ -284,19 +290,17 @@ class SecurityModel:
         self.clock = clock
 
     # --- θύρα εγγραφής ------------------------------------------------------
-    @property
-    def port_open(self) -> bool:
-        return self.enrollment.is_open
+    def port_notice(self) -> str | None:
+        """Κείμενο μόνο όταν οι εγγραφές δεν δέχονται νέα αιτήματα, αλλιώς None.
 
-    def set_port_open(self, wanted: bool) -> str | None:
-        """Άνοιγμα/κλείσιμο θύρας· επιστρέφει μήνυμα σφάλματος ή None."""
-        try:
-            if wanted:
-                self.enrollment.start()
-            else:
-                self.enrollment.stop()
-        except OSError as exc:
-            return f"Η θύρα εγγραφής {self.enrollment.port} δεν άνοιξε: {exc.strerror or exc}"
+        Οι εγγραφές είναι πάντα ανοιχτές (απόφαση χρήστη 22/11/2026)· εμφανίζεται
+        προειδοποίηση μόνο αν η θύρα δεν άνοιξε ή αν συμπληρώθηκε το όριο αιτημάτων.
+        """
+        if not self.enrollment.is_open:
+            error = self.enrollment.start_error or "κλειστή"
+            return f"Η θύρα εγγραφής {self.enrollment.port} δεν άνοιξε: {error}"
+        if self.enrollment.is_full:
+            return full_notice(self.enrollment.max_pending)
         return None
 
     # --- αιτήματα -----------------------------------------------------------

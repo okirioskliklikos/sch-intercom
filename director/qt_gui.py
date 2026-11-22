@@ -1136,6 +1136,7 @@ class GuiRuntime:
                 daemon=True, name="director-gui-last-seen")
             self.last_seen_thread.start()
             if self.enrollment is not None and self.trust is not None:
+                self.enrollment.open()
                 security = SecurityModel(self.enrollment, self.trust, self.broadcaster,
                                          self.last_seen)
         core = list(self.threads)

@@ -337,32 +337,6 @@ QScrollBar::add-page, QScrollBar::sub-page {{
     color: {TEXT_MUTED};
     font-size: {m.font_pt(FONT_SMALL)}pt;
 }}
-#portState {{
-    font-size: {m.font_pt(FONT_SMALL)}pt;
-    color: {LIVE};
-}}
-#portState[portOpen="true"] {{
-    color: {CONNECTED};
-}}
-#enrollmentPortButton {{
-    background: {LIVE};
-    border: 1px solid {LIVE};
-    border-radius: {px(NAV_RADIUS)}px;
-    color: {WHITE};
-    padding: {px(6)}px;
-    min-width: {px(ACTION_HEIGHT) - 2}px;
-    max-width: {px(ACTION_HEIGHT) - 2}px;
-    min-height: {px(ACTION_HEIGHT) - 2}px;
-    max-height: {px(ACTION_HEIGHT) - 2}px;
-}}
-#enrollmentPortButton[portOpen="true"] {{
-    background: {CONNECTED};
-    border-color: {CONNECTED};
-}}
-#enrollmentPortButton[portOpen="true"]:hover {{
-    background: {ONLINE};
-    border-color: {ONLINE};
-}}
 #requestTitle, #roomTitle {{
     font-weight: 600;
 }}

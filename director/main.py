@@ -82,7 +82,6 @@ def show_help() -> str:
   room <όνομα>  Μετάδοση σε μία ή περισσότερες αίθουσες
   client <UUID> Μετάδοση σε έναν ή περισσότερους Clients
   revoke <UUID> Ανάκληση Client και άμεση αποσύνδεσή του
-  enroll on/off  Άνοιγμα/κλείσιμο θύρας εγγραφής (τα αιτήματα μένουν)
   pending        Εκκρεμή αιτήματα: ID, αίθουσα, όνομα, λήξη (1 ημέρα)
   approve <ID> <κωδικός>  Έγκριση με τον κωδικό που έγραψε ο Client
                  (ID = οι 8 χαρακτήρες του pending· 3 προσπάθειες κωδικού)
@@ -331,10 +330,6 @@ def command_loop(broadcaster: AudioBroadcaster, stop: threading.Event,
             elif command == "revoke" and len(values) == 1 and revoke is not None:
                 revoke(values[0])
                 print(f"Ανακλήθηκε ο Client {values[0]}", flush=True)
-            elif command == "enroll" and values == ["on"] and enrollment is not None:
-                enrollment.start()
-            elif command == "enroll" and values == ["off"] and enrollment is not None:
-                enrollment.stop()
             elif command == "pending" and not values and enrollment is not None:
                 requests = enrollment.pending()
                 if not requests:
@@ -408,7 +403,10 @@ def main() -> None:
     parser.add_argument("--tls-key", type=Path, required=True,
                         help="Ιδιωτικό κλειδί TLS Director (εκτός repository)")
     parser.add_argument("--enrollment-port", type=int, default=ENROLL_PORT,
-                        help="Ξεχωριστή TLS θύρα εγγραφής (ανοίγει μόνο με enroll on)")
+                        help="Ξεχωριστή TLS θύρα εγγραφής (πάντα ανοιχτή, έως 50 αιτήματα)")
+    # Μόνο για τα αυτόματα scripts πραγματικής δοκιμής (όριο αιτημάτων χωρίς 50 εγγραφές).
+    parser.add_argument("--max-pending-requests", type=int, default=None,
+                        help=argparse.SUPPRESS)
     parser.add_argument("--registry-file", type=Path,
                         default=Path.home() / ".school-intercom" / "clients-registry.json",
                         help="Υπογεγραμμένο μητρώο Clients")
@@ -454,9 +452,11 @@ def main() -> None:
     trust = RegistryTrust(registry, args.tls_cert, args.tls_key)
     secure_accept = partial(accept_clients, tls_context=trust.context(),
                             registry=registry, context_provider=trust.context)
-    # Η θύρα εγγραφής ξεκινά κλειστή (enroll on / κουμπί «Άνοιγμα» στη σελίδα Ασφάλεια).
+    # Η θύρα εγγραφής είναι πάντα ανοιχτή (απόφαση χρήστη 22/11/2026): ανοίγει με το
+    # CLI παρακάτω ή με το GuiRuntime.start στο --gui.
     enrollment = EnrollmentServer(args.tls_cert, args.tls_key, trust,
                                   host=args.host, port=args.enrollment_port,
+                                  max_pending=args.max_pending_requests,
                                   pending_file=args.registry_file.with_name(
                                       "enrollment-pending.json"))
     last_seen = LastSeenStore(last_seen_path(args.registry_file))
@@ -483,6 +483,7 @@ def main() -> None:
         receiver = threading.Thread(target=secure_accept, args=(server, broadcaster, stop),
                                     daemon=True, name="accept-clients")
         receiver.start()
+        enrollment.open()
         commands = threading.Thread(target=command_loop, args=(broadcaster, stop, stats),
                                     kwargs={"revoke": lambda client_id: trust.revoke(client_id, broadcaster),
                                             "enrollment": enrollment, "trust": trust},

@@ -42,7 +42,9 @@ ENROLL_PORT = 50559
 PROTOCOL = 2  # v2: ο Client δεν περιμένει την έγκριση (εγγραφή χωρίς αναμονή)
 MAX_MESSAGE = 8192
 MAX_CONNECTIONS = 16  # ταυτόχρονες συνδέσεις στη θύρα εγγραφής
-MAX_PENDING = 100  # αποθηκευμένα αιτήματα (> MAX_CLIENTS)
+MAX_PENDING = 50  # απόφαση χρήστη 22/11/2026: έως 50 εκκρεμή αιτήματα
+#: Μήνυμα στον Client όταν ο κατάλογος αιτημάτων είναι γεμάτος.
+TEXT_FULL = "Πάρα πολλά αιτήματα εγγραφής σε αναμονή. Δοκιμάστε αργότερα."
 MAX_ATTEMPTS_PER_MINUTE = 8
 REQUEST_TTL = 24 * 3600  # απόφαση χρήστη: τα αιτήματα ισχύουν μία ημέρα
 NETWORK_TIMEOUT = 8
@@ -52,6 +54,10 @@ MAX_CODE_ATTEMPTS = 3  # απόφαση χρήστη: 3 προσπάθειες �
 
 class EnrollmentError(ValueError):
     pass
+
+
+class RequestsFullError(EnrollmentError):
+    """Ο Manager έχει ήδη ``MAX_PENDING`` αιτήματα σε αναμονή."""
 
 
 class IncorrectCodeError(EnrollmentError):
@@ -171,20 +177,24 @@ class Pending:
 
 
 class EnrollmentServer:
-    """Opt-in registration socket, independent from the authenticated audio port.
+    """Registration socket, independent from the authenticated audio port.
 
-    Ο κατάλογος αιτημάτων (``pending_file``) υπάρχει ανεξάρτητα από τη θύρα: η
-    έγκριση/απόρριψη γίνεται και με κλειστή θύρα και με κλειστό Client.
+    Η θύρα ανοίγει μαζί με τον Director και μένει ανοιχτή (απόφαση χρήστη 22/11/2026)·
+    προστασία: έως ``MAX_PENDING`` αιτήματα, κωδικός 6 ψηφίων με 3 προσπάθειες, λήξη
+    σε μία ημέρα, όριο συνδέσεων ανά IP. Ο κατάλογος αιτημάτων (``pending_file``)
+    υπάρχει ανεξάρτητα από τη θύρα: η έγκριση γίνεται και με κλειστό Client.
     """
 
     def __init__(self, certfile: Path, keyfile: Path, trust, *,
                  host: str = "0.0.0.0", port: int = ENROLL_PORT,
-                 pending_file: Path | None = None, log=print, clock=time.time):
+                 pending_file: Path | None = None, log=print, clock=time.time,
+                 max_pending: int | None = None):
         self.host, self.port = host, port
         self.trust = trust
         self.log = log
         self.clock = clock
         self.pending_file = Path(pending_file) if pending_file is not None else None
+        self._max_pending = max_pending  # μόνο για αυτόματες δοκιμές· αλλιώς MAX_PENDING
         self.context = server_context(certfile, keyfile)
         self._lock = threading.RLock()
         self._pending: dict[str, Pending] = {}
@@ -193,6 +203,8 @@ class EnrollmentServer:
         self._stop = threading.Event()
         self._slots = threading.BoundedSemaphore(MAX_CONNECTIONS)
         self._attempts: dict[str, deque[float]] = {}
+        #: Γιατί δεν άνοιξε η θύρα στο ``open`` (π.χ. κατειλημμένη), αλλιώς None.
+        self.start_error: str | None = None
         self._load()
 
     # ------------------------------------------------------------ αποθήκευση
@@ -210,7 +222,7 @@ class EnrollmentServer:
             self.log("[Εγγραφή] Αγνοήθηκε αρχείο εκκρεμών αιτημάτων άγνωστης μορφής")
             return
         now = self.clock()
-        for item in data.get("requests", [])[:MAX_PENDING]:
+        for item in data.get("requests", [])[:self.max_pending]:
             try:
                 request, code, created = item["request"], item["code"], float(item["created"])
                 attempts = item.get("attempts", 0)
@@ -278,6 +290,32 @@ class EnrollmentServer:
                                              name="enroll-listener")
             self._thread.start()
             self.log(f"[Εγγραφή] Ενεργή TLS θύρα {self.port} (μόνο εγγραφή).")
+
+    @property
+    def max_pending(self) -> int:
+        return self._max_pending if self._max_pending is not None else MAX_PENDING
+
+    def open(self) -> bool:
+        """Ανοίγει τη θύρα με την εκκίνηση του Director (πάντα ανοιχτή, απόφαση 22/11/2026).
+
+        Αποτυχία (π.χ. κατειλημμένη θύρα) δεν σταματά τον Director: καταγράφεται και
+        φαίνεται στη σελίδα «Ασφάλεια»· η έγκριση αιτημάτων συνεχίζει να λειτουργεί.
+        """
+        try:
+            self.start()
+        except OSError as exc:
+            self.start_error = exc.strerror or str(exc)
+            self.log(f"[Εγγραφή] Η θύρα εγγραφής {self.port} δεν άνοιξε: {self.start_error}")
+            return False
+        self.start_error = None
+        return True
+
+    @property
+    def is_full(self) -> bool:
+        """Αν συμπληρώθηκε το όριο ``MAX_PENDING`` εκκρεμών αιτημάτων."""
+        with self._lock:
+            self._purge()
+            return len(self._pending) >= self.max_pending
 
     @property
     def is_open(self) -> bool:
@@ -348,11 +386,15 @@ class EnrollmentServer:
                         for rid, old in list(self._pending.items()):
                             if old.request["client_id"] == unsigned["client_id"]:
                                 del self._pending[rid]
-                        if len(self._pending) >= MAX_PENDING:
-                            raise EnrollmentError("Too many pending requests")
-                        pending = Pending(request, code, self.clock())
-                        self._pending[request_id] = pending
+                        full = len(self._pending) >= self.max_pending
+                        if not full:
+                            pending = Pending(request, code, self.clock())
+                            self._pending[request_id] = pending
                         self._save()
+                    if full:
+                        # Ο Client μαθαίνει γιατί απορρίφθηκε (όριο 50, απόφαση χρήστη).
+                        send_message(stream, {"type": "rejected", "reason": "full"})
+                        raise RequestsFullError("Too many pending requests")
                     send_message(stream, {"type": "queued", "request_id": request_id,
                                           "director_nonce": nonce,
                                           "expires_at": int(pending.expires)})
@@ -430,6 +472,8 @@ def enroll_client(host: str, port: int, cafile: Path, server_name: str,
             conn.settimeout(NETWORK_TIMEOUT)
             send_message(conn, request)
             reply = read_message(conn)
+            if reply.get("type") == "rejected" and reply.get("reason") == "full":
+                raise RequestsFullError(TEXT_FULL)
             if reply.get("type") != "queued" or (
                 reply.get("request_id") != request["request_id"]):
                 raise EnrollmentError("Unexpected enrollment reply")

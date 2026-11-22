@@ -1,7 +1,7 @@
 """Αυτόματη πραγματική δοκιμή της σελίδας «Ασφάλεια» (GUI Director) σε δύο υπολογιστές.
 
 Στο Linux ανοίγει το πραγματικό παράθυρο Director (PySide6) και η δοκιμή το οδηγεί
-όπως ο διαχειριστής: μενού, θύρα εγγραφής, κωδικός, Έγκριση/Απόρριψη, μενού «⋯».
+όπως ο διαχειριστής: μενού, κωδικός, Έγκριση/Απόρριψη, μενού «⋯», όριο αιτημάτων.
 Ο Client στα Windows είναι ο ίδιος με το tools/mtls_live_test (ίδια εντολή).
 Χρησιμοποιούνται προσωρινά κλειδιά/μητρώο: η κανονική εγκατάσταση δεν αγγίζεται.
 Οι διάλογοι «Αλλαγή αίθουσας»/«Μετονομασία»/«Ανάκληση» απαντώνται από τη δοκιμή.
@@ -185,8 +185,8 @@ class SecurityGuiRun(DirectorRun):
 
     # ------------------------------------------------------------ βήματα
     def steps(self) -> None:
-        from director.security import TEXT_APPROVED, TEXT_DENIED, TEXT_NEVER, TEXT_REJECTED
-        from director.qt_security import PORT_CLOSED, PORT_OPEN
+        from director.security import (TEXT_APPROVED, TEXT_DENIED, TEXT_NEVER, TEXT_REJECTED,
+                                       full_notice)
 
         self.start_gui()
 
@@ -196,19 +196,17 @@ class SecurityGuiRun(DirectorRun):
             page = self.page
             return (self.window.current_page, self.window.page_title.text(),
                     page.tab_computers.isChecked(), page.tab_certificates.isEnabled(),
-                    page.port_label.text())
+                    hasattr(page, "port_button"))
         state = self.gui(open_page)
-        self.result("1. Μενού «Ασφάλεια»: σελίδα, tabs, θύρα κλειστή",
-                    state == ("security", "Ασφάλεια", True, False, PORT_CLOSED), f"{state}")
+        self.result("1. Μενού «Ασφάλεια»: σελίδα, tabs, χωρίς κουμπί θύρας",
+                    state == ("security", "Ασφάλεια", True, False, False), f"{state}")
 
-        # 2. Άνοιγμα θύρας με το κουμπί
-        def open_port():
-            self.page.port_button.click()
-            return (self.page.port_label.text(), self.page.port_button.text(),
-                    self.runtime.enrollment.is_open)
-        state = self.gui(open_port)
-        self.result("2. Κουμπί «Άνοιγμα»: θύρα εγγραφής ανοιχτή",
-                    state == (PORT_OPEN, "Κλείσιμο", True), f"{state}")
+        # 2. Η θύρα εγγραφής είναι ανοιχτή από την εκκίνηση (απόφαση 22/11/2026)
+        def port_state():
+            return self.runtime.enrollment.is_open, self.page.port_notice.isVisible()
+        state = self.gui(port_state)
+        self.result("2. Θύρα εγγραφής ανοιχτή από την εκκίνηση, χωρίς προειδοποίηση",
+                    state == (True, False), f"{state}")
 
         # 3. Αίτημα από τα Windows εμφανίζεται· ο κωδικός δεν φαίνεται στον Manager
         reply, row = self.enroll_gui()
@@ -309,7 +307,6 @@ class SecurityGuiRun(DirectorRun):
         self.screenshot("4-after-restart")
 
         # 11. Απόρριψη αιτήματος με το κουμπί
-        self.gui(lambda: self.page.port_button.click())
         reply, row = self.enroll_gui(name="PC", profile="gui2")
 
         def deny():
@@ -338,15 +335,24 @@ class SecurityGuiRun(DirectorRun):
                     and self.runtime.trust.registry.approved_entry(board_id) is None)
         self.ask_client("stop_client")
 
-        # 13. Κλείσιμο θύρας με το κουμπί → νέα εγγραφή δεν γίνεται
-        def close_port():
-            self.page.port_button.click()
-            return self.page.port_label.text(), self.runtime.enrollment.is_open
-        state = self.gui(close_port)
-        reply, row = self.enroll_gui(name="Late1", profile="late")
-        self.result("13. Κουμπί «Κλείσιμο»: νέα εγγραφή δεν γίνεται δεκτή",
-                    state == (PORT_CLOSED, False) and reply.get("sas") is None
-                    and reply["rc"] != 0 and row is None)
+        # 13. Όριο αιτημάτων (50 στην κανονική χρήση, 1 εδώ για συντομία)
+        self.gui(lambda: setattr(self.runtime.enrollment, "_max_pending", 1))
+        _first, first_row = self.enroll_gui(name="Late1", profile="late1")
+        full, full_row = self.enroll_gui(name="Late2", profile="late2")
+
+        def notice():
+            self.page.refresh()
+            return self.page.port_notice.isVisible(), self.page.port_notice.text()
+        shown = self.gui(notice)
+        self.screenshot("5-limit")
+        text = self.gui(lambda: (first_row.deny.click(), first_row.result.text())[1]) \
+            if first_row else None
+        _again, again_row = self.enroll_gui(name="Late2", profile="late2")
+        self.result("13. Όριο αιτημάτων: το επιπλέον απορρίπτεται με μήνυμα, μετά χωρά νέο",
+                    first_row is not None and full.get("sas") is None and full["rc"] != 0
+                    and full.get("full") and full_row is None
+                    and shown == (True, full_notice(1)) and text == TEXT_DENIED
+                    and again_row is not None, f"{shown}")
         self.screenshot("5-end")
 
     def run_steps(self) -> None:
