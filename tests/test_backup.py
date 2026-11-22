@@ -206,12 +206,11 @@ class BackupTests(unittest.TestCase):
                                    self.new / "tls" / "director-tls.crt",
                                    self.new / "tls" / "director-tls.key")
         # Simulate a valid newer registry by a signed mutation using another client.
-        from director.tls_identity import create_director_identity
-        client_cert = self.root / "dummy-cert.pem"
-        client_key = self.root / "dummy-key.pem"
-        create_director_identity(client_cert, client_key)
+        from shared.device_identity import create_device_identity
         import uuid
-        reg.approve(str(uuid.uuid4()), "Δοκιμή", client_cert.read_bytes())
+        client_id = str(uuid.uuid4())
+        client_cert, _, _ = create_device_identity(self.root / "client", client_id)
+        reg.approve(client_id, "C2627-Γ1", client_cert.read_bytes())
         with self.assertRaises(BackupError) as cm:
             self.transfer()
         self.assertEqual(cm.exception.status, 5)
