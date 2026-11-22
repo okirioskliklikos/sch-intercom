@@ -13,6 +13,7 @@ import socket
 import threading
 import time
 
+from director.backup import BackupError, ensure_no_interrupted_restore, manager_lock
 from director.broadcast import AudioBroadcaster, MAX_CLIENTS
 from director.security import LastSeenStore, last_seen_path, track_last_seen
 from shared.client_registry import RegistryError, SignedClientRegistry
@@ -422,94 +423,99 @@ def main() -> None:
     parser.add_argument("--gui", action="store_true",
                         help="Κεντρική οθόνη Director (PySide6, pip install -e .[gui])")
     args = parser.parse_args()
-    tls_context = server_context(args.tls_cert, args.tls_key)
     try:
-        registry = SignedClientRegistry(args.registry_file, args.tls_cert, args.tls_key)
-        if args.approve_client_cert:
-            from cryptography import x509
-            from cryptography.x509.oid import NameOID
-            if args.approve_room is None:
-                parser.error("--approve-client-cert απαιτεί --approve-room")
-            pem = args.approve_client_cert.read_bytes()
-            names = x509.load_pem_x509_certificate(pem).subject.get_attributes_for_oid(
-                NameOID.COMMON_NAME)
-            if len(names) != 1:
-                raise RegistryError("Certificate identity does not match UUID")
-            client_id = names[0].value
-            registry.approve(client_id, args.approve_room, pem)
-            print(f"Εγκρίθηκε Client {client_id} (v{registry.version})", flush=True)
-            return
-        if args.revoke_client:
-            registry.revoke(args.revoke_client)
-            print(f"Ανακλήθηκε Client {args.revoke_client} (v{registry.version})", flush=True)
-            return
-    except (RegistryError, ValueError, OSError) as exc:
-        parser.exit(2, f"Σφάλμα μητρώου Clients: {exc}\n")
-    if args.list_clients:
-        for entry in registry.snapshot()["clients"]:
-            print("{} | {} | {}".format(entry["client_id"], entry["room"], entry["status"]))
-        return
-    trust = RegistryTrust(registry, args.tls_cert, args.tls_key)
-    secure_accept = partial(accept_clients, tls_context=trust.context(),
-                            registry=registry, context_provider=trust.context)
-    # Η θύρα εγγραφής είναι πάντα ανοιχτή (απόφαση χρήστη 22/11/2026): ανοίγει με το
-    # CLI παρακάτω ή με το GuiRuntime.start στο --gui.
-    enrollment = EnrollmentServer(args.tls_cert, args.tls_key, trust,
-                                  host=args.host, port=args.enrollment_port,
-                                  max_pending=args.max_pending_requests,
-                                  pending_file=args.registry_file.with_name(
-                                      "enrollment-pending.json"))
-    last_seen = LastSeenStore(last_seen_path(args.registry_file))
-    if args.gui:
-        from director.gui import run_gui
-        run_gui(args, accept_clients=secure_accept, stream_microphone=stream_microphone,
-                enrollment=enrollment, trust=trust, last_seen=last_seen)
-        return
-
-    broadcaster = AudioBroadcaster(max_clients=MAX_CLIENTS, on_event=lambda s: print(s, flush=True))
-    stop = threading.Event()
-    stats = DirectorStats()
-    identifier = director_id(args.director_id_file)
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as server:
-        server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        server.bind((args.host, args.port))
-        server.listen(MAX_CLIENTS)
-        print(f"Director ακούει στο {args.host}:{args.port} — έως {MAX_CLIENTS} Clients", flush=True)
-        beacon = threading.Thread(target=announce,
-                                  args=(stop, identifier, args.port),
-                                  kwargs={"udp_port": args.discovery_port},
-                                  daemon=True, name="director-discovery")
-        beacon.start()
-        receiver = threading.Thread(target=secure_accept, args=(server, broadcaster, stop),
-                                    daemon=True, name="accept-clients")
-        receiver.start()
-        enrollment.open()
-        commands = threading.Thread(target=command_loop, args=(broadcaster, stop, stats),
-                                    kwargs={"revoke": lambda client_id: trust.revoke(client_id, broadcaster),
-                                            "enrollment": enrollment, "trust": trust},
-                                    daemon=True, name="director-commands")
-        commands.start()
-        reporter = threading.Thread(target=periodic_stats,
-                                    args=(stats, broadcaster, stop),
-                                    daemon=True, name="director-stats")
-        reporter.start()
-        seen = threading.Thread(target=track_last_seen, args=(last_seen, broadcaster, stop),
-                                daemon=True, name="director-last-seen")
-        seen.start()
+        with manager_lock(args.registry_file.parent):
+            ensure_no_interrupted_restore(args.registry_file.parent)
+        tls_context = server_context(args.tls_cert, args.tls_key)
         try:
-            stream_microphone(broadcaster, device=args.device, latency=args.latency,
-                              stop=stop, stats=stats)
-        except KeyboardInterrupt:
-            print("\nΟ Director τερματίστηκε.", flush=True)
-        finally:
-            stop.set()
-            enrollment.stop()
-            receiver.join(timeout=1)
-            beacon.join(timeout=1)
-            reporter.join(timeout=1)
-            seen.join(timeout=2)
-            broadcaster.close()
+            registry = SignedClientRegistry(args.registry_file, args.tls_cert, args.tls_key)
+            if args.approve_client_cert:
+                from cryptography import x509
+                from cryptography.x509.oid import NameOID
+                if args.approve_room is None:
+                    parser.error("--approve-client-cert απαιτεί --approve-room")
+                pem = args.approve_client_cert.read_bytes()
+                names = x509.load_pem_x509_certificate(pem).subject.get_attributes_for_oid(
+                    NameOID.COMMON_NAME)
+                if len(names) != 1:
+                    raise RegistryError("Certificate identity does not match UUID")
+                client_id = names[0].value
+                registry.approve(client_id, args.approve_room, pem)
+                print(f"Εγκρίθηκε Client {client_id} (v{registry.version})", flush=True)
+                return
+            if args.revoke_client:
+                registry.revoke(args.revoke_client)
+                print(f"Ανακλήθηκε Client {args.revoke_client} (v{registry.version})", flush=True)
+                return
+        except (RegistryError, ValueError, OSError) as exc:
+            parser.exit(2, f"Σφάλμα μητρώου Clients: {exc}\n")
+        if args.list_clients:
+            for entry in registry.snapshot()["clients"]:
+                print("{} | {} | {}".format(entry["client_id"], entry["room"], entry["status"]))
+            return
+        trust = RegistryTrust(registry, args.tls_cert, args.tls_key)
+        secure_accept = partial(accept_clients, tls_context=trust.context(),
+                                registry=registry, context_provider=trust.context)
+        # Η θύρα εγγραφής είναι πάντα ανοιχτή (απόφαση χρήστη 22/11/2026): ανοίγει με το
+        # CLI παρακάτω ή με το GuiRuntime.start στο --gui.
+        enrollment = EnrollmentServer(args.tls_cert, args.tls_key, trust,
+                                      host=args.host, port=args.enrollment_port,
+                                      max_pending=args.max_pending_requests,
+                                      pending_file=args.registry_file.with_name(
+                                          "enrollment-pending.json"))
+        last_seen = LastSeenStore(last_seen_path(args.registry_file))
+        if args.gui:
+            from director.gui import run_gui
+            run_gui(args, accept_clients=secure_accept, stream_microphone=stream_microphone,
+                    enrollment=enrollment, trust=trust, last_seen=last_seen)
+            return
 
+        broadcaster = AudioBroadcaster(max_clients=MAX_CLIENTS, on_event=lambda s: print(s, flush=True))
+        stop = threading.Event()
+        stats = DirectorStats()
+        identifier = director_id(args.director_id_file)
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as server:
+            server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            server.bind((args.host, args.port))
+            server.listen(MAX_CLIENTS)
+            print(f"Director ακούει στο {args.host}:{args.port} — έως {MAX_CLIENTS} Clients", flush=True)
+            beacon = threading.Thread(target=announce,
+                                      args=(stop, identifier, args.port),
+                                      kwargs={"udp_port": args.discovery_port},
+                                      daemon=True, name="director-discovery")
+            beacon.start()
+            receiver = threading.Thread(target=secure_accept, args=(server, broadcaster, stop),
+                                        daemon=True, name="accept-clients")
+            receiver.start()
+            enrollment.open()
+            commands = threading.Thread(target=command_loop, args=(broadcaster, stop, stats),
+                                        kwargs={"revoke": lambda client_id: trust.revoke(client_id, broadcaster),
+                                                "enrollment": enrollment, "trust": trust},
+                                        daemon=True, name="director-commands")
+            commands.start()
+            reporter = threading.Thread(target=periodic_stats,
+                                        args=(stats, broadcaster, stop),
+                                        daemon=True, name="director-stats")
+            reporter.start()
+            seen = threading.Thread(target=track_last_seen, args=(last_seen, broadcaster, stop),
+                                    daemon=True, name="director-last-seen")
+            seen.start()
+            try:
+                stream_microphone(broadcaster, device=args.device, latency=args.latency,
+                                  stop=stop, stats=stats)
+            except KeyboardInterrupt:
+                print("\nΟ Director τερματίστηκε.", flush=True)
+            finally:
+                stop.set()
+                enrollment.stop()
+                receiver.join(timeout=1)
+                beacon.join(timeout=1)
+                reporter.join(timeout=1)
+                seen.join(timeout=2)
+                broadcaster.close()
+
+    except BackupError as exc:
+        parser.exit(exc.status, str(exc) + "\n")
 
 if __name__ == "__main__":
     main()
