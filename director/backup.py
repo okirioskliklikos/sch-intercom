@@ -85,8 +85,8 @@ def _password(value: str, *, strict: bool = True) -> bytes:
     return value.encode("utf-8")
 
 
-def _key(password: bytes, salt: bytes, n: int) -> bytes:
-    return Scrypt(salt=salt, length=32, n=n, r=8, p=1).derive(password)
+def _key(password: bytes, salt: bytes, n: int, p: int = 1) -> bytes:
+    return Scrypt(salt=salt, length=32, n=n, r=8, p=p).derive(password)
 
 
 def _pair(cert: bytes, secret: bytes) -> str:
@@ -152,6 +152,12 @@ def _validate_contents(contents: dict) -> tuple[dict, dict, list[str]]:
     sections = contents["sections"]
     if not isinstance(manifest, dict) or not isinstance(sections, dict):
         raise BackupError("Μη έγκυρο περιεχόμενο backup.")
+    if manifest.get("backup_format", 0) > FORMAT:
+        raise BackupError("Το backup δημιουργήθηκε από νεότερη έκδοση. Αναβαθμίστε πρώτα τον Manager.")
+    if manifest.get("backup_format") != FORMAT:
+        raise BackupError("Μη υποστηριζόμενη μορφή backup.")
+    if not isinstance(manifest.get("sections"), dict):
+        raise BackupError("Μη έγκυρο manifest.")
     for mandatory in ("tls_identity", "client_registry"):
         if mandatory not in sections:
             raise BackupError("Το backup δεν περιέχει υποχρεωτική ενότητα: " + mandatory)
@@ -168,8 +174,27 @@ def _validate_contents(contents: dict) -> tuple[dict, dict, list[str]]:
                 raise BackupError("Μη υποστηριζόμενη υποχρεωτική ενότητα.")
             warnings.append("Αγνοήθηκε: " + name)
             continue
+        if name not in manifest["sections"] or not isinstance(manifest["sections"][name], dict):
+            raise BackupError("Λείπει hash ενότητας.")
         if hashlib.sha256(canonical(section)).hexdigest() != manifest["sections"][name]["sha256"]:
             raise BackupError("Ασυμφωνία ακεραιότητας ενότητας.")
+        if name == "media_manifest":
+            entries = section.get("files", [])
+            if not isinstance(entries, list) or any(
+                    not isinstance(e, dict) or not isinstance(e.get("name"), str)
+                    or Path(e["name"]).name != e["name"] or e["name"] in (".", "..")
+                    or not isinstance(e.get("sha256"), str)
+                    or len(e["sha256"]) != 64
+                    or type(e.get("size")) is not int or e["size"] < 0
+                    for e in entries):
+                raise BackupError("Μη έγκυρο manifest MP3.")
+        else:
+            if not isinstance(section.get("files"), dict):
+                raise BackupError("Μη έγκυρα αρχεία ενότητας.")
+            required_files = _paths(Path("clients-registry.json"),
+                                    Path("cert.pem"), Path("key.pem"))[name]
+            if set(section["files"]) != set(required_files):
+                raise BackupError("Μη έγκυρα ονόματα αρχείων ενότητας.")
         validated[name] = section
     cert = _un64(validated["tls_identity"]["files"]["cert.pem"])
     secret = _un64(validated["tls_identity"]["files"]["key.pem"])
@@ -309,7 +334,7 @@ def _read_backup(path: Path, password: str | None = None) -> tuple[dict, dict | 
     if password is None:
         return header, None
     try:
-        decrypted = AESGCM(_key(_password(password, strict=False), salt, n)).decrypt(
+        decrypted = AESGCM(_key(_password(password, strict=False), salt, n, pp)).decrypt(
             nonce, raw[8 + size:], raw[:8 + size])
     except (InvalidTag, ValueError):
         raise BackupError(ERROR_SECRET, 3) from None
@@ -538,7 +563,15 @@ def main(argv: list[str] | None = None) -> int:
     res.add_argument("--replace-identity", action="store_true")
     res.add_argument("--accept-older", action="store_true")
     res.add_argument("--restore-media", action="store_true")
-    sub.add_parser("rollback")
+    rb = sub.add_parser("rollback")
+    # Support common options before OR after the subcommand.
+    for command_parser in (cr, ins, res, rb):
+        command_parser.add_argument("--registry-file", type=Path, default=argparse.SUPPRESS)
+        command_parser.add_argument("--tls-cert", type=Path, default=argparse.SUPPRESS)
+        command_parser.add_argument("--tls-key", type=Path, default=argparse.SUPPRESS)
+        command_parser.add_argument("--media-dir", type=Path, default=argparse.SUPPRESS)
+        command_parser.add_argument("--passphrase-env", default=argparse.SUPPRESS,
+                                    help=argparse.SUPPRESS)
     args = parser.parse_args(argv)
     media = args.media_dir or args.registry_file.parent / "media"
     try:
