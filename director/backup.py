@@ -503,7 +503,7 @@ def restore(path: Path, password: str, *, registry_file: Path, tls_cert: Path,
                     target.parent.mkdir(parents=True, exist_ok=True)
                     os.replace(item["stage"], target)
                 if fail_after is not None and idx + 1 >= fail_after:
-                    raise RuntimeError("Injected restore interruption")
+                    raise KeyboardInterrupt("Injected restore interruption")
         except Exception:
             if _journal_path(base).exists():
                 rollback(base)
