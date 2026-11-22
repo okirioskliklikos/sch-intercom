@@ -32,12 +32,15 @@ from cryptography.hazmat.primitives.kdf.scrypt import Scrypt
 
 from shared.client_registry import canonical, digest, verify_document
 from shared.device_identity import _write_secret
+from shared.manager_key import (PASS_SUFFIX, password_path as key_password_path,
+                                plaintext_pem as plaintext_key_pem, protect as protect_key)
 
 MAGIC = b"SIBK"
 FORMAT = 1
 MAX_FILE = 16 * 1024 * 1024
 MAX_HEADER = 4096
 KDF_N = 1 << 17
+INTERRUPTED = 130  # κωδικός εξόδου μετά από Ctrl+C/διακοπή (όπως τα shells)
 ERROR_SECRET = "Λάθος κωδικός ή αλλοιωμένο αρχείο. Ελέγξτε και τη γλώσσα του πληκτρολογίου."
 
 
@@ -135,6 +138,10 @@ def _read_sections(registry_file: Path, tls_cert: Path, tls_key: Path) -> tuple[
                         time.sleep(0.2)
                         raw[filename] = path.read_bytes()
                         _json(raw[filename])
+            if name == "tls_identity":
+                # 4.2C2: στον δίσκο κρυπτογραφημένο (DPAPI)· στο payload ξεκλείδωτο, γιατί
+                # το DPAPI δεν μεταφέρεται. Το payload είναι ήδη κρυπτογραφημένο (AES-GCM).
+                raw["key.pem"] = plaintext_key_pem(tls_key)
             sections[name] = {"schema": 1, "files": {k: _b64(v) for k, v in raw.items()}}
     cert = _un64(sections["tls_identity"]["files"]["cert.pem"])
     secret = _un64(sections["tls_identity"]["files"]["key.pem"])
@@ -539,10 +546,18 @@ def restore(path: Path, password: str, *, registry_file: Path, tls_cert: Path,
             for name, sec in sections.items():
                 if name not in locations:
                     continue
-                for filename, encoded in sec["files"].items():
-                    target = locations[name][filename]
+                files = [(filename, locations[name][filename], _un64(encoded))
+                         for filename, encoded in sec["files"].items()]
+                if name == "tls_identity":
+                    # 4.2C2: το κλειδί ξανακλειδώνεται για ΑΥΤΟΝ τον υπολογιστή/χρήστη
+                    # (νέος κωδικός, DPAPI στα Windows)· ξεκλείδωτο δεν γράφεται ούτε στο staging.
+                    plain = dict((f, c) for f, _, c in files)["key.pem"]
+                    encrypted, stored = protect_key(plain)
+                    files = [(f, t, encrypted if f == "key.pem" else c) for f, t, c in files]
+                    files.append(("key.pem" + PASS_SUFFIX, key_password_path(tls_key), stored))
+                for filename, target, content in files:
                     stage = staging / name / filename
-                    _write_exclusive(stage, _un64(encoded))
+                    _write_exclusive(stage, content)
                     prior = previous_dir / name / filename
                     moves.append({"target": str(target.resolve()), "stage": str(stage.resolve()),
                                   "previous": str(prior.resolve()),
@@ -692,6 +707,16 @@ def main(argv: list[str] | None = None) -> int:
     except (OSError, ValueError, KeyError, TypeError, RuntimeError) as exc:
         print("Αποτυχία backup/restore: " + str(exc), file=sys.stderr)
         return 2
+    except KeyboardInterrupt:
+        # Ctrl+C ή η τεχνητή διακοπή των scripts δοκιμής: καθαρό μήνυμα, όχι traceback.
+        reason = ("Τεχνητή διακοπή δοκιμής (αναμενόμενη)"
+                  if "SCH_BACKUP_TEST_FAIL_AFTER" in os.environ else "Διακοπή από τον χρήστη")
+        if args.command == "restore":
+            print(f"{reason}: η επαναφορά έμεινε μισή. Τρέξτε python -m director.backup "
+                  "rollback πριν ξεκινήσει ο Manager.", file=sys.stderr)
+        else:
+            print(reason + ".", file=sys.stderr)
+        return INTERRUPTED
     return 0
 
 

@@ -209,8 +209,8 @@ class SignedRegistryTests(LocalTLSFixture, unittest.TestCase):
         entry = registry["clients"][0]
         entry["previous_spki"].append(entry["spki_sha256"])
         from shared.client_registry import _wrap
-        from cryptography.hazmat.primitives.serialization import load_pem_private_key
-        key = load_pem_private_key(self.manager_key.read_bytes(), password=None)
+        from shared.manager_key import load_private_key
+        key = load_private_key(self.manager_key)  # κρυπτογραφημένο στον δίσκο (4.2C2)
         with self.assertRaises(RegistryError):
             verify_document(_wrap(registry, key), self.manager_cert.read_bytes())
 

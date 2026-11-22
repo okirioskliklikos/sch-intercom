@@ -112,10 +112,16 @@ class TLSConnection:
 
 
 def server_context(certfile: Path, keyfile: Path) -> ssl.SSLContext:
-    """Load an explicitly supplied Director certificate and private key."""
+    """Load an explicitly supplied Director certificate and private key.
+
+    Το κλειδί του Manager είναι κρυπτογραφημένο στον δίσκο (4.2C2)· ο κωδικός
+    ανοίγει από το ``.pass`` (DPAPI στα Windows) και περνά μόνο στη μνήμη.
+    """
+    from shared.manager_key import key_password
     ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     ctx.minimum_version = MINIMUM_TLS_VERSION
-    ctx.load_cert_chain(certfile=str(certfile), keyfile=str(keyfile))
+    ctx.load_cert_chain(certfile=str(certfile), keyfile=str(keyfile),
+                        password=key_password(keyfile))
     return ctx
 
 

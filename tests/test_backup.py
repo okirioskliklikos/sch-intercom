@@ -17,6 +17,7 @@ from director.backup import (BackupError, BackupLocked, ERROR_SECRET, FORMAT,
                              inspect, manager_lock, restore, rollback)
 from director.tls_identity import create_director_identity
 from shared.client_registry import SignedClientRegistry, canonical, digest
+from shared.manager_key import is_protected, password_path, plaintext_pem
 
 PASSWORD = "ΑσφαλήςΚωδικός2026!"
 N = 1 << 15
@@ -62,7 +63,12 @@ class BackupTests(unittest.TestCase):
         result = self.transfer()
         self.assertEqual(result["registry_version"], 1)
         self.assertTrue((self.new / "tls" / "director-tls.crt").read_bytes() == self.cert.read_bytes())
-        self.assertEqual((self.new / "tls" / "director-tls.key").read_bytes(), self.key.read_bytes())
+        # 4.2C2: ίδιο κλειδί, αλλά ξανακλειδωμένο με νέο κωδικό για τον νέο υπολογιστή.
+        new_key = self.new / "tls" / "director-tls.key"
+        self.assertEqual(plaintext_pem(new_key), plaintext_pem(self.key))
+        self.assertNotEqual(new_key.read_bytes(), self.key.read_bytes())
+        self.assertTrue(is_protected(new_key.read_bytes()))
+        self.assertTrue(password_path(new_key).is_file())
         for name in ("clients-registry.json", "director.id", "director-gui.json",
                      "clients-last-seen.json", "enrollment-pending.json"):
             self.assertEqual((self.new / name).read_bytes(), (self.old / name).read_bytes())
@@ -269,11 +275,34 @@ class BackupTests(unittest.TestCase):
                 self.assertFalse(rollback(self.new))
                 continue
             break
-        # 2 κινήσεις ανά υπάρχον αρχείο (παλιό → pre-restore, νέο → θέση) × 7 αρχεία.
-        self.assertEqual(interrupted, 14)
+        # 2 κινήσεις ανά υπάρχον αρχείο (παλιό → pre-restore, νέο → θέση) × 8 αρχεία
+        # (μαζί με το .pass του κλειδιού, 4.2C2).
+        self.assertEqual(interrupted, 16)
         after = self.snapshot()
         self.assertNotEqual(after, before)
         self.assertEqual(after["director-gui.json"], b'{"width":999}')
+
+    def test_cli_interruption_prints_clean_message_not_traceback(self):
+        import contextlib
+        import io
+        from director.backup import INTERRUPTED, main
+        self.make()
+        self.transfer()
+        stderr = io.StringIO()
+        env = {"SCH_TEST_PASS": PASSWORD, "SCH_BACKUP_TEST_FAIL_AFTER": "3"}
+        with patch.dict(os.environ, env), contextlib.redirect_stderr(stderr), \
+                contextlib.redirect_stdout(io.StringIO()):
+            status = main(["restore", str(self.backup), "--accept-older",
+                           "--registry-file", str(self.new / "clients-registry.json"),
+                           "--tls-cert", str(self.new / "tls" / "director-tls.crt"),
+                           "--tls-key", str(self.new / "tls" / "director-tls.key"),
+                           "--passphrase-env", "SCH_TEST_PASS"])
+        self.assertEqual(status, INTERRUPTED)
+        self.assertNotIn("Traceback", stderr.getvalue())
+        self.assertIn("αναμενόμενη", stderr.getvalue())
+        self.assertIn("rollback", stderr.getvalue())
+        self.assertTrue((self.new / "restore-journal.json").exists())
+        self.assertTrue(rollback(self.new))
 
     def test_error_during_moves_rolls_back_automatically(self):
         import director.backup as backup
@@ -313,7 +342,7 @@ class BackupTests(unittest.TestCase):
                 self.transfer()
         self.assert_clean()
         self.assertEqual(list(self.new.glob("pre-restore-*")), [])
-        secret = self.key.read_bytes()
+        secret = plaintext_pem(self.key)
         for path in self.new.rglob("*"):
             if path.is_file():
                 self.assertNotIn(secret, path.read_bytes(), str(path))
@@ -378,7 +407,7 @@ class BackupTests(unittest.TestCase):
         output = json.dumps(inspect(self.backup, PASSWORD))
         self.assertNotIn("PRIVATE KEY", output)
         self.assertNotIn("CERTIFICATE", output)
-        self.assertNotIn(base64.b64encode(self.key.read_bytes()).decode(), output)
+        self.assertNotIn(base64.b64encode(plaintext_pem(self.key)).decode(), output)
 
     def test_restored_manager_accepts_approved_client_over_real_mtls(self):
         import socket

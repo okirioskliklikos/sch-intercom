@@ -16,6 +16,7 @@ import time
 
 from director.backup import BackupError, ensure_no_interrupted_restore, manager_lock
 from director.broadcast import AudioBroadcaster, MAX_CLIENTS
+from shared.manager_key import ManagerKeyError, migrate as migrate_manager_key, password_path
 from director.security import LastSeenStore, last_seen_path, track_last_seen
 from shared.client_registry import RegistryError, SignedClientRegistry
 from shared.enrollment import (EnrollmentError, EnrollmentServer, ENROLL_PORT,
@@ -433,7 +434,13 @@ def main() -> None:
             # Οι σύντομες offline εντολές (approve/revoke/list) δεν το κρατούν, γιατί
             # τρέχουν και δίπλα σε ενεργό Manager· ελέγχουν μόνο το journal.
             runtime.enter_context(manager_lock(data_dir))
-        ensure_no_interrupted_restore(data_dir)
+            ensure_no_interrupted_restore(data_dir)
+            # 4.2C2: παλιό ακρυπτογράφητο κλειδί → κρυπτογράφηση στη θέση του (ίδιο αποτύπωμα).
+            if migrate_manager_key(args.tls_key):
+                print("Το ιδιωτικό κλειδί TLS του Manager κρυπτογραφήθηκε στον δίσκο "
+                      f"(κωδικός στο {password_path(args.tls_key).name}).", flush=True)
+        else:
+            ensure_no_interrupted_restore(data_dir)
         tls_context = server_context(args.tls_cert, args.tls_key)
         try:
             registry = SignedClientRegistry(args.registry_file, args.tls_cert, args.tls_key)
@@ -524,6 +531,8 @@ def main() -> None:
 
     except BackupError as exc:
         parser.exit(exc.status, str(exc) + "\n")
+    except ManagerKeyError as exc:
+        parser.exit(2, str(exc) + "\n")
     finally:
         runtime.close()
 

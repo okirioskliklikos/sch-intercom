@@ -31,6 +31,7 @@ import time
 if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from shared.manager_key import is_protected, plaintext_pem  # noqa: E402
 from tools.mtls_live_test import JOINED, Process, child_env  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -308,7 +309,10 @@ class LiveTest:
         last_seen = self.new.dir / "clients-last-seen.json"
         checks = {
             "αποτύπωμα TLS": fingerprint(self.new.cert) == self.inspected.get("tls_fingerprint"),
-            "κλειδί": self.new.key.read_bytes() == self.old.key.read_bytes(),
+            # 4.2C2: ίδιο κλειδί, ξανακλειδωμένο με νέο κωδικό/DPAPI για τον νέο υπολογιστή.
+            "κλειδί": (plaintext_pem(self.new.key) == plaintext_pem(self.old.key)
+                       and is_protected(self.new.key.read_bytes())
+                       and self.new.key.read_bytes() != self.old.key.read_bytes()),
             "έκδοση μητρώου": registry["registry_version"] == self.inspected.get(
                 "registry_version"),
             "εκκρεμές αίτημα": pending.is_file() and self.c.name in pending.read_text(
@@ -367,6 +371,8 @@ class LiveTest:
         before = self.new.registry.read_bytes()
         rc, _ = self.new.backup("restore", str(self.file), "--accept-older",
                                 extra_env={"SCH_BACKUP_TEST_FAIL_AFTER": "3"})
+        print("    (Αναμενόμενη τεχνητή διακοπή στη μέση του restore, για έλεγχο rollback.)",
+              flush=True)
         journal = (self.new.dir / "restore-journal.json").exists()
         refused = self.new.start()
         refused.proc.wait(timeout=20)
@@ -380,7 +386,7 @@ class LiveTest:
         joined = director.wait_for(self.a.client_id, JOINED, since=mark, timeout=40)
         self.a.stop()
         self.new.stop()
-        return (rc != 0 and journal and blocked and rb == 0 and restored and joined is not None,
+        return (rc == 130 and journal and blocked and rb == 0 and restored and joined is not None,
                 f"διακοπή rc {rc}, journal {journal}, άρνηση εκκίνησης {blocked}, "
                 f"rollback rc {rb}, ίδιο μητρώο {restored}, σύνδεση {joined is not None}")
 
