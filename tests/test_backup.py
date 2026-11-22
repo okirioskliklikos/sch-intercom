@@ -255,6 +255,51 @@ class BackupTests(unittest.TestCase):
         self.assertNotIn("CERTIFICATE", output)
         self.assertNotIn(base64.b64encode(self.key.read_bytes()).decode(), output)
 
+    def test_restored_manager_accepts_approved_client_over_real_mtls(self):
+        import socket
+        import threading
+        from shared.device_identity import create_device_identity
+        from shared.transport_security import client_context, connect_tls, accept_tls
+        from director.main import RegistryTrust
+
+        client_id = str(__import__("uuid").uuid4())
+        client_cert, client_key, password = create_device_identity(
+            self.root / "client-identity", client_id)
+        registry = SignedClientRegistry(self.registry, self.cert, self.key)
+        registry.approve(client_id, "C2627-Γ1", client_cert.read_bytes())
+        self.make()
+        self.transfer()
+        new_cert = self.new / "tls" / "director-tls.crt"
+        new_key = self.new / "tls" / "director-tls.key"
+        trusted = SignedClientRegistry(self.new / "clients-registry.json", new_cert, new_key)
+        tls = RegistryTrust(trusted, new_cert, new_key).context()
+        status = []
+
+        with socket.socket() as listener:
+            listener.bind(("127.0.0.1", 0))
+            listener.listen(1)
+
+            def serve():
+                try:
+                    sock, _ = listener.accept()
+                    with sock:
+                        with accept_tls(sock, tls) as channel:
+                            status.append(channel.recv(4) == b"PING")
+                            channel.sendall(b"PONG")
+                except Exception as exc:
+                    status.append(exc)
+
+            thread = threading.Thread(target=serve, daemon=True)
+            thread.start()
+            client_tls = client_context(new_cert, certfile=client_cert,
+                                        keyfile=client_key, password=password)
+            with socket.create_connection(listener.getsockname(), timeout=3) as sock:
+                with connect_tls(sock, client_tls) as channel:
+                    channel.sendall(b"PING")
+                    self.assertEqual(channel.recv(4), b"PONG")
+            thread.join(timeout=5)
+            self.assertEqual(status, [True])
+
     def test_existing_backup_not_replaced(self):
         self.make()
         original = self.backup.read_bytes()
