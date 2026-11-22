@@ -30,6 +30,7 @@ ENV_NAME = "SCH_TEST_BACKUP_PASSPHRASE"
 def command(*args: str):
     env = dict(os.environ)
     env[ENV_NAME] = PASSWORD
+    env["PYTHONIOENCODING"] = "utf-8"
     return subprocess.run([sys.executable, "-m", "director.backup", *args,
                            "--passphrase-env", ENV_NAME],
                           cwd=ROOT, env=env, encoding="utf-8",
