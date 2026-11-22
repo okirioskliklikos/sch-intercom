@@ -340,6 +340,27 @@ QScrollBar::add-page, QScrollBar::sub-page {{
 #portState {{
     font-size: {m.font_pt(FONT_SMALL)}pt;
 }}
+#enrollmentPortButton {{
+    background: {LIVE};
+    border: 1px solid {LIVE};
+    border-radius: {px(NAV_RADIUS)}px;
+    color: {WHITE};
+    padding: {px(6)}px {px(14)}px;
+    min-height: {px(ACTION_HEIGHT) - 2}px;
+}}
+#enrollmentPortButton[portOpen="true"] {{
+    background: {CONNECTED};
+    border-color: {CONNECTED};
+}}
+#enrollmentPortButton[portOpen="true"]:hover {{
+    background: {ONLINE};
+    border-color: {ONLINE};
+}}
+#enrollmentPortButton[portOpen="false"]:hover {{
+    background: {LIVE_LIGHT};
+    border-color: {LIVE};
+    color: {LIVE};
+}}
 #requestTitle, #roomTitle {{
     font-weight: 600;
 }}
