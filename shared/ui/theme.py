@@ -356,11 +356,6 @@ QScrollBar::add-page, QScrollBar::sub-page {{
     background: {ONLINE};
     border-color: {ONLINE};
 }}
-#enrollmentPortButton[portOpen="false"]:hover {{
-    background: {LIVE_LIGHT};
-    border-color: {LIVE};
-    color: {LIVE};
-}}
 #requestTitle, #roomTitle {{
     font-weight: 600;
 }}
