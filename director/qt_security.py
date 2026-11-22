@@ -252,6 +252,7 @@ class SecurityPage(QWidget):
         self._build_requests_card()
         self._build_computers_card()
         self.side_by_side: bool | None = None
+        self._column_minimum = -1
         self._arrange(True)
         self.scroll = QScrollArea()
         self.scroll.setWidgetResizable(True)
@@ -261,8 +262,23 @@ class SecurityPage(QWidget):
         layout.addWidget(self.scroll, 1)
 
     # --- διάταξη ------------------------------------------------------------
+    def _card_minimum(self) -> int:
+        """Το ελάχιστο πλάτος της πιο απαιτητικής κάρτας (κεφαλίδες, κουμπιά)."""
+        return max(self.requests_card.minimumSizeHint().width(),
+                   self.computers_card.minimumSizeHint().width())
+
     def _arrange(self, side_by_side: bool) -> None:
-        """Δύο κάρτες δίπλα-δίπλα (≈ ίσες)· σε στενό παράθυρο η μία κάτω από την άλλη."""
+        """Δύο κάρτες δίπλα-δίπλα με ίσο πλάτος· σε στενό παράθυρο η μία κάτω από την άλλη.
+
+        Το ίσο πλάτος στηρίζεται στο ελάχιστο της πιο απαιτητικής κάρτας, ώστε οι
+        κάρτες να μην αλλάζουν πλάτος όταν μπαίνουν/φεύγουν αιτήματα ή υπολογιστές.
+        """
+        minimum = self._card_minimum() if side_by_side else 0
+        if side_by_side == self.side_by_side and minimum == self._column_minimum:
+            return
+        self._column_minimum = minimum
+        for column in (0, 1):
+            self.columns.setColumnMinimumWidth(column, minimum)
         if side_by_side == self.side_by_side:
             return
         self.side_by_side = side_by_side
@@ -272,8 +288,8 @@ class SecurityPage(QWidget):
         self.columns.addWidget(self.requests_card, 0, 0, top)
         if side_by_side:
             self.columns.addWidget(self.computers_card, 0, 1, top)
-            self.columns.setColumnStretch(0, 105)
-            self.columns.setColumnStretch(1, 100)
+            self.columns.setColumnStretch(0, 1)
+            self.columns.setColumnStretch(1, 1)
             self.columns.setRowStretch(0, 1)
             self.columns.setRowStretch(1, 0)
         else:
@@ -284,10 +300,13 @@ class SecurityPage(QWidget):
             self.columns.setRowStretch(1, 1)
 
     def two_columns_fit(self, width: int) -> bool:
-        needed = (self.requests_card.minimumSizeHint().width()
-                  + self.computers_card.minimumSizeHint().width()
-                  + self.columns.horizontalSpacing() + px(theme.SCROLLBAR) + px(6))
+        needed = (2 * self._card_minimum() + self.columns.horizontalSpacing()
+                  + px(theme.SCROLLBAR) + px(6))
         return width >= needed
+
+    def _relayout(self) -> None:
+        """Ξανά μετά από αλλαγή περιεχομένου: νέο αίτημα/υπολογιστής αλλάζει το ελάχιστο."""
+        self._arrange(self.two_columns_fit(self.width()))
 
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)
@@ -429,6 +448,7 @@ class SecurityPage(QWidget):
         self._refresh_port()
         self._refresh_requests(now)
         self._refresh_rooms(now)
+        self._relayout()
 
     def _refresh_port(self) -> None:
         is_open = self.model.port_open

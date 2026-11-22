@@ -494,6 +494,28 @@ class SecurityPageTests(SecurityFixture, unittest.TestCase):
                 body = self.page.scroll.widget()
                 self.assertLessEqual(body.width(), self.page.scroll.viewport().width())
 
+    def test_cards_equal_width_and_never_clipped_when_content_grows(self):
+        # Πραγματική δοκιμή 22/11/2026 (1200px): η δεξιά κάρτα κοβόταν, γιατί το
+        # περιεχόμενο που μπήκε μετά το resize δεν ξαναέλεγχε τη διάταξη.
+        self.window.resize(1200, 800)
+        QApplication.processEvents()
+        body, viewport = self.page.scroll.widget(), self.page.scroll.viewport()
+        widths = set()
+        for step in range(3):
+            self.approved("C2627-Γ1", f"Board{step}", f"d{step}")
+            self.submit(name=f"PC{step}", device=f"p{step}")
+            self.page.refresh()
+            QApplication.processEvents()
+            with self.subTest(step=step):
+                self.assertLessEqual(body.width(), viewport.width())
+                for card in (self.page.requests_card, self.page.computers_card):
+                    self.assertGreaterEqual(card.width(), card.minimumSizeHint().width())
+                if self.page.side_by_side:
+                    self.assertLessEqual(abs(self.page.requests_card.width()
+                                             - self.page.computers_card.width()), 1)
+                    widths.add(self.page.requests_card.width())
+        self.assertLessEqual(len(widths), 1)  # σταθερό πλάτος όσο αλλάζει το περιεχόμενο
+
     def test_invalid_rename_shows_warning(self):
         client_id = self.approved("C2627-Γ1", "Board1", "a")
         self.page.refresh()
