@@ -1,0 +1,854 @@
+"""Ασφάλεια → «Πιστοποιητικά» και Ρυθμίσεις → «Συντήρηση» σε PySide6 (ui-style.md §7–§8).
+
+Μόνο εμφάνιση και σύνδεση σημάτων· η λογική είναι στο `director/maintenance.py` και
+το backup/restore στο `director/backup.py` (ίδιες συναρτήσεις με το CLI).
+
+Επαναφορά μέσα από το GUI: ο Manager σταματά να εξυπηρετεί Clients και αφήνει το
+`manager.lock`, γίνεται η επαναφορά και η εφαρμογή ξεκινά ξανά από την αρχή, ώστε να
+φορτώσει τα νέα αρχεία όπως σε κάθε εκκίνηση. Οι διάλογοι αρχείων και μηνυμάτων είναι
+αντικαταστάσιμοι για δοκιμές χωρίς χρήστη.
+"""
+from __future__ import annotations
+
+from collections.abc import Callable
+from pathlib import Path
+
+from PySide6.QtCore import QSize, Qt, QTimer
+from PySide6.QtGui import QAction, QFontDatabase, QGuiApplication
+from PySide6.QtWidgets import (QApplication, QCheckBox, QDialog, QFileDialog, QFrame,
+                               QGridLayout, QHBoxLayout, QLabel, QLayout, QLineEdit, QMessageBox,
+                               QPushButton, QScrollArea, QVBoxLayout, QWidget)
+
+from director import maintenance as m
+from director.backup import EXTENSION, BackupError
+from director.qt_gui import ElidedLabel, _repolish, load_layout_settings, px, save_layout_settings
+from shared.ui import icons, theme
+
+SETTINGS_TITLE = "Ρυθμίσεις"
+TAB_MAINTENANCE = "Συντήρηση"
+IDENTITY_TITLE = "Ταυτότητα Manager"
+BACKUP_TITLE = "Backup"
+RESTORE_TITLE = "Επαναφορά"
+CREATE_BACKUP = "Δημιουργία backup…"
+OPEN_RESTORE = "Επαναφορά από backup…"
+DELETE_PREVIOUS = "Διαγραφή"
+COPY = "Αντιγραφή"
+COPIED = "Αντιγράφηκε ✓"
+BACKUP_FILTER = "Backup School Intercom (*.sicb)"
+
+
+def _label(text: str = "", name: str | None = None, *, tone: str | None = None) -> QLabel:
+    label = QLabel(text)
+    if name:
+        label.setObjectName(name)
+    if tone is not None:
+        label.setProperty("tone", tone)
+    return label
+
+
+def _button(text: str, kind: str, icon: str | None = None, color: str | None = None,
+            stroke: float = 2.0) -> QPushButton:
+    """kind: primaryAction (γεμάτο primary), secondaryAction (λευκό), deny (κάδος, live)."""
+    button = QPushButton(text)
+    button.setObjectName(kind)
+    button.setCursor(Qt.CursorShape.PointingHandCursor)
+    if icon:
+        button.setIcon(icons.icon(icon, color or theme.TEXT, disabled_color=theme.TEXT_MUTED,
+                                  size=px(theme.ICON), stroke_width=stroke))
+        button.setIconSize(QSize(px(theme.ICON), px(theme.ICON)))
+    return button
+
+
+def _remove_button(text: str) -> QPushButton:
+    return _button(text, "deny", "trash", theme.LIVE, theme.TRASH_ICON_STROKE)
+
+
+class KeyValues(QGridLayout):
+    """Ετικέτα (text_muted) αριστερά, τιμή δεξιά· οι τιμές αλλάζουν με `set`."""
+
+    def __init__(self):
+        super().__init__()
+        self.setContentsMargins(0, 0, 0, 0)
+        self.setHorizontalSpacing(px(theme.KV_GAP))
+        self.setVerticalSpacing(px(9))
+        self.setColumnStretch(1, 1)
+        self.values: dict[str, QWidget] = {}
+        self.labels: dict[str, QLabel] = {}
+
+    def add(self, key: str, label: str, widget: QWidget | None = None) -> QWidget:
+        row = self.rowCount()
+        name = _label(label, "kvLabel")
+        self.addWidget(name, row, 0, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
+        value = widget if widget is not None else _label("", "kvValue")
+        self.addWidget(value, row, 1)
+        self.labels[key] = name
+        self.values[key] = value
+        return value
+
+    def set(self, key: str, text: str, tone: str | None = None) -> None:
+        value = self.values[key]
+        if isinstance(value, ElidedLabel):
+            _set_elided(value, text)
+        else:
+            value.setText(text)
+        _repolish(value, tone=tone or "")
+
+    def set_visible(self, key: str, visible: bool) -> None:
+        self.labels[key].setVisible(visible)
+        self.values[key].setVisible(visible)
+
+
+def _set_elided(label: ElidedLabel, text: str) -> None:
+    """Νέο πλήρες κείμενο: κόβεται με «…» μόνο αν δεν χωρά· ολόκληρο στο tooltip."""
+    label.full_text = text
+    label.setToolTip(text)
+    label.setText(text)
+    label._elide()
+
+
+def _card(title: str) -> tuple[QFrame, QVBoxLayout]:
+    card = QFrame()
+    card.setObjectName("card")
+    layout = QVBoxLayout(card)
+    layout.setContentsMargins(px(15), px(12), px(15), px(15))
+    layout.setSpacing(px(10))
+    layout.addWidget(_label(title, "cardTitle"))
+    return card, layout
+
+
+def _scroll(body: QWidget) -> QScrollArea:
+    scroll = QScrollArea()
+    scroll.setWidgetResizable(True)
+    scroll.setFrameShape(QFrame.Shape.NoFrame)
+    scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+    scroll.setWidget(body)
+    return scroll
+
+
+# --- Ασφάλεια → Πιστοποιητικά -------------------------------------------------
+class CertificatesPanel(QWidget):
+    """Μία κάρτα «Ταυτότητα Manager» (απόφαση χρήστη 22/11/2026: μόνο η ταυτότητα)."""
+
+    def __init__(self, identity: Callable[[], m.ManagerIdentity], parent=None):
+        super().__init__(parent)
+        self._identity = identity
+        self.identity: m.ManagerIdentity | None = None
+        body = QWidget()
+        body.setObjectName("maintenanceBody")
+        outer = QVBoxLayout(body)
+        outer.setContentsMargins(0, 0, px(theme.SCROLL_GAP), 0)
+        card, layout = _card(IDENTITY_TITLE)
+        card.setMaximumWidth(px(theme.IDENTITY_CARD_MAX))
+        self.card = card
+        self.rows = KeyValues()
+        self.rows.add("name", "Όνομα")
+        fingerprint_row = QWidget()
+        row = QHBoxLayout(fingerprint_row)
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(px(12))
+        self.fingerprint = _label("", "fingerprint")
+        mono = QFontDatabase.systemFont(QFontDatabase.SystemFont.FixedFont)
+        mono.setPointSizeF(self.font().pointSizeF() * 0.96)
+        self.fingerprint.setFont(mono)
+        self.fingerprint.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        self.copy_button = QPushButton(COPY)
+        self.copy_button.setObjectName("pill")
+        self.copy_button.setIcon(icons.icon("copy", theme.TEXT, size=px(theme.ICON)))
+        self.copy_button.setIconSize(QSize(px(theme.ICON), px(theme.ICON)))
+        self.copy_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.copy_button.clicked.connect(self.copy_fingerprint)
+        row.addWidget(self.fingerprint, 1)
+        row.addWidget(self.copy_button, 0, Qt.AlignmentFlag.AlignVCenter)
+        self.rows.add("fingerprint", "Αποτύπωμα SHA-256", fingerprint_row)
+        self.rows.add("created", "Δημιουργήθηκε")
+        self.rows.add("expires", "Λήξη")
+        self.rows.add("key", "Κλειδί", self._pair("key"))
+        self.rows.add("registry", "Μητρώο", self._pair("registry"))
+        folder = ElidedLabel("")
+        folder.setObjectName("kvValue")
+        self.rows.add("folder", "Φάκελος", folder)
+        layout.addLayout(self.rows)
+        outer.addWidget(card)
+        outer.addStretch(1)
+        page = QVBoxLayout(self)
+        page.setContentsMargins(0, 0, 0, 0)
+        page.addWidget(_scroll(body))
+        self._copied_timer = QTimer(self)
+        self._copied_timer.setSingleShot(True)
+        self._copied_timer.timeout.connect(lambda: self.copy_button.setText(COPY))
+
+    def _pair(self, key: str) -> QWidget:
+        """«κείμενο · κατάσταση» με τη δεύτερη λέξη σε ok/err χρώμα."""
+        widget = QWidget()
+        row = QHBoxLayout(widget)
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(px(6))
+        main = _label("", "kvValue")
+        state = _label("", "kvValue")
+        row.addWidget(main)
+        row.addWidget(state)
+        row.addStretch(1)
+        setattr(self, f"{key}_text", main)
+        setattr(self, f"{key}_state", state)
+        return widget
+
+    def refresh(self) -> None:
+        try:
+            identity = self._identity()
+        except (OSError, ValueError) as exc:
+            self.rows.set("name", f"Σφάλμα: {exc}", "err")
+            return
+        self.identity = identity
+        self.rows.set("name", identity.name)
+        self.fingerprint.setText(m.fingerprint_lines(identity.fingerprint))
+        self.rows.set("created", m.date_text(identity.created))
+        self.rows.set("expires", identity.expires_text())
+        self.key_text.setText(f"{identity.algorithm} ·")
+        self.key_state.setText("● " + identity.key_text())
+        _repolish(self.key_state, tone="ok" if identity.key_ok else "err")
+        self.registry_text.setText(identity.registry_text()
+                                   + (" ·" if identity.registry_version is not None else ""))
+        self.registry_state.setText(m.TEXT_SIGNATURE_OK if identity.signature_ok
+                                    else m.TEXT_SIGNATURE_BAD)
+        self.registry_state.setVisible(identity.registry_version is not None
+                                       or not identity.signature_ok)
+        _repolish(self.registry_state, tone="ok" if identity.signature_ok else "err")
+        self.rows.set("folder", str(identity.folder))
+
+    def copy_fingerprint(self) -> None:
+        if self.identity is None:
+            return
+        QGuiApplication.clipboard().setText(self.identity.fingerprint)
+        self.copy_button.setText(COPIED)
+        self._copied_timer.start(2000)
+
+
+# --- Διάλογοι ------------------------------------------------------------------
+class _Dialog(QDialog):
+    def __init__(self, title: str, parent=None):
+        super().__init__(parent)
+        self.setObjectName("maintenanceDialog")
+        self.setWindowTitle(title)
+        self.setModal(True)
+        self.body = QVBoxLayout(self)
+        # Το ύψος ακολουθεί το περιεχόμενο (σύνοψη/προειδοποιήσεις που εμφανίζονται).
+        self.body.setSizeConstraint(QLayout.SizeConstraint.SetFixedSize)
+        self.body.addStrut(px(theme.DIALOG_WIDTH) - 2 * px(15))  # ελάχιστο πλάτος
+        self.body.setContentsMargins(px(15), px(14), px(15), px(15))
+        self.body.setSpacing(px(11))
+
+    def field(self, label: str, widget: QWidget, button: QWidget | None = None) -> QWidget:
+        box = QVBoxLayout()
+        box.setSpacing(px(4))
+        box.addWidget(_label(label, "fieldLabel"))
+        row = QHBoxLayout()
+        row.setSpacing(px(8))
+        row.addWidget(widget, 1)
+        if button is not None:
+            row.addWidget(button)
+        box.addLayout(row)
+        self.body.addLayout(box)
+        return widget
+
+    def separator(self) -> QFrame:
+        line = QFrame()
+        line.setObjectName("dialogSeparator")
+        line.setFixedHeight(1)
+        self.body.addWidget(line)
+        return line
+
+    def footer(self, accept_text: str) -> tuple[QPushButton, QPushButton]:
+        row = QHBoxLayout()
+        row.addStretch(1)
+        cancel = _button("Άκυρο", "secondaryAction")
+        accept = _button(accept_text, "primaryAction")
+        cancel.clicked.connect(self.reject)
+        row.addWidget(cancel)
+        row.addWidget(accept)
+        self.body.addSpacing(px(4))
+        self.body.addLayout(row)
+        return cancel, accept
+
+
+def _line_edit(*, password: bool = False) -> QLineEdit:
+    edit = QLineEdit()
+    edit.setObjectName("field")
+    if password:
+        edit.setEchoMode(QLineEdit.EchoMode.Password)
+    return edit
+
+
+def _eye_action(edit: QLineEdit) -> QAction:
+    """Εμφάνιση/απόκρυψη κωδικού (εικονίδιο ματιού μέσα στο πεδίο)."""
+    action = edit.addAction(icons.icon("eye", theme.TEXT_MUTED, size=px(theme.ICON)),
+                            QLineEdit.ActionPosition.TrailingPosition)
+    action.setToolTip("Εμφάνιση κωδικού")
+    action.setCheckable(True)
+
+    def toggle(shown: bool) -> None:
+        edit.setEchoMode(QLineEdit.EchoMode.Normal if shown else QLineEdit.EchoMode.Password)
+
+    action.toggled.connect(toggle)
+    return action
+
+
+class _Busy:
+    """Κέρσορας αναμονής όσο τρέχει το scrypt (κάτω από 1 s) ή η αντιγραφή MP3."""
+
+    def __enter__(self):
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        QApplication.processEvents()
+
+    def __exit__(self, *_exc):
+        QApplication.restoreOverrideCursor()
+
+
+class BackupDialog(_Dialog):
+    def __init__(self, model: m.MaintenanceModel, folder: Path, *,
+                 choose_path: Callable[[QWidget, Path], Path | None] | None = None,
+                 parent=None):
+        super().__init__("Δημιουργία backup", parent)
+        self.model = model
+        self.choose_path = choose_path or self._choose_path
+        self.created: tuple[Path, list[str]] | None = None
+        self.path = _line_edit()
+        self.path.setText(str(Path(folder) / m.default_backup_name()))
+        change = _button("Αλλαγή…", "pill")
+        change.clicked.connect(self._change)
+        self.field("Αρχείο", self.path, change)
+        self.password = _line_edit(password=True)
+        self.eye = _eye_action(self.password)
+        self.field(f"Κωδικός (τουλάχιστον {m.PASSPHRASE_MIN} χαρακτήρες)", self.password)
+        self.confirm = _line_edit(password=True)
+        self.status = _label("", "fieldStatus")
+        self.status.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        self.field("Επιβεβαίωση κωδικού", self.confirm)
+        self.body.addWidget(self.status, 0, Qt.AlignmentFlag.AlignRight)
+        count, size = model.media_files()
+        self.media = QCheckBox("Αντίγραφο φακέλου MP3 δίπλα στο backup")
+        self.media.setChecked(True)
+        self.media_detail = _label(
+            f"{m._plural(count, 'αρχείο', 'αρχεία')} · {m.size_text(size)} · χωρίς κρυπτογράφηση",
+            "small")
+        self.media_detail.setIndent(px(23))
+        self.media_separator = self.separator()
+        self.body.addWidget(self.media)
+        self.body.addWidget(self.media_detail)
+        self.has_media = count > 0
+        for widget in (self.media_separator, self.media, self.media_detail):
+            widget.setVisible(self.has_media)
+        self.error = _label("", "warnText")
+        self.error.setWordWrap(True)
+        self.error.hide()
+        self.body.addWidget(self.error)
+        reminder = _label(m.TEXT_SECRET_REMINDER, "warnText")
+        reminder.setWordWrap(True)
+        self.body.addWidget(reminder)
+        self.cancel, self.create = self.footer("Δημιουργία")
+        self.create.clicked.connect(self.run)
+        for edit in (self.path, self.password, self.confirm):
+            edit.textChanged.connect(self._validate)
+        self._validate()
+
+    def _choose_path(self, parent: QWidget, current: Path) -> Path | None:
+        path, _ = QFileDialog.getSaveFileName(parent, "Αρχείο backup", str(current), BACKUP_FILTER)
+        return Path(path) if path else None
+
+    def _change(self) -> None:
+        chosen = self.choose_path(self, Path(self.path.text()))
+        if chosen is not None:
+            if chosen.suffix.lower() != EXTENSION:
+                chosen = chosen.with_name(chosen.name + EXTENSION)
+            self.path.setText(str(chosen))
+
+    def _validate(self) -> None:
+        first, second = self.password.text(), self.confirm.text()
+        problem = m.passphrase_problem(first, second)
+        if not first and not second:
+            text, tone = "", None
+        elif problem == m.TEXT_PASS_SHORT:
+            text, tone = problem, "muted"
+        elif problem and not second:
+            text, tone = "", None
+        elif problem:
+            text, tone = problem, "err"
+        else:
+            text, tone = m.TEXT_PASS_MATCH, "ok"
+        self.status.setText(text)
+        _repolish(self.status, tone=tone or "")
+        self.create.setEnabled(problem is None and bool(self.path.text().strip()))
+
+    def run(self) -> None:
+        self.error.hide()
+        try:
+            with _Busy():
+                self.created = self.model.create_backup(
+                    Path(self.path.text().strip()), self.password.text(), self.confirm.text(),
+                    copy_media=self.has_media and self.media.isChecked())
+        except (BackupError, OSError, ValueError) as exc:
+            self.error.setText(str(exc))
+            self.error.show()
+            return
+        self.password.clear()
+        self.confirm.clear()
+        self.accept()
+
+
+class RestoreDialog(_Dialog):
+    def __init__(self, model: m.MaintenanceModel, folder: Path, *,
+                 choose_path: Callable[[QWidget, Path], Path | None] | None = None,
+                 parent=None):
+        super().__init__("Επαναφορά από backup", parent)
+        self.body.addStrut(px(theme.DIALOG_WIDTH + 30) - 2 * px(15))
+        self.model = model
+        self.folder = Path(folder)
+        self.choose_path = choose_path or self._choose_path
+        self.info: dict | None = None
+        self.path = _line_edit()
+        change = _button("Αλλαγή…", "pill")
+        change.clicked.connect(self._change)
+        self.field("Αρχείο", self.path, change)
+        self.password = _line_edit(password=True)
+        self.open_button = _button("Άνοιγμα", "pill")
+        self.open_button.clicked.connect(self.load)
+        self.password.returnPressed.connect(self.load)
+        self.field("Κωδικός", self.password, self.open_button)
+        self.error = _label("", "warnText")
+        self.error.setWordWrap(True)
+        self.error.hide()
+        self.body.addWidget(self.error)
+
+        self.summary = QWidget()
+        summary = QVBoxLayout(self.summary)
+        summary.setContentsMargins(0, 0, 0, 0)
+        summary.setSpacing(px(11))
+        line = QFrame()
+        line.setObjectName("dialogSeparator")
+        line.setFixedHeight(1)
+        summary.addWidget(line)
+        self.rows = KeyValues()
+        for key, text in (("created", "Δημιουργήθηκε"), ("registry", "Μητρώο"),
+                          ("identity", "Ταυτότητα"), ("mp3", "MP3")):
+            self.rows.add(key, text)
+        summary.addLayout(self.rows)
+        self.media = QCheckBox("Αντιγραφή των MP3 που λείπουν")
+        self.media.setChecked(True)
+        self.media_detail = _label("", "small")
+        self.media_detail.setIndent(px(23))
+        summary.addWidget(self.media)
+        summary.addWidget(self.media_detail)
+        self.warning_line = QFrame()
+        self.warning_line.setObjectName("dialogSeparator")
+        self.warning_line.setFixedHeight(1)
+        summary.addWidget(self.warning_line)
+        self.warning = _label("", "warnText")
+        self.warning.setWordWrap(True)
+        summary.addWidget(self.warning)
+        self.consent = QCheckBox("")
+        summary.addWidget(self.consent)
+        note = _label(m.TEXT_RESTART_NOTE, "small")
+        note.setWordWrap(True)
+        summary.addWidget(note)
+        self.summary.hide()
+        self.body.addWidget(self.summary)
+
+        self.cancel, self.restore = self.footer("Επαναφορά και επανεκκίνηση")
+        self.restore.clicked.connect(self._confirm)
+        self.consent.toggled.connect(self._validate)
+        self.path.textChanged.connect(self._reset)
+        self.password.textChanged.connect(self._reset)
+        self._validate()
+
+    def _choose_path(self, parent: QWidget, current: Path) -> Path | None:
+        path, _ = QFileDialog.getOpenFileName(parent, "Αρχείο backup", str(current), BACKUP_FILTER)
+        return Path(path) if path else None
+
+    def _change(self) -> None:
+        current = Path(self.path.text()) if self.path.text() else self.folder
+        chosen = self.choose_path(self, current)
+        if chosen is not None:
+            self.path.setText(str(chosen))
+            self.password.setFocus()
+
+    def _reset(self) -> None:
+        """Νέο αρχείο ή κωδικός: η σύνοψη δεν ισχύει πια."""
+        if self.info is not None:
+            self.info = None
+            self.summary.hide()
+            self.adjustSize()
+        self.error.hide()
+        self._validate()
+
+    def load(self) -> None:
+        self.error.hide()
+        path = Path(self.path.text().strip())
+        try:
+            with _Busy():
+                info = self.model.preview(path, self.password.text())
+        except (BackupError, OSError, ValueError, KeyError) as exc:
+            self.info = None
+            self.summary.hide()
+            self.error.setText(str(exc) if isinstance(exc, BackupError) else f"Σφάλμα: {exc}")
+            self.error.show()
+            self._validate()
+            self.adjustSize()
+            return
+        self.info = info
+        rows = dict(zip(("created", "registry", "identity", "mp3"), m.preview_rows(info)))
+        for key, (_label_text, text, tone) in rows.items():
+            self.rows.set(key, text, tone)
+        self.rows.set_visible("mp3", "mp3" in rows)
+        copy = info["media_copy_available"]
+        self.media.setVisible(copy)
+        self.media_detail.setVisible(copy)
+        self.media_detail.setText("από " + path.stem + "-media")
+        warning = m.preview_warning(info)
+        for widget in (self.warning_line, self.warning, self.consent):
+            widget.setVisible(warning is not None)
+        self.consent.setChecked(False)
+        if warning:
+            self.warning.setText(warning[0])
+            self.consent.setText(warning[1])
+        self.summary.show()
+        self._validate()
+        self.adjustSize()
+
+    def _validate(self) -> None:
+        ready = self.info is not None
+        if ready and m.preview_warning(self.info) is not None:
+            ready = self.consent.isChecked()
+        self.restore.setEnabled(ready)
+        self.open_button.setEnabled(bool(self.path.text().strip()) and bool(self.password.text()))
+
+    def request(self) -> m.RestoreRequest | None:
+        if self.info is None:
+            return None
+        consent = self.consent.isChecked()
+        return m.RestoreRequest(
+            Path(self.path.text().strip()), self.password.text(),
+            replace_identity=consent and self.info["identity"] == "different",
+            accept_older=consent and self.info["relation"] in ("older", "conflict"),
+            restore_media=bool(self.info["media_copy_available"]) and self.media.isChecked())
+
+    def _confirm(self) -> None:
+        if self.request() is not None:
+            self.accept()
+
+
+class RestoreProgress(_Dialog):
+    """Βήματα επαναφοράς: ✓ ολοκληρώθηκε, ● τρέχει, κενό = δεν ξεκίνησε."""
+
+    def __init__(self, parent=None):
+        super().__init__("Επαναφορά από backup", parent)
+        self.setWindowFlag(Qt.WindowType.WindowCloseButtonHint, False)
+        self.steps: list[tuple[QLabel, QLabel]] = []
+        for text in m.RESTORE_STEPS:
+            row = QHBoxLayout()
+            row.setSpacing(px(10))
+            mark = _label("", "kvValue")
+            mark.setFixedWidth(px(16))
+            label = _label(text)
+            row.addWidget(mark)
+            row.addWidget(label, 1)
+            self.body.addLayout(row)
+            self.steps.append((mark, label))
+
+    def set_step(self, index: int) -> None:
+        for number, (mark, label) in enumerate(self.steps):
+            if number < index:
+                mark.setText("✓")
+                _repolish(mark, tone="ok")
+            elif number == index:
+                mark.setText("●")
+                _repolish(mark, tone="")
+            else:
+                mark.setText("")
+            font = label.font()
+            font.setWeight(font.Weight.DemiBold if number == index else font.Weight.Normal)
+            label.setFont(font)
+        QApplication.processEvents()
+
+
+def run_restore(parent: QWidget | None, model: m.MaintenanceModel, request: m.RestoreRequest, *,
+                stop_serving: Callable[[], None], restart: Callable[[], None],
+                warn: Callable[[str], None], progress: RestoreProgress | None = None) -> bool:
+    """Σταματά την εξυπηρέτηση, κάνει την επαναφορά και ζητά επανεκκίνηση.
+
+    Και σε αποτυχία ο Manager ξεκινά ξανά: το restore επαναφέρει μόνο του τα
+    προηγούμενα αρχεία (4.2C §6.2), οπότε η επανεκκίνηση συνεχίζει με αυτά.
+    Επιστρέφει True αν η επαναφορά πέτυχε.
+    """
+    progress = progress or RestoreProgress(parent)
+    progress.show()
+    progress.set_step(0)
+    ok = False
+    try:
+        stop_serving()
+        progress.set_step(1)
+        model.restore(request)
+        ok = True
+        progress.set_step(2)
+    except (BackupError, OSError, ValueError, KeyError) as exc:
+        warn(f"Η επαναφορά απέτυχε: {exc}\n\nΟ Manager ξεκινά ξανά με τα προηγούμενα δεδομένα.")
+    finally:
+        restart()
+    return ok
+
+
+# --- Ρυθμίσεις → Συντήρηση ----------------------------------------------------
+class SettingsPage(QWidget):
+    """Σελίδα «Ρυθμίσεις» με μόνο tab τη «Συντήρηση» (απόφαση χρήστη 22/11/2026)."""
+
+    def __init__(self, model: m.MaintenanceModel, *,
+                 start_restore: Callable[[m.RestoreRequest], None] | None = None,
+                 restore_blocked: Callable[[], str | None] = lambda: None,
+                 choose_save: Callable[[QWidget, Path], Path | None] | None = None,
+                 choose_open: Callable[[QWidget, Path], Path | None] | None = None,
+                 confirm: Callable[[str, str, str], bool] | None = None,
+                 inform: Callable[[str, str], None] | None = None,
+                 dialog_hook: Callable[[QDialog], None] | None = None,
+                 layout_settings: Path | None = None, parent=None):
+        super().__init__(parent)
+        self.model = model
+        self.start_restore = start_restore
+        self.restore_blocked = restore_blocked
+        self.choose_save = choose_save
+        self.choose_open = choose_open
+        self.confirm = confirm or self._confirm
+        self.inform = inform or self._inform
+        # Για δοκιμές: συμπληρώνει τον διάλογο αντί για χρήστη (αλλιώς exec()).
+        self.dialog_hook = dialog_hook
+        self.layout_settings = layout_settings
+        self.side_by_side: bool | None = None
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(px(theme.CARD_SPACING))
+        tabs = QHBoxLayout()
+        self.tab_maintenance = QPushButton(TAB_MAINTENANCE)
+        self.tab_maintenance.setObjectName("tab")
+        self.tab_maintenance.setCheckable(True)
+        self.tab_maintenance.setChecked(True)
+        self.tab_maintenance.clicked.connect(lambda: self.tab_maintenance.setChecked(True))
+        tabs.addWidget(self.tab_maintenance)
+        tabs.addStretch(1)
+        layout.addLayout(tabs)
+
+        body = QWidget()
+        body.setObjectName("maintenanceBody")
+        self.grid = QGridLayout(body)
+        self.grid.setContentsMargins(0, 0, px(theme.SCROLL_GAP), 0)
+        self.grid.setSpacing(px(theme.CARD_SPACING))
+        self.backup_card = self._build_backup_card()
+        self.restore_card = self._build_restore_card()
+        for card in (self.backup_card, self.restore_card):
+            card.setFixedWidth(px(theme.MAINTENANCE_CARD))
+        self._arrange(True)
+        self.scroll = _scroll(body)
+        layout.addWidget(self.scroll, 1)
+
+    # --- κατασκευή ---------------------------------------------------------
+    def _build_backup_card(self) -> QFrame:
+        card, layout = _card(BACKUP_TITLE)
+        self.backup_rows = KeyValues()
+        self.backup_rows.add("when", "Τελευταίο")
+        file_name = ElidedLabel("")
+        file_name.setObjectName("kvValue")
+        self.backup_rows.add("file", "Αρχείο", file_name)
+        self.backup_rows.add("changes", "Από τότε")
+        layout.addLayout(self.backup_rows)
+        layout.addSpacing(px(4))
+        row = QHBoxLayout()
+        self.create_button = _button(CREATE_BACKUP, "primaryAction", "backup", theme.WHITE)
+        self.create_button.clicked.connect(self.open_backup)
+        row.addWidget(self.create_button)
+        row.addStretch(1)
+        layout.addLayout(row)
+        layout.addStretch(1)
+        return card
+
+    def _build_restore_card(self) -> QFrame:
+        card, layout = _card(RESTORE_TITLE)
+        self.restore_rows = KeyValues()
+        self.restore_rows.add("when", "Τελευταία")
+        previous = QWidget()
+        box = QVBoxLayout(previous)
+        box.setContentsMargins(0, 0, 0, 0)
+        box.setSpacing(px(1))
+        self.previous_name = ElidedLabel("")
+        self.previous_name.setObjectName("kvValue")
+        self.previous_hint = _label(m.TEXT_PREVIOUS_HINT, "small")
+        box.addWidget(self.previous_name)
+        box.addWidget(self.previous_hint)
+        self.restore_rows.add("previous", "Προηγούμενα αρχεία", previous)
+        layout.addLayout(self.restore_rows)
+        layout.addSpacing(px(4))
+        row = QHBoxLayout()
+        row.setSpacing(px(8))
+        self.restore_button = _button(OPEN_RESTORE, "secondaryAction", "restore")
+        self.restore_button.clicked.connect(self.open_restore)
+        self.delete_button = _remove_button(DELETE_PREVIOUS)
+        self.delete_button.clicked.connect(self.delete_previous)
+        row.addWidget(self.restore_button)
+        row.addWidget(self.delete_button)
+        row.addStretch(1)
+        layout.addLayout(row)
+        layout.addStretch(1)
+        return card
+
+    def _arrange(self, side_by_side: bool) -> None:
+        if side_by_side == self.side_by_side:
+            return
+        self.side_by_side = side_by_side
+        for card in (self.backup_card, self.restore_card):
+            self.grid.removeWidget(card)
+        top = Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft
+        self.grid.addWidget(self.backup_card, 0, 0, top)
+        self.grid.addWidget(self.restore_card, 0 if side_by_side else 1,
+                            1 if side_by_side else 0, top)
+        for column in range(3):
+            self.grid.setColumnStretch(column, 0)
+        for row in range(3):
+            self.grid.setRowStretch(row, 0)
+        self.grid.setColumnStretch(2 if side_by_side else 1, 1)
+        self.grid.setRowStretch(1 if side_by_side else 2, 1)
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        needed = 2 * px(theme.MAINTENANCE_CARD) + px(theme.CARD_SPACING) \
+            + px(theme.SCROLL_GAP) + px(theme.SCROLLBAR)
+        self._arrange(self.width() >= needed)
+
+    # --- ανανέωση ----------------------------------------------------------
+    def refresh(self) -> None:
+        last = self.model.last_backup()
+        if last is None:
+            self.backup_rows.set("when", "—")
+            self.backup_rows.set_visible("file", False)
+            self.backup_rows.set_visible("changes", False)
+        else:
+            self.backup_rows.set("when", last["when"])
+            self.backup_rows.set("file", last["file_name"])
+            self.backup_rows.set_visible("file", True)
+            changes = last["changes"]
+            self.backup_rows.set_visible("changes", changes is not None)
+            if changes is not None:
+                self.backup_rows.set("changes", m.changes_text(changes),
+                                     "ok" if changes == 0 else "err")
+        restored = self.model.last_restore()
+        self.restore_rows.set("when", restored["when"] if restored else "—")
+        previous = self.model.previous_folders()
+        if previous:
+            text = previous[0].name + (f" (+{len(previous) - 1})" if len(previous) > 1 else "")
+            _repolish(self.previous_name, tone="err")
+            _set_elided(self.previous_name, text)
+            self.previous_name.setToolTip("\n".join(str(p) for p in previous))
+        else:
+            _repolish(self.previous_name, tone="muted")
+            _set_elided(self.previous_name, "—")
+        self.previous_hint.setVisible(bool(previous))
+        self.delete_button.setVisible(bool(previous))
+
+    # --- φάκελος backup ----------------------------------------------------
+    def _folder(self) -> Path:
+        saved = load_layout_settings(self.layout_settings).get("backup_folder")
+        if isinstance(saved, str) and Path(saved).is_dir():
+            return Path(saved)
+        documents = Path.home() / "Documents"
+        return documents if documents.is_dir() else Path.home()
+
+    def _remember_folder(self, path: Path) -> None:
+        save_layout_settings(self.layout_settings, {"backup_folder": str(Path(path).parent)})
+
+    def _show(self, dialog: QDialog) -> int:
+        if self.dialog_hook is not None:
+            self.dialog_hook(dialog)
+            return dialog.result()
+        return dialog.exec()
+
+    # --- ενέργειες ---------------------------------------------------------
+    def open_backup(self) -> None:
+        dialog = BackupDialog(self.model, self._folder(), choose_path=self.choose_save,
+                              parent=self)
+        self.last_dialog = dialog
+        if self._show(dialog) == QDialog.DialogCode.Accepted and dialog.created:
+            path, warnings = dialog.created
+            self._remember_folder(path)
+            self.refresh()
+            self.inform(BACKUP_TITLE, "\n\n".join([f"Backup: {path}", *warnings,
+                                                   m.TEXT_SECRET_REMINDER]))
+
+    def open_restore(self) -> None:
+        blocked = self.restore_blocked()
+        if blocked:
+            self.inform(RESTORE_TITLE, blocked)
+            return
+        dialog = RestoreDialog(self.model, self._folder(), choose_path=self.choose_open,
+                               parent=self)
+        self.last_dialog = dialog
+        if self._show(dialog) != QDialog.DialogCode.Accepted:
+            return
+        request = dialog.request()
+        dialog.password.clear()
+        blocked = self.restore_blocked()
+        if blocked:
+            self.inform(RESTORE_TITLE, blocked)
+            return
+        if request is not None and self.start_restore is not None:
+            self._remember_folder(request.path)
+            self.start_restore(request)
+
+    def delete_previous(self) -> None:
+        folders = self.model.previous_folders()
+        if not folders:
+            return
+        if not self.confirm("Διαγραφή προηγούμενων αρχείων",
+                            f"Σβήνονται {m._plural(len(folders), 'φάκελος', 'φάκελοι')} με τα "
+                            "αρχεία πριν από την επαναφορά, μαζί με το προηγούμενο ιδιωτικό "
+                            "κλειδί. Δεν αναιρείται.", DELETE_PREVIOUS):
+            return
+        try:
+            self.model.delete_previous()
+        except OSError as exc:
+            self.inform(RESTORE_TITLE, f"Η διαγραφή απέτυχε: {exc}")
+        self.refresh()
+
+    # --- διάλογοι μηνυμάτων --------------------------------------------------
+    def _confirm(self, title: str, text: str, action: str) -> bool:
+        box = QMessageBox(QMessageBox.Icon.Warning, title, text,
+                          QMessageBox.StandardButton.Cancel, self)
+        accept = box.addButton(action, QMessageBox.ButtonRole.DestructiveRole)
+        box.setDefaultButton(QMessageBox.StandardButton.Cancel)
+        box.exec()
+        return box.clickedButton() is accept
+
+    def _inform(self, title: str, text: str) -> None:
+        QMessageBox.information(self, title, text)
+
+    def visible_texts(self) -> list[str]:
+        texts = []
+        for widget in self.findChildren(QWidget):
+            for getter in ("text", "toolTip", "placeholderText"):
+                value = getattr(widget, getter, None)
+                if callable(value):
+                    try:
+                        texts.append(str(value()))
+                    except TypeError:
+                        pass
+        return texts
+
+
+def ask_rollback() -> bool:
+    """Στην εκκίνηση με --gui, όταν μια επαναφορά έμεινε μισή (restore-journal.json)."""
+    from director.qt_gui import create_application
+    create_application()
+    box = QMessageBox(QMessageBox.Icon.Warning, "School Intercom",
+                      "Η επαναφορά από backup διακόπηκε πριν ολοκληρωθεί. Ο Manager δεν "
+                      "ξεκινά μέχρι να επιστρέψουν τα προηγούμενα αρχεία.",
+                      QMessageBox.StandardButton.Cancel)
+    accept = box.addButton("Επιστροφή στην προηγούμενη κατάσταση",
+                           QMessageBox.ButtonRole.AcceptRole)
+    box.setDefaultButton(accept)
+    box.exec()
+    return box.clickedButton() is accept
+

@@ -18,7 +18,7 @@ from PySide6.QtCore import (QElapsedTimer, QPointF, QRectF, QSize, Qt, QTimer,
                             QVariantAnimation)
 from PySide6.QtGui import QColor, QFontMetrics, QPainter, QPen
 from PySide6.QtWidgets import (QAbstractButton, QApplication, QButtonGroup, QCheckBox,
-                               QFrame, QGridLayout, QHBoxLayout, QLabel, QMainWindow,
+                               QFrame, QGridLayout, QHBoxLayout, QLabel, QMainWindow, QMessageBox,
                                QPushButton, QRadioButton, QScrollArea, QSizePolicy,
                                QStackedWidget, QVBoxLayout, QWidget)
 
@@ -472,7 +472,8 @@ class DirectorWindow(QMainWindow):
                  server_up: Callable[[], bool] = lambda: True,
                  clock: Callable[[], float] = time.monotonic,
                  security=None, security_options: dict | None = None,
-                 layout_settings: Path | None = None):
+                 layout_settings: Path | None = None,
+                 maintenance=None, maintenance_options: dict | None = None):
         super().__init__()
         # Επιπλέον πλάτος αιθουσών από τη λαβή, σε px του mockup (ανεξάρτητο κλίμακας).
         self._layout_settings = layout_settings
@@ -484,6 +485,11 @@ class DirectorWindow(QMainWindow):
         self.security = security
         self.security_page = None
         self._security_options = security_options or {}
+        # Ρυθμίσεις → Συντήρηση και tab «Πιστοποιητικά» (director/maintenance.py).
+        self.maintenance = maintenance
+        self.settings_page = None
+        self._maintenance_options = dict(maintenance_options or {})
+        self.restore_succeeded: bool | None = None
         self._security_refreshed = -math.inf
         self.mic = microphone
         self.server_up = server_up
@@ -554,7 +560,8 @@ class DirectorWindow(QMainWindow):
             button.setIcon(icons.icon(key, theme.TEXT, selected_color=theme.PRIMARY,
                                       disabled_color=theme.TEXT_MUTED, size=px(theme.ICON)))
             button.setIconSize(QSize(px(theme.ICON), px(theme.ICON)))
-            if key == "home" or (key == "security" and self.security is not None):
+            if (key == "home" or (key == "security" and self.security is not None)
+                    or (key == "settings" and self.maintenance is not None)):
                 button.setChecked(key == "home")
                 button.setCursor(Qt.CursorShape.PointingHandCursor)
                 button.clicked.connect(lambda _=False, k=key: self.show_page(k))
@@ -595,9 +602,20 @@ class DirectorWindow(QMainWindow):
         if self.security is not None:
             from director.qt_security import SecurityPage
             options = {"layout_settings": self._layout_settings, **self._security_options}
+            if self.maintenance is not None:
+                options.setdefault("identity", self.maintenance.identity)
             self.security_page = SecurityPage(self.security, **options)
             self.pages.addWidget(self.security_page)
             self.page_keys.append("security")
+        if self.maintenance is not None:
+            from director.qt_maintenance import SettingsPage
+            options = {key: value for key, value in self._maintenance_options.items()
+                       if key not in ("stop_serving", "restart", "warn")}
+            options.setdefault("layout_settings", self._layout_settings)
+            self.settings_page = SettingsPage(self.maintenance, start_restore=self.start_restore,
+                                              restore_blocked=self.restore_blocked, **options)
+            self.pages.addWidget(self.settings_page)
+            self.page_keys.append("settings")
         layout.addWidget(self.pages, 1)
         return content
 
@@ -612,6 +630,13 @@ class DirectorWindow(QMainWindow):
             from director.qt_security import PAGE_TITLE as SECURITY_TITLE
             self.page_title.setText(SECURITY_TITLE)
             self._security_refreshed = -math.inf
+            if self.security_page.certificates is not None and \
+                    self.security_page.current_tab != "Υπολογιστές":
+                self.security_page.certificates.refresh()
+        elif key == "settings":
+            from director.qt_maintenance import SETTINGS_TITLE
+            self.page_title.setText(SETTINGS_TITLE)
+            self.settings_page.refresh()
         else:
             self.page_title.setText(PAGE_TITLE)
         self.refresh()
@@ -1004,7 +1029,7 @@ class DirectorWindow(QMainWindow):
         """
         if not self._layout_pending:
             self._layout_pending = True
-            QTimer.singleShot(0, self._run_requested_layout)
+            QTimer.singleShot(0, self, self._run_requested_layout)  # ακυρώνεται με το παράθυρο
 
     def _run_requested_layout(self) -> None:
         self._layout_pending = False
@@ -1241,6 +1266,23 @@ class DirectorWindow(QMainWindow):
                                             disabled_color=theme.TEXT_MUTED,
                                             size=px(theme.ICON)))
 
+    # --- επαναφορά από backup (Ρυθμίσεις → Συντήρηση) ------------------------
+    def restore_blocked(self) -> str | None:
+        if self.mic.live:
+            return "Τερματίστε πρώτα τη ζωντανή ανακοίνωση."
+        return None
+
+    def start_restore(self, request) -> None:
+        """Σταματά την εξυπηρέτηση, επαναφέρει και ξεκινά ξανά (GuiRuntime)."""
+        from director.qt_maintenance import run_restore
+        options = self._maintenance_options
+        warn = options.get("warn") or (lambda text: QMessageBox.warning(self, "Επαναφορά", text))
+        self.timer.stop()
+        self.restore_succeeded = run_restore(
+            self, self.maintenance, request,
+            stop_serving=options.get("stop_serving", lambda: None),
+            restart=options.get("restart", lambda: None), warn=warn)
+
     def closeEvent(self, event) -> None:
         self.timer.stop()
         self.mic.shutdown()
@@ -1299,8 +1341,17 @@ class GuiRuntime:
 
     def __init__(self, args, *, accept_clients, stream_microphone,
                  enrollment=None, trust=None, last_seen=None,
-                 security_options: dict | None = None):
+                 security_options: dict | None = None,
+                 release_lock: Callable[[], None] | None = None,
+                 maintenance_options: dict | None = None,
+                 quit_app: Callable[[], None] | None = None):
         self.args = args
+        # Αφήνει το manager.lock πριν από επαναφορά μέσα από το GUI (Ρυθμίσεις → Συντήρηση).
+        self.release_lock = release_lock
+        self.maintenance_options = maintenance_options or {}
+        self.quit_app = quit_app or (lambda: QApplication.instance().quit())
+        self.restart_requested = False
+        self._stopped = False
         self.accept_clients = accept_clients
         self.enrollment = enrollment
         self.trust = trust
@@ -1352,17 +1403,44 @@ class GuiRuntime:
                 security = SecurityModel(self.enrollment, self.trust, self.broadcaster,
                                          self.last_seen)
         core = list(self.threads)
+        maintenance = None
+        tls_cert, tls_key = getattr(args, "tls_cert", None), getattr(args, "tls_key", None)
+        if self.trust is not None and tls_cert is not None and tls_key is not None:
+            from director.maintenance import MaintenanceModel
+            registry = self.trust.registry
+            maintenance = MaintenanceModel(args.registry_file, tls_cert, tls_key,
+                                           registry_version=lambda: registry.version)
+        options = {"stop_serving": self.stop_serving, "restart": self.request_restart,
+                   **self.maintenance_options}
         self.window = DirectorWindow(
             self.broadcaster, self.microphone,
             server_up=lambda: all(thread.is_alive() for thread in core),
             security=security, security_options=self.security_options,
-            layout_settings=self.layout_settings)
+            layout_settings=self.layout_settings,
+            maintenance=maintenance, maintenance_options=options)
         return self.window
 
-    def shutdown(self) -> None:
-        if self.window is not None:
-            release_window(self.window)
-            self.window = None
+    def stop_serving(self) -> None:
+        """Σταματά Clients, εγγραφή και ανακάλυψη και αφήνει το manager.lock.
+
+        Μετά από αυτό το `director.backup.restore` μπορεί να πάρει το κλείδωμα· το
+        παράθυρο μένει ανοιχτό μόνο για την πρόοδο της επαναφοράς.
+        """
+        self._stop_all()
+        if self.last_seen is not None:
+            self.last_seen.flush()
+        if self.release_lock is not None:
+            self.release_lock()
+
+    def request_restart(self) -> None:
+        """Μετά την επαναφορά: κλείνει το παράθυρο· το main ξεκινά ξανά τον Manager."""
+        self.restart_requested = True
+        self.quit_app()
+
+    def _stop_all(self) -> None:
+        if self._stopped:
+            return
+        self._stopped = True
         # Πρώτα STOP στους Clients, μετά κλείσιμο sockets και worker threads.
         self.microphone.shutdown()
         if self.enrollment is not None:
@@ -1377,16 +1455,24 @@ class GuiRuntime:
         for thread in self.threads:
             thread.join(timeout=1)
 
+    def shutdown(self) -> None:
+        if self.window is not None:
+            release_window(self.window)
+            self.window = None
+        self._stop_all()
+
 
 def run_qt_gui(args, *, accept_clients, stream_microphone, enrollment=None, trust=None,
-               last_seen=None) -> None:
+               last_seen=None, release_lock=None) -> bool:
+    """Επιστρέφει True αν ζητήθηκε επανεκκίνηση (μετά από επαναφορά backup)."""
     app = create_application()
     runtime = GuiRuntime(args, accept_clients=accept_clients,
                          stream_microphone=stream_microphone, enrollment=enrollment,
-                         trust=trust, last_seen=last_seen)
+                         trust=trust, last_seen=last_seen, release_lock=release_lock)
     try:
         window = runtime.start()
         window.show()
         app.exec()
     finally:
         runtime.shutdown()
+    return runtime.restart_requested

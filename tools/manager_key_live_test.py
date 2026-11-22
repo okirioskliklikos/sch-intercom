@@ -37,7 +37,7 @@ class KeyTest:
         self.pc = Machine(base, "pc-main")
         self.new = Machine(base, "pc-new")
         self.board = Device(base, "Board1")
-        self.backup = base / "usb" / "key-test.sib"
+        self.backup = base / "usb" / "key-test.sicb"
 
     def step(self, name: str, action) -> None:
         try:

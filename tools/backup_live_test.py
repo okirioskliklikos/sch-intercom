@@ -161,7 +161,7 @@ class LiveTest:
         self.a, self.b, self.c = (Device(base, n) for n in ("Board1", "Board2", "Board3"))
         self.usb = base / "usb"
         self.usb.mkdir()
-        self.file = self.usb / "sch-intercom-backup-test.sib"
+        self.file = self.usb / "sch-intercom-backup-test.sicb"
         self.c_short: str | None = None
         self.c_code: str | None = None
         self.inspected: dict = {}
@@ -274,7 +274,7 @@ class LiveTest:
         return rc == 3 and empty, f"rc {rc}, ο pc-new έμεινε άδειος {empty}"
 
     def s08_tampered(self):
-        tampered = self.usb / "tampered.sib"
+        tampered = self.usb / "tampered.sicb"
         data = bytearray(self.file.read_bytes())
         data[len(data) // 2] ^= 0x01
         tampered.write_bytes(bytes(data))
