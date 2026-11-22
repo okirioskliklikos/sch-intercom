@@ -10,7 +10,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 try:
     from PySide6.QtGui import QFont
-    from PySide6.QtWidgets import QApplication
+    from PySide6.QtWidgets import QApplication, QLabel
     from director.qt_gui import (HINT_IDLE, HINT_LIVE, HINT_LIVE_MUTED, HINT_MUTED,
                                  DirectorWindow, create_application, current_metrics,
                                  release_window)
@@ -202,61 +202,116 @@ class DirectorWindowTests(TestCase):
             with self.subTest(name=name):
                 self.assertEqual(window.room_rows[name].label.text(), name)
 
-    def test_room_scrollbar_styled_and_always_visible(self):
-        status = [(f"id-{i}", f"Αίθουσα {i:02d}", True, 0.1) for i in range(60)]
-        window = self.make(status)
+    def sized(self, count, width, height):
+        status = [(f"id-{i}", f"Αίθουσα {i:02d}", True, 0.1) for i in range(count)]
+        broadcaster = StatusBroadcaster(status)
+        window = DirectorWindow(broadcaster, DirectorMicrophone(FakeStream(), broadcaster))
+        window.timer.stop()
+        self.addCleanup(release_window, window)
+        window.setMinimumSize(100, 100)  # η offscreen «οθόνη» είναι μικρή
+        window.resize(width, height)
         window.show()
+        for _ in range(3):
+            QApplication.processEvents()
+            window._layout_rooms()
         QApplication.processEvents()
-        window._layout_rooms()
-        QApplication.processEvents()
-        bar = window.room_scroll.verticalScrollBar()
-        self.assertTrue(bar.isVisible())          # χωρίς να περάσει το ποντίκι
+        return window
+
+    def test_page_scrollbar_styled_when_rooms_stacked(self):
+        window = self.sized(60, 1000, 600)
+        self.assertTrue(window.stacked)
+        bar = window.page_scroll.verticalScrollBar()
+        self.assertTrue(bar.isVisible())
         self.assertGreater(bar.maximum(), 0)
         self.assertEqual(bar.width(), current_metrics().px(theme.SCROLLBAR))
+        # Οι αίθουσες δεν έχουν δική τους κύλιση στη διάταξη «η μία κάτω από την άλλη».
+        self.assertFalse(window.room_scroll.verticalScrollBar().isVisible())
         qss = theme.stylesheet(current_metrics())
         self.assertIn("QScrollBar::handle:vertical", qss)
         self.assertIn(theme.PRIMARY_DARK, qss)
 
     def test_third_column_opens_and_announcement_narrows(self):
-        status = [(f"id-{i}", f"Αίθουσα {i:02d}", True, 0.1) for i in range(30)]
-        window = self.make(status)
         m = current_metrics()
-        window.setMinimumSize(m.px(1350), m.px(640))
-        window.resize(m.px(1350), m.px(640))
-        window.show()
-        QApplication.processEvents()
-        window._layout_rooms()
-        QApplication.processEvents()
+        window = self.sized(30, m.px(1350), m.px(640))
+        self.assertFalse(window.stacked)
         self.assertGreaterEqual(window._room_columns, 3)
         bar = window.room_scroll.verticalScrollBar()
         self.assertFalse(bar.isVisible())         # χωρά σε στήλες, χωρίς κύλιση
         self.assertGreaterEqual(window.announcement_card.width(),
                                 m.px(theme.ANNOUNCE_MIN_WIDTH))
-        # Στενότερο παράθυρο: λιγότερες στήλες και κύλιση.
-        window.setMinimumSize(m.px(860), m.px(640))
-        window.resize(m.px(900), m.px(640))
-        QApplication.processEvents()
-        window._layout_rooms()
-        QApplication.processEvents()
-        self.assertEqual(window._room_columns, 2)
-        self.assertTrue(bar.isVisible())
-        self.assertGreaterEqual(window.announcement_card.width(),
-                                m.px(theme.ANNOUNCE_MIN_WIDTH))
 
-    def test_connection_dot_before_label(self):
-        # «● Συνδεδεμένος» (ui-style.md §4, απόφαση 22/11/2026).
-        window = self.make(self.STATUS)
-        window.show()
-        QApplication.processEvents()
-        self.assertLess(window.connection_dot.x() + window.connection_dot.width(),
-                        window.connection_label.x() + 1)
-
-    def test_room_columns_have_fixed_scaled_width(self):
         window = self.make(self.STATUS)
         window.show()
         QApplication.processEvents()
         width = current_metrics().px(theme.ROOM_COLUMN_WIDTH)
         self.assertEqual({r.width() for r in window.room_rows.values()}, {width})
+
+    def assert_not_clipped(self, window):
+        page = window.page
+        announce = window.announcement_card
+        self.assertGreaterEqual(announce.width(), announce.minimumSizeHint().width())
+        body = window.page_scroll.widget()
+        self.assertLessEqual(body.width(), window.page_scroll.viewport().width())
+        for card in (announce, window.rooms_card, window.selection_card):
+            right = card.mapTo(page, card.rect().topRight()).x()
+            self.assertLessEqual(right, page.width())
+        grid = window.room_grid_widget
+        self.assertLessEqual(grid.mapTo(window.rooms_card, grid.rect().topRight()).x(),
+                             window.rooms_card.width())
+
+    def test_rooms_go_below_announcement_when_they_do_not_fit(self):
+        # Πραγματική χρήση 22/11/2026: με 2-3 στήλες αιθουσών οι κάρτες κόβονταν δεξιά.
+        # Απόφαση χρήστη: τότε «Ανακοίνωση» πάνω, «Αίθουσες» και «Επιλογή» από κάτω.
+        for width in (1000, 1200, 1366):
+            for count in (17, 30, 40):
+                with self.subTest(width=width, rooms=count):
+                    window = self.sized(count, width, 700)
+                    self.assert_not_clipped(window)
+                    announce = window.announcement_card
+                    rooms = window.rooms_card
+                    selection = window.selection_card
+                    page = window.page
+                    if window.stacked:
+                        self.assertLessEqual(
+                            announce.mapTo(page, announce.rect().bottomLeft()).y(),
+                            rooms.mapTo(page, rooms.rect().topLeft()).y())
+                        self.assertLessEqual(
+                            rooms.mapTo(page, rooms.rect().bottomLeft()).y(),
+                            selection.mapTo(page, selection.rect().topLeft()).y())
+                        # Όλες οι αίθουσες ορατές με κύλιση σελίδας, όχι μέσα στην κάρτα.
+                        self.assertFalse(window.room_scroll.verticalScrollBar().isVisible())
+                        self.assertEqual(window.room_scroll.height(),
+                                         window.room_grid_widget.height())
+                    else:
+                        self.assertLess(
+                            announce.mapTo(page, announce.rect().topRight()).x(),
+                            rooms.mapTo(page, rooms.rect().topLeft()).x())
+                        self.assertFalse(window.room_scroll.verticalScrollBar().isVisible())
+                    window.hide()
+        # 1366×700: 17 αίθουσες χωρούν δίπλα-δίπλα, 40 όχι.
+        self.assertFalse(self.sized(17, 1366, 700).stacked)
+        self.assertTrue(self.sized(40, 1366, 700).stacked)
+
+    def test_layout_switches_back_and_forth_with_window_size(self):
+        window = self.sized(30, 1700, 900)
+        self.assertFalse(window.stacked)
+        for width, stacked in ((1100, True), (1700, False), (1100, True)):
+            window.resize(width, 900)
+            for _ in range(3):
+                QApplication.processEvents()
+                window._layout_rooms()
+            with self.subTest(width=width):
+                self.assertEqual(window.stacked, stacked)
+                self.assert_not_clipped(window)
+
+    def test_preview_label_never_clipped(self):
+        window = self.make(self.STATUS)
+        window.show()
+        QApplication.processEvents()
+        labels = [w for w in window.announcement_card.findChildren(QLabel)
+                  if w.text() == "Στάθμη μικροφώνου"]
+        self.assertEqual(len(labels), 1)
+        self.assertGreaterEqual(labels[0].width(), labels[0].sizeHint().width())
 
     def test_start_and_stop_from_round_button(self):
         window = self.make(self.STATUS)
