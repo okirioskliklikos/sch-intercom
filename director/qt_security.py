@@ -13,7 +13,7 @@ from collections.abc import Callable
 
 from PySide6.QtCore import QRegularExpression, QSize, Qt
 from PySide6.QtGui import QAction, QColor, QFontDatabase, QPalette, QRegularExpressionValidator
-from PySide6.QtWidgets import (QApplication, QFrame, QProxyStyle, QStyle, QGridLayout, QHBoxLayout, QInputDialog, QLabel,
+from PySide6.QtWidgets import (QApplication, QFrame, QGraphicsDropShadowEffect, QProxyStyle, QStyle, QGridLayout, QHBoxLayout, QInputDialog, QLabel,
                                QLineEdit, QMenu,
                                QMessageBox, QPushButton, QScrollArea, QSizePolicy,
                                QToolButton, QVBoxLayout, QWidget)
@@ -59,6 +59,29 @@ class _MenuStyle(QProxyStyle):
         return super().pixelMetric(metric, option, widget)
 
 
+class ActionMenu(QMenu):
+    """Μενού ⋮ με ήπια εξωτερική σκιά (απόφαση χρήστη 22/11/2026).
+
+    Η σκιά σχεδιάζεται από την εφαρμογή (διάφανο παράθυρο + QGraphicsDropShadowEffect
+    μέσα στο περιθώριο MENU_SHADOW), ώστε να είναι ίδια σε Windows και Linux/Wayland·
+    η σκιά του λειτουργικού απενεργοποιείται για να μη φαίνονται δύο.
+    """
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setObjectName("actionMenu")
+        self.setWindowFlags(self.windowFlags() | Qt.WindowType.FramelessWindowHint
+                            | Qt.WindowType.NoDropShadowWindowHint)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        shadow = QGraphicsDropShadowEffect(self)
+        shadow.setBlurRadius(px(theme.MENU_SHADOW) * 2)
+        shadow.setOffset(0, px(2))
+        color = QColor(theme.TEXT)
+        color.setAlpha(60)
+        shadow.setColor(color)
+        self.setGraphicsEffect(shadow)
+
+
 def _menu_button(accessible: str, actions: list[QAction | None]) -> QToolButton:
     """Μικρό τετράγωνο κουμπί με εικονίδιο ⋮ και μενού (None = διαχωριστικό)."""
     button = QToolButton()
@@ -70,8 +93,7 @@ def _menu_button(accessible: str, actions: list[QAction | None]) -> QToolButton:
     button.setToolTip("Ενέργειες")
     button.setCursor(Qt.CursorShape.PointingHandCursor)
     button.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
-    menu = QMenu(button)
-    menu.setObjectName("actionMenu")
+    menu = ActionMenu(button)
     style = _MenuStyle(QApplication.style().name())
     style.setParent(menu)
     menu.setStyle(style)

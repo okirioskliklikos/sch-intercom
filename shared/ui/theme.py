@@ -139,6 +139,7 @@ METER_BAR = 6
 METER_GAP = 4
 SCROLLBAR = 8               # πλάτος scroll bar, χωρίς βελάκια
 SCROLLBAR_HANDLE_MIN = 32   # ελάχιστο μήκος λαβής
+MENU_SHADOW = 10            # περιθώριο σκιάς γύρω από τα μενού ⋮
 MENU_ICON = 18              # εικονίδια στοιχείων μενού ⋮ (απόφαση χρήστη 22/11/2026)
 SCROLL_GAP = 12             # κενό περιεχομένου πριν από τη γραμμή κύλισης (σελίδα «Ασφάλεια»)
 # Σελίδα «Ασφάλεια» (ui-style.md §6)
@@ -428,6 +429,29 @@ QScrollBar::add-page, QScrollBar::sub-page {{
 }}
 #actionMenu {{
     font-size: {m.font_pt()}pt;  /* ίδιο με το κείμενο των καρτών (απόφαση 22/11/2026) */
+    /* Διάφανο περιθώριο γύρω από το μενού για τη σκιά (ActionMenu, qt_security.py). */
+    margin: {px(MENU_SHADOW)}px;
+    background: {CARD_BG};
+    border: 1px solid {CARD_BORDER};
+    border-radius: {px(CARD_RADIUS)}px;
+    padding: {px(4)}px;
+    color: {TEXT};
+}}
+#actionMenu::item {{
+    padding: {px(6)}px {px(16)}px {px(6)}px {px(8)}px;
+    border-radius: {px(NAV_RADIUS)}px;
+    background: transparent;
+}}
+#actionMenu::item:selected {{
+    background: {WINDOW_BG};
+}}
+#actionMenu::icon {{
+    padding-left: {px(8)}px;
+}}
+#actionMenu::separator {{
+    height: 1px;
+    background: {CARD_BORDER};
+    margin: {px(4)}px {px(6)}px;
 }}
 #rowMenu::menu-indicator {{
     width: 0;

@@ -668,6 +668,10 @@ class SecurityPageTests(SecurityFixture, unittest.TestCase):
         from shared.ui import theme
         menu = row.menu_button.menu()
         self.assertEqual(menu.objectName(), "actionMenu")
+        # Εξωτερική σκιά από την εφαρμογή, όχι από το λειτουργικό (απόφαση 22/11/2026).
+        self.assertTrue(menu.testAttribute(Qt.WidgetAttribute.WA_TranslucentBackground))
+        self.assertIsNotNone(menu.graphicsEffect())
+        self.assertTrue(menu.windowFlags() & Qt.WindowType.NoDropShadowWindowHint)
         self.assertEqual(menu.style().pixelMetric(menu.style().PixelMetric.PM_SmallIconSize),
                          px(theme.MENU_ICON))
         self.assertEqual(menu.font().pointSizeF(), row.name.font().pointSizeF())
