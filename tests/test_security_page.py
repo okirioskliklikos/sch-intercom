@@ -18,8 +18,8 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from director.main import RegistryTrust
 from director.security import (LAST_SEEN_SAVE_SECONDS, TEXT_APPROVED, TEXT_DENIED,
-                               TEXT_EXPIRED, TEXT_FULL_NOTICE, TEXT_NEVER, TEXT_REJECTED,
-                               LastSeenStore, full_notice,
+                               TEXT_EXPIRED, TEXT_JUST_NOW, TEXT_NEVER, TEXT_REJECTED,
+                               LastSeenStore, full_text, requests_status, wrong_code_text,
                                SecurityModel, ago_text, expires_text, last_seen_path)
 from shared.client_registry import SignedClientRegistry
 from shared.device_identity import create_device_identity
@@ -72,14 +72,15 @@ class Clock:
 
 class TextTests(unittest.TestCase):
     def test_ago_matches_mockup_wording(self):
-        self.assertEqual(ago_text(20), "πριν 20″")
+        self.assertEqual(ago_text(20), TEXT_JUST_NOW)  # όχι μέτρημα ανά δευτερόλεπτο
+        self.assertEqual(ago_text(59), "μόλις τώρα")
         self.assertEqual(ago_text(60), "πριν 1 λεπτό")
         self.assertEqual(ago_text(180), "πριν 3 λεπτά")
         self.assertEqual(ago_text(3600), "πριν 1 ώρα")
         self.assertEqual(ago_text(7200), "πριν 2 ώρες")
         self.assertEqual(ago_text(86400), "πριν 1 ημέρα")
         self.assertEqual(ago_text(3 * 86400 + 5), "πριν 3 ημέρες")
-        self.assertEqual(ago_text(-5), "πριν 0″")
+        self.assertEqual(ago_text(-5), TEXT_JUST_NOW)
 
     def test_expiry_says_today_tomorrow_or_date(self):
         now = time.mktime((2026, 11, 22, 7, 12, 0, 0, 0, -1))
@@ -232,14 +233,26 @@ class SecurityModelTests(SecurityFixture, unittest.TestCase):
 
     def test_limit_is_fifty_requests(self):
         self.assertEqual(MAX_PENDING, 50)
-        self.assertEqual(TEXT_FULL_NOTICE, "Συμπληρώθηκε το όριο αιτημάτων (50): νέα αιτήματα απορρίπτονται")
+        self.assertEqual(full_text(50), "Συμπληρώθηκε το όριο (50)")
+
+    def test_requests_status_indicator(self):
+        # Απόφαση χρήστη 22/11/2026: κόκκινο «N/50» από τα 45, γκρι πλήθος πριν.
+        self.assertEqual(requests_status(0), ("", False))
+        self.assertEqual(requests_status(1), ("1 αίτημα", False))
+        self.assertEqual(requests_status(44), ("44 αιτήματα", False))
+        self.assertEqual(requests_status(45), ("45/50 αιτήματα", True))
+        self.assertEqual(requests_status(49), ("49/50 αιτήματα", True))
+        self.assertEqual(requests_status(50), ("Συμπληρώθηκε το όριο (50)", True))
+        self.assertEqual(wrong_code_text(2), "Λάθος κωδικός · απομένουν 2")
+        self.assertEqual(wrong_code_text(1), "Λάθος κωδικός · απομένει 1")
 
     def test_full_list_rejects_new_requests_until_one_is_answered(self):
         with mock.patch.object(self.enrollment, "_max_pending", 2):
             _first, code = self.submit(name="PC1", device="d1")
             self.submit(name="PC2", device="d2")
             self.assertTrue(self.enrollment.is_full)
-            self.assertEqual(self.model.port_notice(), full_notice(2))
+            self.assertIsNone(self.model.port_notice())
+            self.assertEqual(self.model.requests_status(2), (full_text(2), True))
             with self.assertRaises(RequestsFullError) as caught:
                 self.submit(name="PC3", device="d3")
             self.assertEqual(str(caught.exception), TEXT_FULL)
@@ -249,7 +262,7 @@ class SecurityModelTests(SecurityFixture, unittest.TestCase):
             self.assertEqual(len(self.model.requests()), 2)
             # Μόλις απαντηθεί ένα, χωρά νέο.
             self.assertTrue(self.model.approve(self.request_id(name="PC1"), code).ok)
-            self.assertIsNone(self.model.port_notice())
+            self.assertFalse(self.enrollment.is_full)
             self.submit(name="PC3", device="d3")
             self.assertEqual(len(self.model.requests()), 2)
 
@@ -278,9 +291,8 @@ class SecurityModelTests(SecurityFixture, unittest.TestCase):
         first = self.model.approve(rid, self.wrong(code, 1))
         second = self.model.approve(rid, self.wrong(code, 2))
         third = self.model.approve(rid, self.wrong(code, 3))
-        self.assertEqual((first.text, first.final), ("Λάθος κωδικός. Απομένουν 2 προσπάθειες.",
-                                                     False))
-        self.assertEqual(second.text, "Λάθος κωδικός. Απομένει 1 προσπάθεια.")
+        self.assertEqual((first.text, first.final), (wrong_code_text(2), False))
+        self.assertEqual(second.text, wrong_code_text(1))
         self.assertEqual((third.text, third.final, third.ok), (TEXT_REJECTED, True, False))
         self.assertEqual(self.model.requests(), [])
         self.assertIsNone(self.registry.approved_entry(client_id))
@@ -342,7 +354,7 @@ class SecurityModelTests(SecurityFixture, unittest.TestCase):
         a = self.approve("Γ1", "PC", "a")
         self.broadcaster.offline[a] = ("Γ1", 30.0)  # ο LastSeenStore δεν το έχει δει ακόμη
         [room] = self.model.rooms()
-        self.assertEqual(room.computers[0].state(self.clock.now), "πριν 30″")
+        self.assertEqual(room.computers[0].state(self.clock.now), TEXT_JUST_NOW)
 
     def test_room_last_seen_is_most_recent_computer(self):
         a = self.approve("Γ1", "PC", "a")
@@ -433,20 +445,22 @@ class SecurityPageTests(SecurityFixture, unittest.TestCase):
             self.assertFalse(hasattr(page, name), name)
         self.assertFalse(page.port_notice.isVisible())
         self.assertEqual(page.port_notice.text(), "")
-        # Μόνο ο τίτλος στην κεφαλίδα της κάρτας «Νέες εγγραφές».
-        head = page.requests_card.layout().itemAt(0).widget()
-        self.assertEqual([w.text() for w in head.findChildren(QLabel)], ["Νέες εγγραφές"])
+        # Κεφαλίδα ενότητας: τίτλος + ένδειξη πλήθους (κενή χωρίς αιτήματα), χωρίς κουμπιά.
+        head = page.request_count.parentWidget()
+        self.assertEqual([w.text() for w in head.findChildren(QLabel)], ["Νέες εγγραφές", ""])
         self.assertEqual(head.findChildren(QPushButton), [])
 
     def test_full_list_notice_on_page(self):
         with mock.patch.object(self.enrollment, "_max_pending", 1):
             self.submit()
             self.page.refresh()
-            self.assertTrue(self.page.port_notice.isVisible())
-            self.assertEqual(self.page.port_notice.text(), full_notice(1))
+            self.assertFalse(self.page.port_notice.isVisible())
+            self.assertEqual(self.page.request_count.text(), full_text(1))
+            self.assertEqual(self.page.request_count.property("warn"), "true")
             self.assertEqual(len(self.page.request_rows), 1)
         self.page.refresh()
-        self.assertFalse(self.page.port_notice.isVisible())
+        self.assertEqual(self.page.request_count.text(), "1 αίτημα")
+        self.assertEqual(self.page.request_count.property("warn"), "false")
 
     def test_request_row_wrong_codes_and_code_never_shown(self):
         client_id, code = self.submit()
@@ -459,7 +473,7 @@ class SecurityPageTests(SecurityFixture, unittest.TestCase):
         self.assertEqual(row.code.text(), "123")
         row.code.setText(self.wrong(code))
         row.approve.click()
-        self.assertEqual(row.result.text(), "Λάθος κωδικός. Απομένουν 2 προσπάθειες.")
+        self.assertEqual(row.result.text(), wrong_code_text(2))
         self.assertFalse(row.actions.isHidden())
         self.assertEqual(row.code.text(), "")
         for offset in (2, 3):
@@ -560,13 +574,77 @@ class SecurityPageTests(SecurityFixture, unittest.TestCase):
             QApplication.processEvents()
             with self.subTest(step=step):
                 self.assertLessEqual(body.width(), viewport.width())
-                for card in (self.page.requests_card, self.page.computers_card):
+                for section in (self.page.requests_section, self.page.computers_section):
+                    self.assertGreaterEqual(section.width(), section.minimumSizeHint().width())
+                for card in self.page.room_cards.values():
                     self.assertGreaterEqual(card.width(), card.minimumSizeHint().width())
                 if self.page.side_by_side:
-                    self.assertLessEqual(abs(self.page.requests_card.width()
-                                             - self.page.computers_card.width()), 1)
-                    widths.add(self.page.requests_card.width())
+                    widths.add(self.page.requests_section.width())
         self.assertLessEqual(len(widths), 1)  # σταθερό πλάτος όσο αλλάζει το περιεχόμενο
+
+    def test_request_card_result_top_right_and_buttons_far_right(self):
+        # Απόφαση χρήστη 22/11/2026: κάθε αίτημα δική του κάρτα, αποτέλεσμα πάνω δεξιά,
+        # Έγκριση/Απόρριψη τέρμα δεξιά, μεγάλο πεδίο κωδικού.
+        _client_id, code = self.submit()
+        self.page.refresh()
+        [row] = self.page.request_rows.values()
+        row.code.setText(self.wrong(code))
+        row.approve.click()
+        QApplication.processEvents()
+        self.assertEqual(row.objectName(), "card")
+        self.assertTrue(row.result.isVisible())
+
+        def box(widget):
+            top_left = widget.mapTo(row, widget.rect().topLeft())
+            return top_left.x(), top_left.y(), top_left.x() + widget.width()
+
+        title_x, title_y, title_right = box(row.title)
+        result_x, result_y, result_right = box(row.result)
+        self.assertLessEqual(abs(result_y - title_y), row.title.height())  # ίδια γραμμή
+        self.assertGreaterEqual(result_x, title_right)
+        code_x, _y, code_right = box(row.code)
+        approve_x, _y, approve_right = box(row.approve)
+        deny_x, _y, deny_right = box(row.deny)
+        self.assertLess(code_right, approve_x)
+        self.assertLess(approve_right, deny_x)
+        margin = row.layout().contentsMargins().right()
+        self.assertLessEqual(abs(row.width() - margin - deny_right), 2)
+        self.assertLessEqual(abs(row.width() - margin - result_right), 2)
+        eight_digits = row.code.fontMetrics().horizontalAdvance("0" * 8)
+        self.assertGreater(row.code.width(), eight_digits)
+
+    def test_room_cards_fill_rows_and_divider_follows_layout(self):
+        for index, room in enumerate(("C2627-Α1", "C2627-Β1", "C2627-Γ1", "C2627-Δ1")):
+            self.approved(room, "PC", f"r{index}")
+        self.page.refresh()
+        columns = {}
+        for width in (1000, 1366, 1680, 1920):
+            self.window.resize(width, 800)
+            for _ in range(3):
+                QApplication.processEvents()
+            page = self.page
+            with self.subTest(width=width):
+                cards = list(page.room_cards.values())
+                card_min = page._room_card_minimum()
+                spacing = page.room_grid.horizontalSpacing()
+                expected = max(1, (page.computers_section.width() + spacing)
+                               // (card_min + spacing))
+                self.assertEqual(page.room_columns, expected)
+                columns[width] = page.room_columns
+                tops = [card.mapTo(page, card.rect().topLeft()).y() for card in cards]
+                self.assertEqual(len(set(tops[:page.room_columns])), 1)  # μία γραμμή
+                for card in cards:
+                    self.assertGreaterEqual(card.width(), card_min - 1)
+                    self.assertLessEqual(card.mapTo(page.scroll.viewport(),
+                                                    card.rect().topRight()).x(),
+                                         page.scroll.viewport().width())
+                if page.side_by_side:
+                    self.assertEqual(page.divider.width(), 1)
+                else:
+                    self.assertEqual(page.divider.height(), 1)
+        self.assertGreater(columns[1920], columns[1366])
+        self.assertTrue(all(columns[a] <= columns[b]
+                            for a, b in ((1366, 1680), (1680, 1920))))
 
     def test_invalid_rename_shows_warning(self):
         client_id = self.approved("C2627-Γ1", "Board1", "a")

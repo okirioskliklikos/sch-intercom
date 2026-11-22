@@ -1,9 +1,10 @@
 """Σελίδα «Ασφάλεια» του Director σε PySide6 (docs/ui-style.md §6).
 
 Μόνο εμφάνιση και σύνδεση σημάτων· η λογική είναι στο `director/security.py`.
-Tab «Υπολογιστές»: «Νέες εγγραφές» (αιτήματα, κωδικός, Έγκριση/Απόρριψη)
-και «Εγγεγραμμένοι υπολογιστές» (ανά αίθουσα, μενού ⋯). Το tab «Πιστοποιητικά»
-φαίνεται ανενεργό μέχρι να σχεδιαστεί.
+Tab «Υπολογιστές» (απόφαση χρήστη 22/11/2026): αριστερά «Νέες εγγραφές», μία
+κάρτα ανά αίτημα σε μία στήλη· ήπιο διαχωριστικό· δεξιά «Εγγεγραμμένοι υπολογιστές»,
+μία κάρτα ανά αίθουσα, όσες χωρούν ανά γραμμή. Το tab «Πιστοποιητικά» φαίνεται
+ανενεργό μέχρι να σχεδιαστεί.
 """
 from __future__ import annotations
 
@@ -17,7 +18,7 @@ from PySide6.QtWidgets import (QFrame, QGridLayout, QHBoxLayout, QInputDialog, Q
                                QMessageBox, QPushButton, QScrollArea, QSizePolicy,
                                QToolButton, QVBoxLayout, QWidget)
 
-from director.qt_gui import ElidedLabel, StatusDot, _card, _repolish, px
+from director.qt_gui import ElidedLabel, StatusDot, _repolish, px
 from director.security import (CODE_LENGTH, ComputerView, Decision, RequestView,
                                RoomView, SecurityModel, computers_text)
 from shared.ui import icons, theme
@@ -31,11 +32,17 @@ NO_COMPUTERS = "Δεν υπάρχουν εγγεγραμμένοι υπολογ�
 RESULT_SECONDS = 15.0
 
 
-def _separator() -> QFrame:
-    line = QFrame()
-    line.setObjectName("separator")
-    line.setFixedHeight(1)
-    return line
+def _section_head(title: str) -> tuple[QWidget, QLabel]:
+    """Τίτλος ενότητας αριστερά, μικρό κείμενο (πλήθος/όριο) δεξιά."""
+    head = QWidget()
+    row = QHBoxLayout(head)
+    row.setContentsMargins(px(2), 0, px(2), 0)
+    row.setSpacing(px(10))
+    row.addWidget(_label(title, "cardTitle"))
+    row.addStretch(1)
+    count = _label("", "sectionCount")
+    row.addWidget(count)
+    return head, count
 
 
 def _label(text: str, name: str) -> QLabel:
@@ -44,21 +51,30 @@ def _label(text: str, name: str) -> QLabel:
     return label
 
 
-class RequestRow(QWidget):
-    """Αίτημα σε τρεις γραμμές: «Αίθουσα · Υπολογιστής», ID/χρόνοι, κωδικός + κουμπιά."""
+class RequestRow(QFrame):
+    """Κάρτα αιτήματος: «Αίθουσα · Υπολογιστής» με αποτέλεσμα πάνω δεξιά, ID/χρόνοι,
+    και πεδίο κωδικού που γεμίζει αριστερά με Έγκριση/Απόρριψη τέρμα δεξιά."""
 
     def __init__(self, request: RequestView, on_approve: Callable[[str, str], None],
                  on_deny: Callable[[str], None], parent=None):
         super().__init__(parent)
+        self.setObjectName("card")
         self.request = request
         self.final = False
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(0, px(9), 0, px(10))
+        layout.setContentsMargins(px(14), px(10), px(14), px(11))
         layout.setSpacing(px(6))
-        self.title = _label(request.title, "requestTitle")
-        self.title.setWordWrap(True)
+        top = QHBoxLayout()
+        top.setContentsMargins(0, 0, 0, 0)
+        top.setSpacing(px(10))
+        self.title = ElidedLabel(request.title)
+        self.title.setObjectName("requestTitle")
+        self.result = _label("", "result")
+        self.result.hide()
+        top.addWidget(self.title, 1)
+        top.addWidget(self.result, 0, Qt.AlignmentFlag.AlignRight)
+        layout.addLayout(top)
         self.meta = _label("", "small")
-        layout.addWidget(self.title)
         layout.addWidget(self.meta)
 
         self.actions = QWidget()
@@ -80,8 +96,10 @@ class RequestRow(QWidget):
         palette = self.code.palette()
         palette.setColor(QPalette.ColorRole.PlaceholderText, QColor(theme.CONTROL_BORDER))
         self.code.setPalette(palette)
-        digits = self.code.fontMetrics().horizontalAdvance("0" * (CODE_LENGTH + 1))
-        self.code.setFixedWidth(digits + px(22))
+        # Γεμίζει τον χώρο αριστερά, ποτέ στενότερο από 6 ψηφία (απόφαση 22/11/2026).
+        digits = self.code.fontMetrics().horizontalAdvance("0" * (CODE_LENGTH + 2))
+        self.code.setMinimumWidth(digits + px(22))
+        self.code.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
 
         icon_size = QSize(px(theme.ICON), px(theme.ICON))
         self.approve = QPushButton("Έγκριση")
@@ -96,16 +114,10 @@ class RequestRow(QWidget):
         for button in (self.approve, self.deny):
             button.setIconSize(icon_size)
             button.setCursor(Qt.CursorShape.PointingHandCursor)
-        actions.addWidget(self.code)
+        actions.addWidget(self.code, 1)
         actions.addWidget(self.approve)
         actions.addWidget(self.deny)
-        actions.addStretch(1)
         layout.addWidget(self.actions)
-
-        self.result = _label("", "result")
-        self.result.setWordWrap(True)
-        self.result.hide()
-        layout.addWidget(self.result)
 
         rid = request.request_id
         self.approve.clicked.connect(lambda: on_approve(rid, self.code.text()))
@@ -119,12 +131,13 @@ class RequestRow(QWidget):
 
     def show_decision(self, decision: Decision) -> None:
         self.result.setText(decision.text)
+        self.result.setToolTip(decision.hint)
         _repolish(self.result, ok="true" if decision.ok else "false")
         self.result.show()
         if decision.final:
             self.final = True
             self.actions.hide()
-            self.title.setEnabled(False)
+            _repolish(self.title, final="true")
         else:
             self.code.clear()
             self.code.setFocus()
@@ -167,8 +180,9 @@ class ComputerRow(QWidget):
         self.menu_button.setMenu(menu)
         layout.addWidget(self.dot)
         layout.addWidget(self.name)
-        layout.addWidget(self.state)
-        layout.addStretch(1)
+        # Ο επιπλέον χώρος πάει στην κατάσταση (στοίχιση αριστερά), ώστε το όνομα να
+        # κόβεται με «…» μόνο όταν πραγματικά δεν χωρά.
+        layout.addWidget(self.state, 1)
         layout.addWidget(self.menu_button)
 
     def update_state(self, computer: ComputerView, now: float) -> None:
@@ -183,9 +197,9 @@ class RoomHeader(QWidget):
     def __init__(self, room: RoomView, parent=None):
         super().__init__(parent)
         layout = QHBoxLayout(self)
-        layout.setContentsMargins(0, px(4), 0, 0)
+        layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(px(9))
-        self.setMinimumHeight(px(32))
+        self.setMinimumHeight(px(30))
         self.dot = StatusDot(theme.ROOM_DOT_OFFLINE)
         self.name = ElidedLabel(room.room)
         self.name.setObjectName("roomTitle")
@@ -198,6 +212,24 @@ class RoomHeader(QWidget):
         self.dot.set_color(theme.ROOM_DOT_ONLINE if room.online else theme.ROOM_DOT_OFFLINE)
         # Για την αίθουσα μετρά ο πιο πρόσφατος υπολογιστής της.
         self.setToolTip("Online" if room.online else f"Τελευταία σύνδεση: {room.state(now)}")
+
+
+class RoomCard(QFrame):
+    """Κάρτα αίθουσας: κεφαλίδα (κουκκίδα, όνομα, «N υπολογιστές») και οι υπολογιστές."""
+
+    def __init__(self, room: RoomView, page: "SecurityPage", parent=None):
+        super().__init__(parent)
+        self.setObjectName("card")
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(px(14), px(8), px(10), px(8))
+        layout.setSpacing(0)
+        self.header = RoomHeader(room)
+        layout.addWidget(self.header)
+        self.rows: dict[str, ComputerRow] = {}
+        for computer in room.computers:
+            row = ComputerRow(computer, page)
+            self.rows[computer.client_id] = row
+            layout.addWidget(row)
 
 
 class SecurityPage(QWidget):
@@ -246,12 +278,17 @@ class SecurityPage(QWidget):
         body.setObjectName("securityBody")
         self.columns = QGridLayout(body)
         self.columns.setContentsMargins(0, 0, 0, 0)
-        self.columns.setSpacing(px(theme.CARD_SPACING))
-        self._build_requests_card()
-        self._build_computers_card()
+        self.columns.setHorizontalSpacing(px(theme.SECTION_GAP))
+        self.columns.setVerticalSpacing(px(theme.SECTION_GAP))
+        self._build_requests_section()
+        self._build_computers_section()
+        self.divider = QFrame()
+        self.divider.setObjectName("divider")
         self.side_by_side: bool | None = None
-        self._column_minimum = -1
-        self._arrange(True)
+        self.room_columns = 0
+        self._room_order: tuple | None = None
+        self._left_width = -1
+        self._arrange(self._available_width())
         self.scroll = QScrollArea()
         self.scroll.setWidgetResizable(True)
         self.scroll.setFrameShape(QFrame.Shape.NoFrame)
@@ -260,96 +297,136 @@ class SecurityPage(QWidget):
         layout.addWidget(self.scroll, 1)
 
     # --- διάταξη ------------------------------------------------------------
-    def _card_minimum(self) -> int:
-        """Το ελάχιστο πλάτος της πιο απαιτητικής κάρτας (κεφαλίδες, κουμπιά)."""
-        return max(self.requests_card.minimumSizeHint().width(),
-                   self.computers_card.minimumSizeHint().width())
+    def _available_width(self) -> int:
+        return max(0, self.width() - px(theme.SCROLLBAR) - px(6))
 
-    def _arrange(self, side_by_side: bool) -> None:
-        """Δύο κάρτες δίπλα-δίπλα με ίσο πλάτος· σε στενό παράθυρο η μία κάτω από την άλλη.
+    def _left_minimum(self) -> int:
+        return max(px(theme.LEFT_COLUMN_MIN), self.requests_section.minimumSizeHint().width())
 
-        Το ίσο πλάτος στηρίζεται στο ελάχιστο της πιο απαιτητικής κάρτας, ώστε οι
-        κάρτες να μην αλλάζουν πλάτος όταν μπαίνουν/φεύγουν αιτήματα ή υπολογιστές.
-        """
-        minimum = self._card_minimum() if side_by_side else 0
-        if side_by_side == self.side_by_side and minimum == self._column_minimum:
-            return
-        self._column_minimum = minimum
-        for column in (0, 1):
-            self.columns.setColumnMinimumWidth(column, minimum)
-        if side_by_side == self.side_by_side:
-            return
-        self.side_by_side = side_by_side
-        top = Qt.AlignmentFlag.AlignTop
-        for card in (self.requests_card, self.computers_card):
-            self.columns.removeWidget(card)
-        self.columns.addWidget(self.requests_card, 0, 0, top)
-        if side_by_side:
-            self.columns.addWidget(self.computers_card, 0, 1, top)
-            self.columns.setColumnStretch(0, 1)
-            self.columns.setColumnStretch(1, 1)
-            self.columns.setRowStretch(0, 1)
-            self.columns.setRowStretch(1, 0)
-        else:
-            self.columns.addWidget(self.computers_card, 1, 0, top)
-            self.columns.setColumnStretch(0, 1)
-            self.columns.setColumnStretch(1, 0)
-            self.columns.setRowStretch(0, 0)
-            self.columns.setRowStretch(1, 1)
+    def _room_card_minimum(self) -> int:
+        widths = [card.minimumSizeHint().width() for card in self.room_cards.values()]
+        return max([px(theme.ROOM_CARD_MIN), *widths])
+
+    def _right_minimum(self) -> int:
+        """Η δεξιά ενότητα χωρά τουλάχιστον μία κάρτα αίθουσας και την κεφαλίδα της."""
+        return max(self._room_card_minimum(), self.computers_head.minimumSizeHint().width(),
+                   self.no_computers.minimumSizeHint().width())
 
     def two_columns_fit(self, width: int) -> bool:
-        needed = (2 * self._card_minimum() + self.columns.horizontalSpacing()
-                  + px(theme.SCROLLBAR) + px(6))
-        return width >= needed
+        gaps = 2 * self.columns.horizontalSpacing() + 1
+        return width - self._left_minimum() - gaps >= self._right_minimum()
+
+    def _arrange(self, width: int) -> None:
+        """«Νέες εγγραφές» αριστερά (380–440), διαχωριστικό, αίθουσες δεξιά σε όσες
+        στήλες χωρούν· σε στενό παράθυρο η μία ενότητα κάτω από την άλλη."""
+        side_by_side = self.two_columns_fit(width)
+        gaps = 2 * self.columns.horizontalSpacing() + 1
+        left = self._left_minimum()
+        if side_by_side and width - px(theme.LEFT_COLUMN_MAX) - gaps >= self._right_minimum():
+            left = max(left, px(theme.LEFT_COLUMN_MAX))
+        if side_by_side != self.side_by_side:
+            self.side_by_side = side_by_side
+            top = Qt.AlignmentFlag.AlignTop
+            for widget in (self.requests_section, self.divider, self.computers_section):
+                self.columns.removeWidget(widget)
+            if side_by_side:
+                self.columns.addWidget(self.requests_section, 0, 0, top)
+                self.columns.addWidget(self.divider, 0, 1)
+                self.columns.addWidget(self.computers_section, 0, 2, top)
+                self.divider.setFixedWidth(1)
+                self.divider.setMinimumHeight(0)
+                self.divider.setMaximumHeight(16777215)
+                for column, stretch in enumerate((0, 0, 1)):
+                    self.columns.setColumnStretch(column, stretch)
+                for row in range(3):
+                    self.columns.setRowStretch(row, 0)
+            else:
+                self.columns.addWidget(self.requests_section, 0, 0, top)
+                self.columns.addWidget(self.divider, 1, 0)
+                self.columns.addWidget(self.computers_section, 2, 0, top)
+                self.divider.setFixedHeight(1)
+                self.divider.setMinimumWidth(0)
+                self.divider.setMaximumWidth(16777215)
+                for column, stretch in enumerate((1, 0, 0)):
+                    self.columns.setColumnStretch(column, stretch)
+                for row, stretch in enumerate((0, 0, 1)):
+                    self.columns.setRowStretch(row, stretch)
+            self._left_width = -1
+        if side_by_side:
+            if left != self._left_width:
+                self._left_width = left
+                self.requests_section.setFixedWidth(left)
+            right = width - left - gaps
+        else:
+            if self._left_width != 0:
+                self._left_width = 0
+                self.requests_section.setMinimumWidth(0)
+                self.requests_section.setMaximumWidth(16777215)
+            right = width
+        self._place_room_cards(right)
+
+    def _place_room_cards(self, width: int) -> None:
+        """Κάρτες αιθουσών σε γραμμές (αλφαβητικά), όσες χωρούν με ελάχιστο ROOM_CARD_MIN."""
+        spacing = self.room_grid.horizontalSpacing()
+        columns = max(1, (width + spacing) // (self._room_card_minimum() + spacing))
+        order = (columns, tuple(self.room_cards))
+        if order == self._room_order:
+            return
+        self._room_order = order
+        self.room_columns = columns
+        for card in self.room_cards.values():
+            self.room_grid.removeWidget(card)
+        for index, card in enumerate(self.room_cards.values()):
+            self.room_grid.addWidget(card, index // columns, index % columns,
+                                     Qt.AlignmentFlag.AlignTop)
+        for column in range(max(columns, self.room_grid.columnCount())):
+            self.room_grid.setColumnStretch(column, 1 if column < columns else 0)
 
     def _relayout(self) -> None:
-        """Ξανά μετά από αλλαγή περιεχομένου: νέο αίτημα/υπολογιστής αλλάζει το ελάχιστο."""
-        self._arrange(self.two_columns_fit(self.width()))
+        """Ξανά μετά από αλλαγή περιεχομένου (νέα αίθουσα, αίτημα)."""
+        self._arrange(self._available_width())
 
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)
-        self._arrange(self.two_columns_fit(event.size().width()))
+        self._relayout()
 
     # --- κατασκευή ---------------------------------------------------------
-    def _build_requests_card(self) -> QWidget:
-        head = QWidget()
-        row = QHBoxLayout(head)
-        row.setContentsMargins(0, 0, 0, 0)
-        row.setSpacing(px(8))
-        row.addWidget(_label("Νέες εγγραφές", "cardTitle"))
-        row.addStretch(1)
-        card, layout = _card(head)
-        self.requests_card = card
-        # Οι εγγραφές είναι πάντα ανοιχτές· κείμενο μόνο αν η θύρα δεν άνοιξε ή γέμισε.
+    def _build_requests_section(self) -> None:
+        self.requests_section = QWidget()
+        layout = QVBoxLayout(self.requests_section)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(px(theme.REQUEST_CARD_SPACING))
+        head, self.request_count = _section_head("Νέες εγγραφές")
+        layout.addWidget(head)
+        # Οι εγγραφές είναι πάντα ανοιχτές· κείμενο μόνο αν η θύρα δεν άνοιξε.
         self.port_notice = _label("", "result")
         self.port_notice.setWordWrap(True)
         self.port_notice.hide()
         layout.addWidget(self.port_notice)
-        self.requests_layout = QVBoxLayout()
-        self.requests_layout.setContentsMargins(0, 0, 0, 0)
-        self.requests_layout.setSpacing(0)
         self.no_requests = _label(NO_REQUESTS, "muted")
         layout.addWidget(self.no_requests)
+        self.requests_layout = QVBoxLayout()
+        self.requests_layout.setContentsMargins(0, 0, 0, 0)
+        self.requests_layout.setSpacing(px(theme.REQUEST_CARD_SPACING))
         layout.addLayout(self.requests_layout)
-        return card
+        layout.addStretch(1)
 
-    def _build_computers_card(self) -> QWidget:
-        head = QWidget()
-        row = QHBoxLayout(head)
-        row.setContentsMargins(0, 0, 0, 0)
-        row.addWidget(_label("Εγγεγραμμένοι υπολογιστές", "cardTitle"))
-        row.addStretch(1)
-        self.totals = _label("", "small")
-        row.addWidget(self.totals)
-        card, layout = _card(head)
-        self.computers_card = card
-        self.rooms_layout = QVBoxLayout()
-        self.rooms_layout.setContentsMargins(0, 0, 0, 0)
-        self.rooms_layout.setSpacing(0)
+    def _build_computers_section(self) -> None:
+        self.computers_section = QWidget()
+        layout = QVBoxLayout(self.computers_section)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(px(theme.REQUEST_CARD_SPACING))
+        self.computers_head, self.totals = _section_head("Εγγεγραμμένοι υπολογιστές")
+        layout.addWidget(self.computers_head)
         self.no_computers = _label(NO_COMPUTERS, "muted")
         layout.addWidget(self.no_computers)
-        layout.addLayout(self.rooms_layout)
-        return card
+        grid = QWidget()
+        self.room_grid = QGridLayout(grid)
+        self.room_grid.setContentsMargins(0, 0, 0, 0)
+        self.room_grid.setSpacing(px(theme.CARD_SPACING))
+        layout.addWidget(grid)
+        layout.addStretch(1)
+        self.room_cards: dict[str, RoomCard] = {}
 
     # --- ενέργειες ---------------------------------------------------------
     def approve(self, request_id: str, code: str) -> None:
@@ -440,6 +517,9 @@ class SecurityPage(QWidget):
 
     def _refresh_requests(self, now: float) -> None:
         requests = self.model.requests()
+        text, warn = self.model.requests_status(len(requests))
+        self.request_count.setText(text)
+        _repolish(self.request_count, warn="true" if warn else "false")
         wanted = [r.request_id for r in requests]
         # Τα αιτήματα που απαντήθηκαν μένουν λίγο ορατά με το αποτέλεσμα.
         for rid, at in list(self.finished.items()):
@@ -452,14 +532,9 @@ class SecurityPage(QWidget):
             old = self.request_rows
             self.request_rows = {}
             while self.requests_layout.count():
-                item = self.requests_layout.takeAt(0)
-                widget = item.widget()
-                if widget is not None and not isinstance(widget, RequestRow):
-                    widget.deleteLater()
-            for index, rid in enumerate(keep):
+                self.requests_layout.takeAt(0)
+            for rid in keep:
                 row = old.pop(rid, None) or RequestRow(views[rid], self.approve, self.deny)
-                if index:
-                    self.requests_layout.addWidget(_separator())
                 self.requests_layout.addWidget(row)
                 self.request_rows[rid] = row
             for row in old.values():
@@ -474,25 +549,21 @@ class SecurityPage(QWidget):
                     for room in rooms)
         if key != self._rooms_key:
             self._rooms_key = key
-            while self.rooms_layout.count():
-                widget = self.rooms_layout.takeAt(0).widget()
-                if widget is not None:
-                    widget.deleteLater()
-            self.room_headers, self.computer_rows = {}, {}
+            for card in self.room_cards.values():
+                self.room_grid.removeWidget(card)
+                card.deleteLater()
+            self.room_cards, self.room_headers, self.computer_rows = {}, {}, {}
             for room in rooms:
-                header = RoomHeader(room)
-                self.room_headers[room.room] = header
-                self.rooms_layout.addWidget(header)
-                for computer in room.computers:
-                    row = ComputerRow(computer, self)
-                    self.computer_rows[computer.client_id] = row
-                    self.rooms_layout.addWidget(row)
+                card = RoomCard(room, self)
+                self.room_cards[room.room] = card
+                self.room_headers[room.room] = card.header
+                self.computer_rows.update(card.rows)
+            self._room_order = None
         for room in rooms:
             self.room_headers[room.room].update_state(room, now)
             for computer in room.computers:
                 self.computer_rows[computer.client_id].update_state(computer, now)
-        self.totals.setText(self.model.totals(rooms))
-        self.totals.setVisible(bool(rooms))
+        self.totals.setText(self.model.totals(rooms) if rooms else "")
         self.no_computers.setVisible(not rooms)
 
     def visible_texts(self) -> list[str]:

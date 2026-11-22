@@ -33,6 +33,7 @@ CONNECTED = "#2e8b57"
 LIVE = "#c62828"
 LIVE_LIGHT = "#f6d5d5"
 APP_ICON = "#0e7490"
+DIVIDER = "#b3bcc8"
 
 #: Όνομα token όπως στο ui-style.md → τιμή.
 TOKENS: dict[str, str] = {
@@ -51,6 +52,7 @@ TOKENS: dict[str, str] = {
     "live": LIVE,
     "live_light": LIVE_LIGHT,
     "app_icon": APP_ICON,
+    "divider": DIVIDER,
 }
 
 # Λευκό σε έγχρωμο φόντο (τικ, εικονίδιο μικροφώνου) δεν είναι token.
@@ -141,7 +143,12 @@ SCROLLBAR_HANDLE_MIN = 32   # ελάχιστο μήκος λαβής
 ACTION_HEIGHT = 32          # κουμπιά Έγκριση/Απόρριψη και πεδίο κωδικού
 ACTION_ICON_STROKE = 2.6    # παχύτερη γραμμή εικονιδίων στα κουμπιά ενέργειας
 TRASH_ICON_STROKE = 2.1     # ο κάδος με 2.6 γεμίζει· λεπτότερος όπως στο mockup
-COMPUTER_INDENT = 26        # εσοχή υπολογιστών κάτω από την αίθουσα
+COMPUTER_INDENT = 18        # εσοχή υπολογιστών μέσα στην κάρτα της αίθουσας
+LEFT_COLUMN_MIN = 380       # στήλη «Νέες εγγραφές»: 380–440 (mockup)
+LEFT_COLUMN_MAX = 440
+ROOM_CARD_MIN = 260         # ελάχιστο πλάτος κάρτας αίθουσας· όσες χωρούν ανά γραμμή
+SECTION_GAP = 16            # απόσταση από το διαχωριστικό ανάμεσα στις δύο ενότητες
+REQUEST_CARD_SPACING = 10   # απόσταση ανάμεσα στις κάρτες αιτημάτων
 
 
 def stylesheet(metrics: Metrics | None = None) -> str:
@@ -336,6 +343,20 @@ QScrollBar::add-page, QScrollBar::sub-page {{
 #small {{
     color: {TEXT_MUTED};
     font-size: {m.font_pt(FONT_SMALL)}pt;
+}}
+#sectionCount {{
+    color: {TEXT_MUTED};
+    font-size: {m.font_pt(FONT_SMALL)}pt;
+}}
+#sectionCount[warn="true"] {{
+    color: {LIVE};
+}}
+#divider {{
+    background: {DIVIDER};
+    border: none;
+}}
+#requestTitle[final="true"] {{
+    color: {TEXT_MUTED};
 }}
 #requestTitle, #roomTitle {{
     font-weight: 600;

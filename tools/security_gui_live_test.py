@@ -185,8 +185,11 @@ class SecurityGuiRun(DirectorRun):
 
     # ------------------------------------------------------------ βήματα
     def steps(self) -> None:
-        from director.security import (TEXT_APPROVED, TEXT_DENIED, TEXT_NEVER, TEXT_REJECTED,
-                                       full_notice)
+        from director.security import (TEXT_APPROVED, TEXT_DENIED, TEXT_JUST_NOW, TEXT_NEVER,
+                                       TEXT_REJECTED, full_text, wrong_code_text)
+
+        def ago_like(state):  # «μόλις τώρα» κάτω από 1 λεπτό, μετά «πριν N …»
+            return state == TEXT_JUST_NOW or state.startswith("πριν ")
 
         self.start_gui()
 
@@ -220,8 +223,7 @@ class SecurityGuiRun(DirectorRun):
 
         # 4. Τρεις λάθος κωδικοί → απόρριψη
         outcomes = []
-        expected = ["Λάθος κωδικός. Απομένουν 2 προσπάθειες.",
-                    "Λάθος κωδικός. Απομένει 1 προσπάθεια.", TEXT_REJECTED]
+        expected = [wrong_code_text(2), wrong_code_text(1), TEXT_REJECTED]
         for attempt, text in enumerate(expected, 1):
             outcomes.append(row is not None and self.type_code(row, self.wrong(code, attempt))
                             == text)
@@ -288,8 +290,8 @@ class SecurityGuiRun(DirectorRun):
             time.sleep(0.2)
         time.sleep(1.5)
         saved = saved_times()
-        self.result("9. Αποσύνδεση: «πριν …» και τελευταία σύνδεση στο αρχείο",
-                    bool(offline) and listed["state"].startswith("πριν ")
+        self.result("9. Αποσύνδεση: «μόλις τώρα/πριν …» και τελευταία σύνδεση στο αρχείο",
+                    bool(offline) and ago_like(listed["state"])
                     and board_id in saved,
                     f"{listed and listed['state']} · στο αρχείο: {board_id in saved}")
         before = saved.get(board_id)
@@ -300,7 +302,7 @@ class SecurityGuiRun(DirectorRun):
         self.gui(lambda: self.window.show_page("security"))
         listed = self.computer(board_id)
         self.result("10. Μετά από επανεκκίνηση φαίνεται ακόμη η τελευταία σύνδεση",
-                    listed is not None and listed["state"].startswith("πριν ")
+                    listed is not None and ago_like(listed["state"])
                     and before is not None
                     and abs((self.runtime.last_seen.get(board_id) or 0) - before) < 2,
                     f"{listed and listed['state']}")
@@ -342,7 +344,8 @@ class SecurityGuiRun(DirectorRun):
 
         def notice():
             self.page.refresh()
-            return self.page.port_notice.isVisible(), self.page.port_notice.text()
+            count = self.page.request_count
+            return count.text(), count.property("warn") == "true"
         shown = self.gui(notice)
         self.screenshot("5-limit")
         text = self.gui(lambda: (first_row.deny.click(), first_row.result.text())[1]) \
@@ -351,7 +354,7 @@ class SecurityGuiRun(DirectorRun):
         self.result("13. Όριο αιτημάτων: το επιπλέον απορρίπτεται με μήνυμα, μετά χωρά νέο",
                     first_row is not None and full.get("sas") is None and full["rc"] != 0
                     and full.get("full") and full_row is None
-                    and shown == (True, full_notice(1)) and text == TEXT_DENIED
+                    and shown == (full_text(1), True) and text == TEXT_DENIED
                     and again_row is not None, f"{shown}")
         self.screenshot("5-end")
 
