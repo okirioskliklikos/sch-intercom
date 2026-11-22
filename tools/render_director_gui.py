@@ -3,8 +3,9 @@
 Χρήση (Linux/Windows, χρειάζεται PySide6):
     python -m tools.render_director_gui --out-dir screenshots
 
-Γράφει director-main-idle.png, director-main-live.png και
-director-main-live-muted.png με ψεύτικους
+Γράφει director-main-idle.png, director-main-live.png,
+director-main-live-muted.png και director-main-narrow.png (πολλές αίθουσες σε στενό
+παράθυρο: η μία κάρτα κάτω από την άλλη) με ψεύτικους
 Clients (τα 17 ενδεικτικά ονόματα του ui-design.md) και ψεύτικο μικρόφωνο.
 Χρησιμεύει για σύγκριση με το docs/mockups/ και για τα PR. Δεν είναι δοκιμή
 πραγματικού ήχου ή εμφάνισης στα Windows.
@@ -81,6 +82,23 @@ def main() -> None:
     window.mute_button.click()
     settle(500)
     window.grab().save(str(args.out_dir / "director-main-live-muted.png"))
+    window.close()
+    release_window(window)
+    app.processEvents()
+
+    # Στενό παράθυρο με πολλές αίθουσες: «Ανακοίνωση» πάνω, «Αίθουσες» και
+    # «Επιλογή αιθουσών» από κάτω, με κύλιση σελίδας (ui-style.md §5).
+    many = MOCKUP_ROOMS + [f"Αίθουσα {i}" for i in range(1, 19)]
+    broadcaster = FakeBroadcaster(many)
+    microphone = gui.DirectorMicrophone(fake_stream(0.12), broadcaster)
+    window = DirectorWindow(broadcaster, microphone)
+    window.setMinimumSize(m.px(860), m.px(600))
+    window.resize(m.px(960), m.px(680))
+    window.show()
+    settle()
+    window._layout_rooms()
+    settle()
+    window.grab().save(str(args.out_dir / "director-main-narrow.png"))
     window.close()
     release_window(window)
     app.processEvents()

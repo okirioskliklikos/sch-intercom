@@ -512,11 +512,16 @@ class DirectorWindow(QMainWindow):
         self.page = page
         layout = QVBoxLayout(page)
         layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(px(theme.CARD_SPACING))
+        layout.setSpacing(0)
 
-        # Επάνω σειρά: κάρτες ανακοίνωσης και αιθουσών με ίδιο ύψος.
-        # Δεύτερη σειρά: επιλογή αιθουσών μόνο δεξιά.
-        columns = QGridLayout()
+        # Δίπλα-δίπλα: «Ανακοίνωση» αριστερά, «Αίθουσες» και «Επιλογή αιθουσών» δεξιά,
+        # με ίδιο ύψος στην επάνω σειρά. Όταν οι αίθουσες δεν χωρούν δίπλα στην
+        # «Ανακοίνωση», η μία κάτω από την άλλη με κύλιση σελίδας (ui-style.md §5).
+        body = QWidget()
+        body.setObjectName("page")
+        columns = QGridLayout(body)
+        self.main_grid = columns
+        self.stacked = False
         columns.setContentsMargins(0, 0, 0, 0)
         columns.setHorizontalSpacing(px(theme.CARD_SPACING))
         columns.setVerticalSpacing(px(theme.CARD_SPACING))
@@ -547,8 +552,45 @@ class DirectorWindow(QMainWindow):
             QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
         columns.addWidget(self.selection_card, 1, 1)
 
-        layout.addLayout(columns, 1)
+        self.page_scroll = QScrollArea()
+        self.page_scroll.setObjectName("pageScroll")
+        self.page_scroll.setWidgetResizable(True)
+        self.page_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self.page_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.page_scroll.setWidget(body)
+        layout.addWidget(self.page_scroll, 1)
         return page
+
+    def _set_stacked(self, stacked: bool) -> None:
+        """Αλλαγή διάταξης: δίπλα-δίπλα ή «Ανακοίνωση» πάνω, αίθουσες και επιλογή κάτω."""
+        if stacked == self.stacked:
+            return
+        self.stacked = stacked
+        grid = self.main_grid
+        cards = (self.announcement_card, self.rooms_area, self.selection_card)
+        for widget in cards:
+            grid.removeWidget(widget)
+        free = 16777215  # QWIDGETSIZE_MAX: χωρίς σταθερό πλάτος
+        if stacked:
+            grid.addWidget(self.announcement_card, 0, 0)
+            grid.addWidget(self.rooms_area, 1, 0)
+            grid.addWidget(self.selection_card, 2, 0)
+            for row, stretch in enumerate((0, 0, 0, 1)):
+                grid.setRowStretch(row, stretch)
+            for widget in (self.rooms_area, self.selection_card):
+                widget.setMinimumWidth(0)
+                widget.setMaximumWidth(free)
+            self.rooms_area.setSizePolicy(QSizePolicy.Policy.Preferred,
+                                          QSizePolicy.Policy.Preferred)
+        else:
+            grid.addWidget(self.announcement_card, 0, 0)
+            grid.addWidget(self.rooms_area, 0, 1)
+            grid.addWidget(self.selection_card, 1, 1)
+            for row, stretch in enumerate((1, 0, 0, 0)):
+                grid.setRowStretch(row, stretch)
+            self.rooms_area.setSizePolicy(QSizePolicy.Policy.Preferred,
+                                          QSizePolicy.Policy.Expanding)
+        self._room_shape = None
 
     def _build_announcement_card(self) -> QWidget:
         # Τίτλος αριστερά, στάθμη και προεπισκόπηση πάνω δεξιά.
@@ -581,6 +623,13 @@ class DirectorWindow(QMainWindow):
         preview_layout.addLayout(level_row)
         self.meter = LevelMeter()
         preview_layout.addWidget(self.meter)
+        # Τουλάχιστον 240px του mockup, αλλά ποτέ κομμένο «Στάθμη μικροφώνου» με
+        # μεγάλη γραμματοσειρά.
+        for widget in (level_label, self.preview_button):
+            widget.ensurePolished()
+        preview_panel.setFixedWidth(max(
+            px(240), level_label.sizeHint().width() + level_row.spacing()
+            + self.preview_button.sizeHint().width() + px(4)))
         title_layout.addWidget(preview_panel, 0, Qt.AlignmentFlag.AlignTop)
         card, layout = _card(title_row)
         # Η ομάδα χειριστηρίων διατηρεί το σημερινό μέγεθος και
@@ -767,14 +816,14 @@ class DirectorWindow(QMainWindow):
     def _refresh_rooms(self) -> None:
         rooms = room_states(self.broadcaster.status_snapshot())
         names = [room for room, _ in rooms]
-        if names != [room for room, _ in self.rooms]:
-            self._rebuild_room_rows(names)
-        self.rooms = rooms
         online = sum(1 for _, is_online in rooms if is_online)
         self.online_count.setText(f"({online}/{len(rooms)} online)")
         self.online_count.setVisible(bool(rooms))
         self.empty_rooms.setVisible(not rooms)
         self.room_scroll.setVisible(bool(rooms))
+        if names != [room for room, _ in self.rooms]:
+            self._rebuild_room_rows(names)
+        self.rooms = rooms
         self.radio_all.setText(f"Όλες οι αίθουσες ({online})")
         locked = self.mic.live
         for room, is_online in rooms:
@@ -802,7 +851,7 @@ class DirectorWindow(QMainWindow):
         return px(theme.ROOM_COLUMN_WIDTH)
 
     def _max_room_columns(self, column_width: int) -> int:
-        """Πόσες στήλες αιθουσών χωρούν αφήνοντας στην «Ανακοίνωση» το ελάχιστο."""
+        """Πόσες στήλες αιθουσών χωρούν δίπλα στην «Ανακοίνωση» (0 = καμία)."""
         if self.page is None or not self.page.isVisible():
             return 2
         margins = self.page.layout().contentsMargins()
@@ -814,21 +863,96 @@ class DirectorWindow(QMainWindow):
                      - card.left() - card.right() - 2
                      - px(theme.SCROLLBAR) - px(6))
         spacing = self.room_grid.horizontalSpacing()
-        return max(2, (available + spacing) // (column_width + spacing))
+        return max(0, (available + spacing) // (column_width + spacing))
+
+    def _announce_min_width(self) -> int:
+        return max(px(theme.ANNOUNCE_MIN_WIDTH),
+                   self.announcement_card.minimumSizeHint().width())
+
+    def _empty_side_by_side_fits(self) -> bool:
+        """Χωρούν «Ανακοίνωση» και άδεια κάρτα «Αίθουσες» δίπλα-δίπλα;"""
+        if self.page is None or not self.page.isVisible():
+            return True
+        margins = self.page.layout().contentsMargins()
+        available = (self.page.width() - margins.left() - margins.right()
+                     - px(theme.SCROLLBAR) - px(6))
+        needed = (self._announce_min_width() + px(theme.CARD_SPACING)
+                  + self._right_column_width())
+        return needed <= available
+
+    def _stacked_min_width(self) -> int:
+        """Ελάχιστο πλάτος της σελίδας ώστε η διάταξη «η μία κάτω από την άλλη» να χωρά."""
+        card = self.rooms_card_layout.contentsMargins()
+        one_column = px(theme.ROOM_COLUMN_WIDTH) + card.left() + card.right() + 2
+        return (max(self._announce_min_width(), one_column,
+                    self.selection_card.minimumSizeHint().width(),
+                    self.rooms_title.sizeHint().width() + card.left() + card.right() + 2,
+                    self.empty_rooms.sizeHint().width() + card.left() + card.right() + 2)
+                + px(theme.SCROLLBAR) + px(6))
+
+    def _update_page_minimum(self) -> None:
+        """Το παράθυρο δεν στενεύει τόσο ώστε να κόβονται κάρτες δεξιά."""
+        minimum = self._stacked_min_width()
+        if self.page_scroll.minimumWidth() != minimum:
+            self.page_scroll.setMinimumWidth(minimum)
+        # Το ρητό ελάχιστο μέγεθος του παραθύρου υπερισχύει του layout: το ανεβάζουμε.
+        needed = self.centralWidget().minimumSizeHint().width()
+        screen = self.screen() or QApplication.primaryScreen()
+        if screen is not None:
+            needed = min(needed, screen.availableGeometry().width())
+        if self.minimumWidth() < needed:
+            self.setMinimumWidth(needed)
+
+    def _side_by_side_fits(self, count: int, column_width: int, chrome: int) -> bool:
+        """Χωρούν όλες οι αίθουσες, χωρίς κύλιση, δίπλα στην «Ανακοίνωση»;
+
+        Υπολογίζεται από το μέγεθος της σελίδας και όχι από την τρέχουσα διάταξη,
+        ώστε η επιλογή να μην αλλάζει μόνο επειδή άλλαξε η διάταξη.
+        """
+        if self.page is None or not self.page.isVisible():
+            return True
+        max_columns = self._max_room_columns(column_width)
+        if max_columns < 1:
+            return False
+        height = (self.page.height() - self.selection_card.sizeHint().height()
+                  - px(theme.CARD_SPACING) - chrome)
+        rows_fit = max(1, height // px(theme.ROW_HEIGHT))
+        return math.ceil(count / rows_fit) <= max_columns
 
     def _layout_rooms(self) -> None:
-        """Κάθε στήλη ως το διαθέσιμο ύψος, μετά η επόμενη όσο χωρά (ui-style.md §5)."""
+        """Κάθε στήλη ως το διαθέσιμο ύψος, μετά η επόμενη όσο χωρά (ui-style.md §5).
+
+        Αν δεν χωρούν δίπλα στην «Ανακοίνωση», η «Ανακοίνωση» πάει πάνω και οι
+        «Αίθουσες» με την «Επιλογή αιθουσών» από κάτω, σε όσες στήλες χωρά το πλάτος
+        (απόφαση χρήστη 22/11/2026).
+        """
+        self._update_page_minimum()
         if not self.room_rows:
+            # Χωρίς αίθουσες: δίπλα-δίπλα μόνο αν χωρά και το κείμενο «Δεν έχει συνδεθεί…».
+            self._set_stacked(not self._empty_side_by_side_fits())
+            if not self.stacked:
+                self._fix_right_column_width()
             return
         row_height = px(theme.ROW_HEIGHT)
         margins = self.rooms_card_layout.contentsMargins()
         chrome = (margins.top() + margins.bottom() + self.rooms_card_layout.spacing()
                   + self.rooms_title.sizeHint().height() + 2)
-        available = self.rooms_area.height() - chrome
-        rows_fit = max(1, available // row_height)
         names = list(self.room_rows)
         width = self._room_column_width()
-        rows, columns = room_grid_shape(len(names), rows_fit, self._max_room_columns(width))
+        spacing = self.room_grid.horizontalSpacing()
+        self._set_stacked(not self._side_by_side_fits(len(names), width, chrome))
+        if self.stacked:
+            inner = (self.page.width() - px(theme.SCROLLBAR) - px(6)
+                     - margins.left() - margins.right() - 2)
+            columns = max(1, (inner + spacing) // (width + spacing))
+            rows = math.ceil(len(names) / columns)
+            rows_fit = rows
+            rows, columns = rows, math.ceil(len(names) / rows)
+        else:
+            available = self.rooms_area.height() - chrome
+            rows_fit = max(1, available // row_height)
+            rows, columns = room_grid_shape(len(names), rows_fit,
+                                            max(1, self._max_room_columns(width)))
         self._room_columns = columns
         if (rows, columns) != self._room_shape:
             self._room_shape = (rows, columns)
@@ -847,10 +971,17 @@ class DirectorWindow(QMainWindow):
         grid_width = width * columns + self.room_grid.horizontalSpacing() * (columns - 1)
         self.room_grid_widget.setFixedSize(grid_width, rows * row_height)
         self.room_scroll.setFixedSize(grid_width + scrollbar, min(rows, rows_fit) * row_height)
-        # Η δεξιά στήλη παίρνει μόνο όσο πλάτος χρειάζεται.
-        column_width = max(
-            self.rooms_card.sizeHint().width(),
-            self.selection_card.sizeHint().width())
+        if self.stacked:
+            return
+        self._fix_right_column_width()
+
+    def _right_column_width(self) -> int:
+        return max(self.rooms_card.sizeHint().width(),
+                   self.selection_card.sizeHint().width())
+
+    def _fix_right_column_width(self) -> None:
+        """Η δεξιά στήλη παίρνει μόνο όσο πλάτος χρειάζεται."""
+        column_width = self._right_column_width()
         if self.rooms_area.width() != column_width:
             self.rooms_area.setFixedWidth(column_width)
         if self.selection_card.width() != column_width:
