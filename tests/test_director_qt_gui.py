@@ -243,12 +243,13 @@ class DirectorWindowTests(TestCase):
         self.assertGreaterEqual(window.announcement_card.width(),
                                 m.px(theme.ANNOUNCE_MIN_WIDTH))
 
-    def test_connection_dot_after_label(self):
+    def test_connection_dot_before_label(self):
+        # «● Συνδεδεμένος» (ui-style.md §4, απόφαση 22/11/2026).
         window = self.make(self.STATUS)
         window.show()
         QApplication.processEvents()
-        self.assertGreater(window.connection_dot.x(),
-                           window.connection_label.x() + window.connection_label.width() - 1)
+        self.assertLess(window.connection_dot.x() + window.connection_dot.width(),
+                        window.connection_label.x() + 1)
 
     def test_room_columns_have_fixed_scaled_width(self):
         window = self.make(self.STATUS)

@@ -279,6 +279,12 @@ class EnrollmentServer:
             self._thread.start()
             self.log(f"[Εγγραφή] Ενεργή TLS θύρα {self.port} (μόνο εγγραφή).")
 
+    @property
+    def is_open(self) -> bool:
+        """Αν η θύρα εγγραφής δέχεται αυτή τη στιγμή νέα αιτήματα."""
+        with self._lock:
+            return self._listener is not None
+
     def stop(self):
         """Κλείνει μόνο τη θύρα· τα αποθηκευμένα αιτήματα παραμένουν για έγκριση."""
         with self._lock:

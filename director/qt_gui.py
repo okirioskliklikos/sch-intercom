@@ -18,7 +18,7 @@ from PySide6.QtGui import QColor, QFontMetrics, QPainter, QPen
 from PySide6.QtWidgets import (QAbstractButton, QApplication, QButtonGroup, QCheckBox,
                                QFrame, QGridLayout, QHBoxLayout, QLabel, QMainWindow,
                                QPushButton, QRadioButton, QScrollArea, QSizePolicy,
-                               QVBoxLayout, QWidget)
+                               QStackedWidget, QVBoxLayout, QWidget)
 
 from director.broadcast import AudioBroadcaster, MAX_CLIENTS
 from director.gui import (MODE_ALL, MODE_ROOMS, DirectorMicrophone, choose_targets,
@@ -39,15 +39,19 @@ LIVE_BADGE = "Live"
 HINT_MUTED = "Σίγαση ενεργή · άρση σίγασης για έναρξη"
 HINT_PREVIEW = "Προεπισκόπηση · δεν μεταδίδεται"
 
-# Μενού: (κλειδί εικονιδίου, κείμενο). Μόνο η Κεντρική υλοποιείται ακόμη.
+# Μενού: (κλειδί εικονιδίου, κείμενο), σειρά ui-style.md §4.
+# Υλοποιημένες: Κεντρική και Ασφάλεια (η δεύτερη μόνο όταν δοθεί μοντέλο ασφάλειας).
 NAV_ITEMS = [
     ("home", "Κεντρική"),
     ("rooms", "Αίθουσες"),
     ("announcements", "Ανακοινώσεις"),
     ("scenarios", "Σενάρια"),
     ("logs", "Καταγραφές"),
+    ("security", "Ασφάλεια"),
     ("settings", "Ρυθμίσεις"),
 ]
+#: Η σελίδα «Ασφάλεια» διαβάζει μητρώο/αιτήματα το πολύ τόσο συχνά.
+SECURITY_REFRESH_SECONDS = 1.0
 
 
 _metrics = theme.metrics_for(None)
@@ -359,9 +363,14 @@ def _card(title: QWidget | str) -> tuple[QFrame, QVBoxLayout]:
 class DirectorWindow(QMainWindow):
     def __init__(self, broadcaster, microphone: DirectorMicrophone, *,
                  server_up: Callable[[], bool] = lambda: True,
-                 clock: Callable[[], float] = time.monotonic):
+                 clock: Callable[[], float] = time.monotonic,
+                 security=None, security_options: dict | None = None):
         super().__init__()
         self.broadcaster = broadcaster
+        self.security = security
+        self.security_page = None
+        self._security_options = security_options or {}
+        self._security_refreshed = -math.inf
         self.mic = microphone
         self.server_up = server_up
         self.clock = clock
@@ -386,7 +395,7 @@ class DirectorWindow(QMainWindow):
         outer.setContentsMargins(0, 0, 0, 0)
         outer.setSpacing(0)
         outer.addWidget(self._build_sidebar())
-        outer.addWidget(self._build_page(), 1)
+        outer.addWidget(self._build_content(), 1)
 
         self.timer = QTimer(self)
         self.timer.timeout.connect(self.refresh)
@@ -431,10 +440,10 @@ class DirectorWindow(QMainWindow):
             button.setIcon(icons.icon(key, theme.TEXT, selected_color=theme.PRIMARY,
                                       disabled_color=theme.TEXT_MUTED, size=px(theme.ICON)))
             button.setIconSize(QSize(px(theme.ICON), px(theme.ICON)))
-            if key == "home":
-                button.setChecked(True)
-                # Η τρέχουσα σελίδα μένει επιλεγμένη.
-                button.clicked.connect(lambda _=False, b=button: b.setChecked(True))
+            if key == "home" or (key == "security" and self.security is not None):
+                button.setChecked(key == "home")
+                button.setCursor(Qt.CursorShape.PointingHandCursor)
+                button.clicked.connect(lambda _=False, k=key: self.show_page(k))
             else:
                 # Χωρίς προσποίηση μη διαθέσιμων λειτουργιών (ui-design.md).
                 button.setEnabled(False)
@@ -444,28 +453,66 @@ class DirectorWindow(QMainWindow):
         layout.addStretch(1)
         return sidebar
 
+    def _build_content(self) -> QWidget:
+        """Κοινή κεφαλίδα (τίτλος, «● Συνδεδεμένος») και οι σελίδες του μενού."""
+        content = QWidget()
+        content.setObjectName("page")
+        layout = QVBoxLayout(content)
+        layout.setContentsMargins(px(18), px(14), px(18), px(16))
+        layout.setSpacing(px(theme.CARD_SPACING))
+
+        header = QHBoxLayout()
+        self.page_title = QLabel(PAGE_TITLE)
+        self.page_title.setObjectName("pageTitle")
+        header.addWidget(self.page_title)
+        header.addStretch(1)
+        self.connection_dot = StatusDot(theme.CONNECTED)
+        self.connection_label = QLabel("Συνδεδεμένος")
+        self.connection_label.setObjectName("connection")
+        header.setSpacing(px(6))
+        # «● Συνδεδεμένος»: η κουκκίδα πριν από τη λέξη (ui-style.md §4, 22/11/2026).
+        header.addWidget(self.connection_dot, 0, Qt.AlignmentFlag.AlignVCenter)
+        header.addWidget(self.connection_label)
+        layout.addLayout(header)
+
+        self.pages = QStackedWidget()
+        self.page_keys = ["home"]
+        self.pages.addWidget(self._build_page())
+        if self.security is not None:
+            from director.qt_security import SecurityPage
+            self.security_page = SecurityPage(self.security, **self._security_options)
+            self.pages.addWidget(self.security_page)
+            self.page_keys.append("security")
+        layout.addWidget(self.pages, 1)
+        return content
+
+    def show_page(self, key: str) -> None:
+        """Εναλλαγή σελίδας από το μενού· η τρέχουσα μένει επιλεγμένη."""
+        if key not in self.page_keys:
+            return
+        for name, button in self.nav_buttons.items():
+            button.setChecked(name == key)
+        self.pages.setCurrentIndex(self.page_keys.index(key))
+        if key == "security":
+            from director.qt_security import PAGE_TITLE as SECURITY_TITLE
+            self.page_title.setText(SECURITY_TITLE)
+            self._security_refreshed = -math.inf
+        else:
+            self.page_title.setText(PAGE_TITLE)
+        self.refresh()
+
+    @property
+    def current_page(self) -> str:
+        return self.page_keys[self.pages.currentIndex()]
+
     def _build_page(self) -> QWidget:
         # Αλλαγή πλάτους σελίδας μπορεί να χωρά ή να αφαιρεί στήλη αιθουσών.
         page = _ResizeNotifier(self._layout_rooms)
         page.setObjectName("page")
         self.page = page
         layout = QVBoxLayout(page)
-        layout.setContentsMargins(px(18), px(14), px(18), px(16))
+        layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(px(theme.CARD_SPACING))
-
-        header = QHBoxLayout()
-        title = QLabel(PAGE_TITLE)
-        title.setObjectName("pageTitle")
-        header.addWidget(title)
-        header.addStretch(1)
-        self.connection_dot = StatusDot(theme.CONNECTED)
-        self.connection_label = QLabel("Συνδεδεμένος")
-        self.connection_label.setObjectName("connection")
-        header.setSpacing(px(6))
-        # «Συνδεδεμένος ●»: η κουκκίδα μετά τη λέξη (ui-style.md §4).
-        header.addWidget(self.connection_label)
-        header.addWidget(self.connection_dot, 0, Qt.AlignmentFlag.AlignVCenter)
-        layout.addLayout(header)
 
         # Επάνω σειρά: κάρτες ανακοίνωσης και αιθουσών με ίδιο ύψος.
         # Δεύτερη σειρά: επιλογή αιθουσών μόνο δεξιά.
@@ -707,6 +754,11 @@ class DirectorWindow(QMainWindow):
         self.mic.clear_error_if_ready()
         self._refresh_rooms()
         self._refresh_announcement()
+        if self.security_page is not None and self.current_page == "security":
+            now = time.monotonic()
+            if now - self._security_refreshed >= SECURITY_REFRESH_SECONDS:
+                self._security_refreshed = now
+                self.security_page.refresh()
         up = self.server_up()
         self.connection_dot.set_color(theme.CONNECTED if up else theme.LIVE)
         self.connection_label.setText("Συνδεδεμένος" if up else "Εκτός λειτουργίας")
@@ -899,41 +951,97 @@ def release_window(window: QWidget) -> None:
         shiboken6.delete(window)
 
 
-def run_qt_gui(args, *, accept_clients, stream_microphone) -> None:
-    app = create_application()
-    stop = threading.Event()
-    broadcaster = AudioBroadcaster(max_clients=MAX_CLIENTS,
-                                   on_event=lambda s: print(s, flush=True))
-    microphone = DirectorMicrophone(stream_microphone, broadcaster,
-                                    device=args.device, latency=args.latency)
-    identifier = director_id(args.director_id_file)
-    threads: list[threading.Thread] = []
-    try:
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as server:
+class GuiRuntime:
+    """Τα μέρη του Director με GUI: θύρα Clients, ανακάλυψη, εγγραφή, τελευταία σύνδεση.
+
+    Το χρησιμοποιεί το `run_qt_gui` και η αυτόματη πραγματική δοκιμή
+    (tools/security_gui_live_test.py), ώστε να δοκιμάζεται το ίδιο παράθυρο.
+    """
+
+    def __init__(self, args, *, accept_clients, stream_microphone,
+                 enrollment=None, trust=None, last_seen=None,
+                 security_options: dict | None = None):
+        self.args = args
+        self.accept_clients = accept_clients
+        self.enrollment = enrollment
+        self.trust = trust
+        self.last_seen = last_seen
+        self.security_options = security_options
+        self.stop = threading.Event()
+        self.broadcaster = AudioBroadcaster(max_clients=MAX_CLIENTS,
+                                            on_event=lambda s: print(s, flush=True))
+        self.microphone = DirectorMicrophone(stream_microphone, self.broadcaster,
+                                             device=args.device, latency=args.latency)
+        self.threads: list[threading.Thread] = []
+        self.server: socket.socket | None = None
+        self.window: DirectorWindow | None = None
+
+    def start(self) -> DirectorWindow:
+        from director.security import SecurityModel, track_last_seen
+        args = self.args
+        identifier = director_id(args.director_id_file)
+        server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        try:
             server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             server.bind((args.host, args.port))
             server.listen(MAX_CLIENTS)
-            for name, target, kwargs in [
-                ("discovery", announce, {"args": (stop, identifier, args.port),
-                                         "kwargs": {"udp_port": args.discovery_port}}),
-                ("accept", accept_clients, {"args": (server, broadcaster, stop)}),
-            ]:
-                thread = threading.Thread(target=target, daemon=True,
-                                          name=f"director-gui-{name}", **kwargs)
-                thread.start()
-                threads.append(thread)
-            window = DirectorWindow(
-                broadcaster, microphone,
-                server_up=lambda: all(thread.is_alive() for thread in threads))
-            window.show()
-            try:
-                app.exec()
-            finally:
-                release_window(window)
-    finally:
+        except BaseException:
+            server.close()
+            raise
+        self.server = server
+        for name, target, kwargs in [
+            ("discovery", announce, {"args": (self.stop, identifier, args.port),
+                                     "kwargs": {"udp_port": args.discovery_port}}),
+            ("accept", self.accept_clients, {"args": (server, self.broadcaster, self.stop)}),
+        ]:
+            thread = threading.Thread(target=target, daemon=True,
+                                      name=f"director-gui-{name}", **kwargs)
+            thread.start()
+            self.threads.append(thread)
+        security = None
+        if self.last_seen is not None:
+            self.last_seen_thread = threading.Thread(
+                target=track_last_seen, args=(self.last_seen, self.broadcaster, self.stop),
+                daemon=True, name="director-gui-last-seen")
+            self.last_seen_thread.start()
+            if self.enrollment is not None and self.trust is not None:
+                security = SecurityModel(self.enrollment, self.trust, self.broadcaster,
+                                         self.last_seen)
+        core = list(self.threads)
+        self.window = DirectorWindow(
+            self.broadcaster, self.microphone,
+            server_up=lambda: all(thread.is_alive() for thread in core),
+            security=security, security_options=self.security_options)
+        return self.window
+
+    def shutdown(self) -> None:
+        if self.window is not None:
+            release_window(self.window)
+            self.window = None
         # Πρώτα STOP στους Clients, μετά κλείσιμο sockets και worker threads.
-        microphone.shutdown()
-        stop.set()
-        broadcaster.close()
-        for thread in threads:
+        self.microphone.shutdown()
+        if self.enrollment is not None:
+            self.enrollment.stop()
+        self.stop.set()
+        thread = getattr(self, "last_seen_thread", None)
+        if thread is not None:
+            thread.join(timeout=2)
+        self.broadcaster.close()
+        if self.server is not None:
+            self.server.close()
+        for thread in self.threads:
             thread.join(timeout=1)
+
+
+def run_qt_gui(args, *, accept_clients, stream_microphone, enrollment=None, trust=None,
+               last_seen=None) -> None:
+    app = create_application()
+    runtime = GuiRuntime(args, accept_clients=accept_clients,
+                         stream_microphone=stream_microphone, enrollment=enrollment,
+                         trust=trust, last_seen=last_seen)
+    try:
+        window = runtime.start()
+        window.show()
+        app.exec()
+    finally:
+        runtime.shutdown()

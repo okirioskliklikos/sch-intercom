@@ -137,6 +137,11 @@ METER_BAR = 6
 METER_GAP = 4
 SCROLLBAR = 8               # πλάτος scroll bar, χωρίς βελάκια
 SCROLLBAR_HANDLE_MIN = 32   # ελάχιστο μήκος λαβής
+# Σελίδα «Ασφάλεια» (ui-style.md §6)
+ACTION_HEIGHT = 32          # κουμπιά Έγκριση/Απόρριψη και πεδίο κωδικού
+ACTION_ICON_STROKE = 2.6    # παχύτερη γραμμή εικονιδίων στα κουμπιά ενέργειας
+TRASH_ICON_STROKE = 2.1     # ο κάδος με 2.6 γεμίζει· λεπτότερος όπως στο mockup
+COMPUTER_INDENT = 26        # εσοχή υπολογιστών κάτω από την αίθουσα
 
 
 def stylesheet(metrics: Metrics | None = None) -> str:
@@ -315,7 +320,98 @@ QScrollBar::add-line, QScrollBar::sub-line {{
 QScrollBar::add-page, QScrollBar::sub-page {{
     background: none;
 }}
-QScrollArea, #roomGrid {{
+#tab {{
+    padding: {px(6)}px {px(16)}px;
+    border: 1px solid {CARD_BORDER};
+    border-radius: {px(NAV_RADIUS)}px;
+    background: {CARD_BG};
+    color: {TEXT_MUTED};
+}}
+#tab:checked {{
+    background: {PRIMARY_LIGHT};
+    border-color: {PRIMARY};
+    color: {PRIMARY};
+    font-weight: 600;
+}}
+#small {{
+    color: {TEXT_MUTED};
+    font-size: {m.font_pt(FONT_SMALL)}pt;
+}}
+#portState {{
+    font-size: {m.font_pt(FONT_SMALL)}pt;
+}}
+#requestTitle, #roomTitle {{
+    font-weight: 600;
+}}
+#roomTitle {{
+    font-size: {m.font_pt(FONT_ROOM)}pt;
+}}
+#separator {{
+    background: {CARD_BORDER};
+    border: none;
+}}
+#codeInput {{
+    background: {CARD_BG};
+    border: 1px solid {CONTROL_BORDER};
+    border-radius: {px(NAV_RADIUS)}px;
+    padding: 0 {px(6)}px;
+    min-height: {px(ACTION_HEIGHT) - 2}px;
+    max-height: {px(ACTION_HEIGHT) - 2}px;
+}}
+#codeInput:focus {{
+    border: 2px solid {PRIMARY};
+}}
+#approve, #deny {{
+    border-radius: {px(NAV_RADIUS)}px;
+    padding: 0 {px(14)}px;
+    min-height: {px(ACTION_HEIGHT) - 2}px;
+    max-height: {px(ACTION_HEIGHT) - 2}px;
+}}
+#approve {{
+    background: {CONNECTED};
+    border: 1px solid {CONNECTED};
+    color: {WHITE};
+}}
+#approve:hover {{
+    background: {ONLINE};
+    border-color: {ONLINE};
+}}
+#approve:disabled {{
+    background: {CARD_BORDER};
+    border-color: {CARD_BORDER};
+    color: {TEXT_MUTED};
+}}
+#deny {{
+    background: {CARD_BG};
+    border: 1px solid {CONTROL_BORDER};
+    color: {LIVE};
+}}
+#deny:hover {{
+    background: {LIVE_LIGHT};
+}}
+#result {{
+    font-size: {m.font_pt(FONT_SMALL)}pt;
+    color: {LIVE};
+}}
+#result[ok="true"] {{
+    color: {CONNECTED};
+}}
+#rowMenu {{
+    border: none;
+    background: transparent;
+    color: {TEXT_MUTED};
+    border-radius: {px(NAV_RADIUS)}px;
+    padding: 0 {px(8)}px;
+    min-height: {px(26)}px;
+}}
+#rowMenu:hover, #rowMenu:pressed {{
+    background: {WINDOW_BG};
+}}
+#rowMenu::menu-indicator {{
+    width: 0;
+    image: none;
+}}
+QScrollArea, #roomGrid, #securityBody {{
     background: transparent;
     border: none;
 }}
