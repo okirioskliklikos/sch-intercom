@@ -232,7 +232,7 @@ class SecurityModelTests(SecurityFixture, unittest.TestCase):
 
     def test_limit_is_fifty_requests(self):
         self.assertEqual(MAX_PENDING, 50)
-        self.assertEqual(TEXT_FULL_NOTICE, "Όριο 50 αιτημάτων: νέα αιτήματα απορρίπτονται")
+        self.assertEqual(TEXT_FULL_NOTICE, "Συμπληρώθηκε το όριο αιτημάτων (50): νέα αιτήματα απορρίπτονται")
 
     def test_full_list_rejects_new_requests_until_one_is_answered(self):
         with mock.patch.object(self.enrollment, "_max_pending", 2):

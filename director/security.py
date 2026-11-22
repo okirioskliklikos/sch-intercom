@@ -36,7 +36,7 @@ TEXT_REJECTED = ("Λάθος κωδικός: το αίτημα απορρίφθ�
                  "Ζητήστε νέα εγγραφή από τον υπολογιστή.")
 TEXT_NEVER = "Δεν έχει συνδεθεί"
 def full_notice(limit: int) -> str:
-    return f"Όριο {limit} αιτημάτων: νέα αιτήματα απορρίπτονται"
+    return f"Συμπληρώθηκε το όριο αιτημάτων ({limit}): νέα αιτήματα απορρίπτονται"
 
 
 TEXT_FULL_NOTICE = full_notice(MAX_PENDING)
