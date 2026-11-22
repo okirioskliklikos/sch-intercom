@@ -25,8 +25,6 @@ from shared.ui import icons, theme
 PAGE_TITLE = "Ασφάλεια"
 TAB_COMPUTERS = "Υπολογιστές"
 TAB_CERTIFICATES = "Πιστοποιητικά"
-PORT_OPEN = "Εγγραφές ανοιχτές"
-PORT_CLOSED = "Εγγραφές κλειστές"
 NO_REQUESTS = "Δεν υπάρχουν νέες εγγραφές"
 NO_COMPUTERS = "Δεν υπάρχουν εγγεγραμμένοι υπολογιστές"
 #: Πόσο μένει ορατό το αποτέλεσμα ενός αιτήματος που έκλεισε.
@@ -320,22 +318,6 @@ class SecurityPage(QWidget):
         row.setSpacing(px(8))
         row.addWidget(_label("Νέες εγγραφές", "cardTitle"), 0, Qt.AlignmentFlag.AlignTop)
         row.addStretch(1)
-        self.port_dot = StatusDot(theme.ROOM_DOT_OFFLINE)
-        self.port_label = _label(PORT_CLOSED, "portState")
-        self.port_button = QPushButton()
-        self.port_button.setObjectName("enrollmentPortButton")
-        self.port_button.setToolTip("Άνοιγμα εγγραφών")
-        self.port_button.setAccessibleName("Άνοιγμα εγγραφών")
-        self.port_button.setIconSize(QSize(px(theme.ICON), px(theme.ICON)))
-        self.port_button.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.port_button.clicked.connect(self.toggle_port)
-        port_state = QHBoxLayout()
-        port_state.setContentsMargins(0, 0, 0, 0)
-        port_state.setSpacing(px(6))
-        port_state.addWidget(self.port_dot, 0, Qt.AlignmentFlag.AlignVCenter)
-        port_state.addWidget(self.port_label)
-        port_state.addWidget(self.port_button)
-        row.addLayout(port_state, 0)
         card, layout = _card(head)
         self.requests_card = card
         self.requests_layout = QVBoxLayout()
@@ -450,24 +432,9 @@ class SecurityPage(QWidget):
     # --- ανανέωση ----------------------------------------------------------
     def refresh(self) -> None:
         now = self.clock()
-        self._refresh_port()
         self._refresh_requests(now)
         self._refresh_rooms(now)
         self._relayout()
-
-    def _refresh_port(self) -> None:
-        is_open = self.model.port_open
-        self.port_dot.set_color(theme.ONLINE if is_open else theme.LIVE)
-        self.port_label.setText(PORT_OPEN if is_open else PORT_CLOSED)
-        _repolish(self.port_label, portOpen="true" if is_open else "false")
-        self.port_button.setText("")
-        action = "Κλείσιμο εγγραφών" if is_open else "Άνοιγμα εγγραφών"
-        self.port_button.setToolTip(action)
-        self.port_button.setAccessibleName(action)
-        _repolish(self.port_button, portOpen="true" if is_open else "false")
-        self.port_button.setIcon(icons.icon("lock" if is_open else "unlock", theme.WHITE,
-                                            size=px(theme.ICON),
-                                            stroke_width=theme.ACTION_ICON_STROKE))
 
     def _refresh_requests(self, now: float) -> None:
         requests = self.model.requests()
