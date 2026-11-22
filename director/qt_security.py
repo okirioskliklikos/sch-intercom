@@ -8,17 +8,19 @@ Tab «Υπολογιστές» (απόφαση χρήστη 22/11/2026): αρι�
 """
 from __future__ import annotations
 
+from pathlib import Path
 import time
 from collections.abc import Callable
 
-from PySide6.QtCore import QRegularExpression, QSize, Qt
+from PySide6.QtCore import QRegularExpression, QSize, Qt, QTimer
 from PySide6.QtGui import QAction, QColor, QFontDatabase, QPalette, QRegularExpressionValidator
 from PySide6.QtWidgets import (QApplication, QFrame, QGraphicsDropShadowEffect, QProxyStyle, QStyle, QGridLayout, QHBoxLayout, QInputDialog, QLabel,
                                QLineEdit, QMenu,
                                QMessageBox, QPushButton, QScrollArea, QSizePolicy,
                                QToolButton, QVBoxLayout, QWidget)
 
-from director.qt_gui import ElidedLabel, StatusDot, _repolish, px
+from director.qt_gui import (ElidedLabel, SplitHandle, StatusDot, _repolish,
+                             load_layout_settings, px, save_layout_settings)
 from director.security import (CODE_LENGTH, ComputerView, Decision, RequestView,
                                RoomView, SecurityModel, computers_text)
 from shared.ui import icons, theme
@@ -304,8 +306,16 @@ class SecurityPage(QWidget):
     def __init__(self, model: SecurityModel, *, clock: Callable[[], float] = time.time,
                  ask_text: Callable[[str, str, str], str | None] | None = None,
                  confirm: Callable[[str, str, str], bool] | None = None,
-                 warn: Callable[[str], None] | None = None, parent=None):
+                 warn: Callable[[str], None] | None = None,
+                 layout_settings: Path | None = None, parent=None):
         super().__init__(parent)
+        # Πλάτος «Νέες εγγραφές» από τη λαβή, σε px του mockup· None = αυτόματο.
+        self._layout_settings = layout_settings
+        # 0 στο αρχείο = επαναφορά στην προεπιλογή (διπλό κλικ).
+        self._left_user: float | None = load_layout_settings(layout_settings).get(
+            "security_left_width") or None
+        self._drag_start: int | None = None
+        self._relayout_pending = False
         self.model = model
         self.clock = clock
         self.ask_text = ask_text or self._ask_text
@@ -341,12 +351,16 @@ class SecurityPage(QWidget):
         self.columns = QGridLayout(body)
         # Κενό ανάμεσα στις κάρτες και τη γραμμή κύλισης (απόφαση χρήστη 22/11/2026).
         self.columns.setContentsMargins(0, 0, px(theme.SCROLL_GAP), 0)
-        self.columns.setHorizontalSpacing(px(theme.SECTION_GAP))
+        # Το οριζόντιο κενό ανάμεσα στις ενότητες το πιάνει η λαβή (στήλη 1).
+        self.columns.setHorizontalSpacing(0)
         self.columns.setVerticalSpacing(px(theme.SECTION_GAP))
         self._build_requests_section()
         self._build_computers_section()
-        self.divider = QFrame()
-        self.divider.setObjectName("divider")
+        # Λαβή αντί για διαχωριστικό γραμμή (απόφαση χρήστη 22/11/2026).
+        self.split_handle = SplitHandle(
+            self._drag_left, self._save_left, self._reset_left,
+            width=2 * px(theme.SECTION_GAP) + 1,
+            tooltip="Σύρετε για πλάτος «Νέες εγγραφές» · διπλό κλικ: προεπιλογή")
         self.side_by_side: bool | None = None
         self.room_columns = 0
         self._room_order: tuple | None = None
@@ -357,6 +371,8 @@ class SecurityPage(QWidget):
         self.scroll.setFrameShape(QFrame.Shape.NoFrame)
         self.scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.scroll.setWidget(body)
+        self.scroll.verticalScrollBar().valueChanged.connect(
+            lambda _v: self.split_handle.update())
         layout.addWidget(self.scroll, 1)
 
     # --- διάταξη ------------------------------------------------------------
@@ -375,41 +391,57 @@ class SecurityPage(QWidget):
         return max(self._room_card_minimum(), self.computers_head.minimumSizeHint().width(),
                    self.no_computers.minimumSizeHint().width())
 
+    def _gaps(self) -> int:
+        return self.split_handle.width()
+
     def two_columns_fit(self, width: int) -> bool:
-        gaps = 2 * self.columns.horizontalSpacing() + 1
-        return width - self._left_minimum() - gaps >= self._right_minimum()
+        return width - self._left_minimum() - self._gaps() >= self._right_minimum()
+
+    def _left_default(self, width: int) -> int:
+        left = self._left_minimum()
+        if width - px(theme.LEFT_COLUMN_MAX) - self._gaps() >= self._right_minimum():
+            left = max(left, px(theme.LEFT_COLUMN_MAX))
+        return left
+
+    def _left_bounds(self, width: int) -> tuple[int, int]:
+        low = self._left_minimum()
+        return low, max(low, width - self._gaps() - self._right_minimum())
+
+    @property
+    def left_width(self) -> int:
+        """Πλάτος στήλης «Νέες εγγραφές» στη διάταξη δίπλα-δίπλα."""
+        return self.requests_section.width()
 
     def _arrange(self, width: int) -> None:
         """«Νέες εγγραφές» αριστερά (380–440), διαχωριστικό, αίθουσες δεξιά σε όσες
         στήλες χωρούν· σε στενό παράθυρο η μία ενότητα κάτω από την άλλη."""
         side_by_side = self.two_columns_fit(width)
-        gaps = 2 * self.columns.horizontalSpacing() + 1
-        left = self._left_minimum()
-        if side_by_side and width - px(theme.LEFT_COLUMN_MAX) - gaps >= self._right_minimum():
-            left = max(left, px(theme.LEFT_COLUMN_MAX))
+        gaps = self._gaps()
+        if self._left_user is not None:
+            low, high = self._left_bounds(width)
+            left = max(low, min(px(self._left_user), high))
+        else:
+            left = self._left_default(width) if side_by_side else self._left_minimum()
         if side_by_side != self.side_by_side:
             self.side_by_side = side_by_side
             top = Qt.AlignmentFlag.AlignTop
-            for widget in (self.requests_section, self.divider, self.computers_section):
+            for widget in (self.requests_section, self.split_handle, self.computers_section):
                 self.columns.removeWidget(widget)
             if side_by_side:
                 self.columns.addWidget(self.requests_section, 0, 0, top)
-                self.columns.addWidget(self.divider, 0, 1)
+                self.columns.addWidget(self.split_handle, 0, 1)
                 self.columns.addWidget(self.computers_section, 0, 2, top)
-                self.divider.setFixedWidth(1)
-                self.divider.setMinimumHeight(0)
-                self.divider.setMaximumHeight(16777215)
+                self.split_handle.show()
                 for column, stretch in enumerate((0, 0, 1)):
                     self.columns.setColumnStretch(column, stretch)
                 for row in range(3):
                     self.columns.setRowStretch(row, 0)
             else:
+                # Η μία κάτω από την άλλη: χωρίς λαβή, μόνο κενό ενότητας.
+                self.split_handle.hide()
                 self.columns.addWidget(self.requests_section, 0, 0, top)
-                self.columns.addWidget(self.divider, 1, 0)
                 self.columns.addWidget(self.computers_section, 2, 0, top)
-                self.divider.setFixedHeight(1)
-                self.divider.setMinimumWidth(0)
-                self.divider.setMaximumWidth(16777215)
+                self.columns.setRowMinimumHeight(1, 0)
                 for column, stretch in enumerate((1, 0, 0)):
                     self.columns.setColumnStretch(column, stretch)
                 for row, stretch in enumerate((0, 0, 1)):
@@ -451,7 +483,39 @@ class SecurityPage(QWidget):
 
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)
+        # Στον επόμενο κύκλο γεγονότων, όχι μέσα στο setGeometry του layout
+        # (ίδιο πρόβλημα με την Κεντρική: αλλαγή θέσεων grid κατά το resize).
+        if not self._relayout_pending:
+            self._relayout_pending = True
+            QTimer.singleShot(0, self._run_relayout)
+
+    def _run_relayout(self) -> None:
+        self._relayout_pending = False
         self._relayout()
+
+    # --- λαβή ---------------------------------------------------------------
+    def _drag_left(self, delta: int) -> None:
+        if not self.side_by_side:
+            return
+        if self._drag_start is None:
+            self._drag_start = self.left_width
+        width = self._available_width()
+        low, high = self._left_bounds(width)
+        real = max(low, min(self._drag_start + delta, high))
+        self._left_user = real / (px(1000) / 1000)
+        self._relayout()
+
+    def _save_left(self) -> None:
+        self._drag_start = None
+        value = None if self._left_user is None else round(self._left_user, 1)
+        if value is not None:
+            save_layout_settings(self._layout_settings, {"security_left_width": value})
+
+    def _reset_left(self) -> None:
+        self._drag_start = None
+        self._left_user = None
+        self._relayout()
+        save_layout_settings(self._layout_settings, {"security_left_width": 0.0})
 
     # --- κατασκευή ---------------------------------------------------------
     def _build_requests_section(self) -> None:

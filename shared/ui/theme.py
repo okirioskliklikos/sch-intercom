@@ -33,7 +33,6 @@ CONNECTED = "#2e8b57"
 LIVE = "#c62828"
 LIVE_LIGHT = "#f6d5d5"
 APP_ICON = "#0e7490"
-DIVIDER = "#b3bcc8"
 
 #: Όνομα token όπως στο ui-style.md → τιμή.
 TOKENS: dict[str, str] = {
@@ -52,7 +51,6 @@ TOKENS: dict[str, str] = {
     "live": LIVE,
     "live_light": LIVE_LIGHT,
     "app_icon": APP_ICON,
-    "divider": DIVIDER,
 }
 
 # Λευκό σε έγχρωμο φόντο (τικ, εικονίδιο μικροφώνου) δεν είναι token.
@@ -139,6 +137,8 @@ METER_BAR = 6
 METER_GAP = 4
 SCROLLBAR = 8               # πλάτος scroll bar, χωρίς βελάκια
 SCROLLBAR_HANDLE_MIN = 32   # ελάχιστο μήκος λαβής
+SPLIT_DOT = 4               # λαβή αιθουσών στην Κεντρική: τελείες 4px
+SPLIT_DOT_GAP = 7           # απόσταση κέντρων τελειών
 MENU_SHADOW = 10            # περιθώριο σκιάς γύρω από τα μενού ⋮
 MENU_ICON = 18              # εικονίδια στοιχείων μενού ⋮ (απόφαση χρήστη 22/11/2026)
 SCROLL_GAP = 12             # κενό περιεχομένου πριν από τη γραμμή κύλισης (σελίδα «Ασφάλεια»)
@@ -353,10 +353,6 @@ QScrollBar::add-page, QScrollBar::sub-page {{
 }}
 #sectionCount[warn="true"] {{
     color: {LIVE};
-}}
-#divider {{
-    background: {DIVIDER};
-    border: none;
 }}
 #requestTitle[final="true"] {{
     color: {TEXT_MUTED};

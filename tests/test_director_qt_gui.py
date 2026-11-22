@@ -9,6 +9,7 @@ from unittest import TestCase
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 try:
+    from PySide6.QtCore import Qt
     from PySide6.QtGui import QFont
     from PySide6.QtWidgets import QApplication, QLabel
     from director.qt_gui import (HINT_IDLE, HINT_LIVE, HINT_LIVE_MUTED, HINT_MUTED,
@@ -187,8 +188,12 @@ class DirectorWindowTests(TestCase):
         long_name = "Εργαστήριο Φυσικής και Χημείας Β΄ τάξης"
         names = [long_name, "Αίθουσα Εικαστικών", "Γραφείο Καθηγητών"]
         window = self.make([(f"id-{i}", n, True, 0.1) for i, n in enumerate(names)])
+        window.setMinimumSize(100, 100)  # η offscreen «οθόνη» είναι μικρή
+        window.resize(1366, 768)  # δίπλα-δίπλα: στήλη σταθερού πλάτους
         window.show()
-        QApplication.processEvents()
+        for _ in range(3):
+            QApplication.processEvents()
+        self.assertFalse(window.stacked)
         row = window.room_rows[long_name]
         self.assertTrue(row.label.text().endswith("…"))
         self.assertTrue(long_name.startswith(row.label.text()[:-1]))
@@ -241,8 +246,12 @@ class DirectorWindowTests(TestCase):
                                 m.px(theme.ANNOUNCE_MIN_WIDTH))
 
         window = self.make(self.STATUS)
+        window.setMinimumSize(100, 100)
+        window.resize(1366, 768)
         window.show()
-        QApplication.processEvents()
+        for _ in range(3):
+            QApplication.processEvents()
+        self.assertFalse(window.stacked)
         width = current_metrics().px(theme.ROOM_COLUMN_WIDTH)
         self.assertEqual({r.width() for r in window.room_rows.values()}, {width})
 
@@ -320,6 +329,124 @@ class DirectorWindowTests(TestCase):
                     right = label.mapTo(window.rooms_card, label.rect().topRight()).x()
                     self.assertLessEqual(right, window.rooms_card.width())
                 window.hide()
+
+    @staticmethod
+    def pump(rounds=4):
+        for _ in range(rounds):
+            QApplication.processEvents()
+
+    def test_split_handle_widens_rooms_and_is_remembered(self):
+        # Απόφαση χρήστη 22/11/2026: λαβή ανάμεσα σε «Ανακοίνωση» και αίθουσες.
+        import tempfile
+        from pathlib import Path
+        settings = Path(tempfile.mkdtemp()) / "director-gui.json"
+        self.addCleanup(lambda: settings.unlink(missing_ok=True))
+        status = [(f"id-{i}", f"Εργαστήριο Πληροφορικής {i:02d}", True, 0.1)
+                  for i in range(14)]
+
+        def open_window():
+            broadcaster = StatusBroadcaster(status)
+            window = DirectorWindow(broadcaster, DirectorMicrophone(FakeStream(), broadcaster),
+                                    layout_settings=settings)
+            window.timer.stop()
+            self.addCleanup(release_window, window)
+            window.setMinimumSize(100, 100)
+            window.resize(1540, 900)
+            window.show()
+            self.pump()
+            return window
+
+        window = open_window()
+        handle = window.split_handle
+        self.assertFalse(window.stacked)
+        self.assertTrue(handle.isVisible())
+        announce, rooms = window.announcement_card, window.rooms_card
+        page = window.page
+        # Η λαβή είναι στο κενό ανάμεσα στις κάρτες.
+        self.assertLessEqual(announce.mapTo(page, announce.rect().topRight()).x(),
+                             handle.mapTo(page, handle.rect().topLeft()).x())
+        self.assertLessEqual(handle.mapTo(page, handle.rect().topRight()).x(),
+                             rooms.mapTo(page, rooms.rect().topLeft()).x())
+        self.assertEqual(handle.cursor().shape(), Qt.CursorShape.SplitHCursor)
+        row = next(iter(window.room_rows.values()))
+        before_rooms, before_row = rooms.width(), row.width()
+        self.assertTrue(row.label.text().endswith("…"))
+
+        window._drag_rooms(150)
+        window._save_rooms_extra()
+        self.pump()
+        self.assertGreater(rooms.width(), before_rooms + 100)
+        self.assertGreater(row.width(), before_row)
+        self.assertFalse(row.label.text().endswith("…"))  # χωρά πια ολόκληρο
+        self.assertGreaterEqual(announce.width(), window._announce_min_width())
+        self.assertTrue(settings.exists())
+        saved = window.rooms_extra_width
+
+        # Μετά από επανεκκίνηση: ίδιο πλάτος.
+        again = open_window()
+        self.assertEqual(again.rooms_extra_width, saved)
+        self.assertAlmostEqual(again.rooms_card.width(), rooms.width(), delta=2)
+
+        # Πολύ μεγάλο σύρσιμο: η «Ανακοίνωση» μένει στο ελάχιστο πλάτος της.
+        again._drag_rooms(5000)
+        self.pump()
+        self.assertGreaterEqual(again.announcement_card.width(), again._announce_min_width())
+        self.assert_not_clipped(again)
+        again._save_rooms_extra()
+
+        # Διπλό κλικ: προεπιλογή.
+        again._reset_rooms_extra()
+        self.pump()
+        self.assertEqual(again.rooms_extra_width, 0)
+        self.assertAlmostEqual(again.rooms_card.width(), before_rooms, delta=2)
+
+    def test_split_handle_hidden_when_stacked_or_without_rooms(self):
+        window = self.sized(40, 1000, 700)
+        self.assertTrue(window.stacked)
+        self.assertFalse(window.split_handle.isVisible())
+        window = self.sized(0, 1700, 900)
+        self.assertFalse(window.stacked)
+        self.assertFalse(window.split_handle.isVisible())
+
+    def test_layout_settings_file_is_validated(self):
+        import tempfile
+        from pathlib import Path
+        from director.qt_gui import load_layout_settings, save_layout_settings
+        path = Path(tempfile.mkdtemp()) / "director-gui.json"
+        self.assertEqual(load_layout_settings(None), {})
+        self.assertEqual(load_layout_settings(path), {})
+        for content in ("{", "[]", '{"version": 2, "rooms_extra_width": 10}',
+                        '{"version": 1, "rooms_extra_width": -5}',
+                        '{"version": 1, "rooms_extra_width": "x"}'):
+            with self.subTest(content=content):
+                path.write_text(content, encoding="utf-8")
+                self.assertEqual(load_layout_settings(path), {})
+        save_layout_settings(path, {"rooms_extra_width": 120.5})
+        self.assertEqual(load_layout_settings(path), {"rooms_extra_width": 120.5})
+
+    def test_gap_between_cards_and_page_scrollbar(self):
+        # Απόφαση χρήστη 22/11/2026: οι κάρτες δεν ακουμπούν τη γραμμή κύλισης.
+        window = self.sized(60, 1000, 600)
+        bar = window.page_scroll.verticalScrollBar()
+        self.assertTrue(bar.isVisible())
+        viewport = window.page_scroll.viewport()
+        gap = current_metrics().px(theme.SCROLL_GAP)
+        for card in (window.announcement_card, window.rooms_card, window.selection_card):
+            right = card.mapTo(viewport, card.rect().topRight()).x()
+            with self.subTest(card=card.objectName()):
+                self.assertLessEqual(right + gap, viewport.width())
+
+    def test_shrinking_width_and_height_together_does_not_crash(self):
+        # Βρέθηκε 22/11/2026: 1540×900 → 1000×880 έκανε segfault (αναδιάταξη μέσα
+        # στο setGeometry του layout). Τώρα η αναδιάταξη γίνεται στον επόμενο κύκλο.
+        window = self.sized(14, 1540, 900)
+        self.assertFalse(window.stacked)
+        for width, height in ((1000, 880), (1540, 900), (900, 700)):
+            window.resize(width, height)
+            self.pump()
+            with self.subTest(size=(width, height)):
+                self.assert_not_clipped(window)
+        self.assertTrue(window.stacked)
 
     def test_no_rooms_side_by_side_when_wide(self):
         window = self.sized(0, 1700, 900)
