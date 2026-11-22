@@ -8,7 +8,7 @@ try {
     } else {
         $python = "python"
     }
-    & $python -m unittest tests.test_backup -v
+    & $python -m unittest discover -s tests -p test_backup.py -v
     if ($LASTEXITCODE -ne 0) {
         Write-Host "FAIL: unit tests 4.2C"
         exit 1
