@@ -29,17 +29,43 @@ LAST_SEEN_SAVE_SECONDS = 60.0
 LAST_SEEN_POLL_SECONDS = 1.0
 CODE_LENGTH = 6
 
-TEXT_APPROVED = "Εγκρίθηκε ✓ · θα συνδεθεί μόνος του"
+# Τα αποτελέσματα μπαίνουν πάνω δεξιά στην κάρτα του αιτήματος (ui-style.md §6):
+# σύντομα, με την εξήγηση σε tooltip.
+TEXT_APPROVED = "Εγκρίθηκε ✓"
+HINT_APPROVED = "Ο υπολογιστής θα συνδεθεί μόνος του."
 TEXT_DENIED = "Απορρίφθηκε"
-TEXT_EXPIRED = "Το αίτημα δεν υπάρχει πια (έληξε ή απαντήθηκε)"
-TEXT_REJECTED = ("Λάθος κωδικός: το αίτημα απορρίφθηκε. "
-                 "Ζητήστε νέα εγγραφή από τον υπολογιστή.")
+TEXT_EXPIRED = "Δεν υπάρχει πια"
+HINT_EXPIRED = "Το αίτημα έληξε ή απαντήθηκε."
+TEXT_REJECTED = "Απορρίφθηκε · 3 λάθη"
+HINT_REJECTED = "Λάθος κωδικός 3 φορές. Ζητήστε νέα εγγραφή από τον υπολογιστή."
 TEXT_NEVER = "Δεν έχει συνδεθεί"
-def full_notice(limit: int) -> str:
-    return f"Συμπληρώθηκε το όριο αιτημάτων ({limit}): νέα αιτήματα απορρίπτονται"
+TEXT_JUST_NOW = "μόλις τώρα"
+#: Από πόσα αιτήματα πριν από το όριο η ένδειξη γίνεται κόκκινη (45 για όριο 50).
+WARN_MARGIN = 5
 
 
-TEXT_FULL_NOTICE = full_notice(MAX_PENDING)
+def full_text(limit: int) -> str:
+    return f"Συμπληρώθηκε το όριο ({limit})"
+
+
+def wrong_code_text(remaining: int) -> str:
+    left = "απομένει 1" if remaining == 1 else f"απομένουν {remaining}"
+    return f"Λάθος κωδικός · {left}"
+
+
+def requests_status(count: int, limit: int = MAX_PENDING) -> tuple[str, bool]:
+    """Κείμενο δεξιά στον τίτλο «Νέες εγγραφές» και αν είναι προειδοποίηση (κόκκινο).
+
+    Απόφαση χρήστη 22/11/2026: γκρι «N αιτήματα», από τα 45 «N/50 αιτήματα» σε
+    κόκκινο, στα 50 «Συμπληρώθηκε το όριο (50)». Χωρίς αιτήματα: κενό.
+    """
+    if count >= limit:
+        return full_text(limit), True
+    if count >= limit - WARN_MARGIN:
+        return f"{count}/{limit} αιτήματα", True
+    if count == 0:
+        return "", False
+    return _plural(count, "αίτημα", "αιτήματα"), False
 
 
 def last_seen_path(registry_file: Path) -> Path:
@@ -152,10 +178,11 @@ def computers_text(count: int) -> str:
 
 
 def ago_text(seconds: float) -> str:
-    """«πριν 20″», «πριν 3 λεπτά», «πριν 2 ώρες», «πριν 3 ημέρες» (όπως το mockup)."""
+    """«μόλις τώρα», «πριν 3 λεπτά», «πριν 2 ώρες», «πριν 3 ημέρες» (όπως το mockup)."""
     seconds = max(0, int(seconds))
     if seconds < 60:
-        return f"πριν {seconds}″"
+        # Απόφαση χρήστη 22/11/2026: όχι μέτρηση ανά δευτερόλεπτο.
+        return TEXT_JUST_NOW
     if seconds < 3600:
         return "πριν " + _plural(seconds // 60, "λεπτό", "λεπτά")
     if seconds < 86400:
@@ -267,6 +294,7 @@ class Decision:
     text: str
     ok: bool
     final: bool
+    hint: str = ""
 
 
 def _sort_key(text: str) -> str:
@@ -291,17 +319,17 @@ class SecurityModel:
 
     # --- θύρα εγγραφής ------------------------------------------------------
     def port_notice(self) -> str | None:
-        """Κείμενο μόνο όταν οι εγγραφές δεν δέχονται νέα αιτήματα, αλλιώς None.
+        """Κείμενο μόνο αν η θύρα εγγραφής δεν άνοιξε, αλλιώς None.
 
-        Οι εγγραφές είναι πάντα ανοιχτές (απόφαση χρήστη 22/11/2026)· εμφανίζεται
-        προειδοποίηση μόνο αν η θύρα δεν άνοιξε ή αν συμπληρώθηκε το όριο αιτημάτων.
+        Οι εγγραφές είναι πάντα ανοιχτές (απόφαση χρήστη 22/11/2026).
         """
         if not self.enrollment.is_open:
             error = self.enrollment.start_error or "κλειστή"
             return f"Η θύρα εγγραφής {self.enrollment.port} δεν άνοιξε: {error}"
-        if self.enrollment.is_full:
-            return full_notice(self.enrollment.max_pending)
         return None
+
+    def requests_status(self, count: int) -> tuple[str, bool]:
+        return requests_status(count, self.enrollment.max_pending)
 
     # --- αιτήματα -----------------------------------------------------------
     def requests(self) -> list[RequestView]:
@@ -318,13 +346,11 @@ class SecurityModel:
             self.enrollment.decide(request_id, code, approve=True)
         except IncorrectCodeError as exc:
             if exc.remaining <= 0:
-                return Decision(TEXT_REJECTED, False, True)
-            left = ("Απομένει 1 προσπάθεια" if exc.remaining == 1
-                    else f"Απομένουν {exc.remaining} προσπάθειες")
-            return Decision(f"Λάθος κωδικός. {left}.", False, False)
+                return Decision(TEXT_REJECTED, False, True, HINT_REJECTED)
+            return Decision(wrong_code_text(exc.remaining), False, False)
         except (EnrollmentError, RegistryError, ValueError) as exc:
             return self._failure(exc)
-        return Decision(TEXT_APPROVED, True, True)
+        return Decision(TEXT_APPROVED, True, True, HINT_APPROVED)
 
     def deny(self, request_id: str) -> Decision:
         try:
@@ -336,7 +362,7 @@ class SecurityModel:
     @staticmethod
     def _failure(exc: Exception) -> Decision:
         if "No active enrollment request" in str(exc):
-            return Decision(TEXT_EXPIRED, False, True)
+            return Decision(TEXT_EXPIRED, False, True, HINT_EXPIRED)
         return Decision(f"Σφάλμα: {exc}", False, True)
 
     # --- εγγεγραμμένοι ------------------------------------------------------

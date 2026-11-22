@@ -33,6 +33,7 @@ CONNECTED = "#2e8b57"
 LIVE = "#c62828"
 LIVE_LIGHT = "#f6d5d5"
 APP_ICON = "#0e7490"
+DIVIDER = "#b3bcc8"
 
 #: Όνομα token όπως στο ui-style.md → τιμή.
 TOKENS: dict[str, str] = {
@@ -51,6 +52,7 @@ TOKENS: dict[str, str] = {
     "live": LIVE,
     "live_light": LIVE_LIGHT,
     "app_icon": APP_ICON,
+    "divider": DIVIDER,
 }
 
 # Λευκό σε έγχρωμο φόντο (τικ, εικονίδιο μικροφώνου) δεν είναι token.
@@ -137,11 +139,19 @@ METER_BAR = 6
 METER_GAP = 4
 SCROLLBAR = 8               # πλάτος scroll bar, χωρίς βελάκια
 SCROLLBAR_HANDLE_MIN = 32   # ελάχιστο μήκος λαβής
+MENU_SHADOW = 10            # περιθώριο σκιάς γύρω από τα μενού ⋮
+MENU_ICON = 18              # εικονίδια στοιχείων μενού ⋮ (απόφαση χρήστη 22/11/2026)
+SCROLL_GAP = 12             # κενό περιεχομένου πριν από τη γραμμή κύλισης (σελίδα «Ασφάλεια»)
 # Σελίδα «Ασφάλεια» (ui-style.md §6)
 ACTION_HEIGHT = 32          # κουμπιά Έγκριση/Απόρριψη και πεδίο κωδικού
 ACTION_ICON_STROKE = 2.6    # παχύτερη γραμμή εικονιδίων στα κουμπιά ενέργειας
 TRASH_ICON_STROKE = 2.1     # ο κάδος με 2.6 γεμίζει· λεπτότερος όπως στο mockup
-COMPUTER_INDENT = 26        # εσοχή υπολογιστών κάτω από την αίθουσα
+COMPUTER_INDENT = 18        # εσοχή υπολογιστών μέσα στην κάρτα της αίθουσας
+LEFT_COLUMN_MIN = 380       # στήλη «Νέες εγγραφές»: 380–440 (mockup)
+LEFT_COLUMN_MAX = 440
+ROOM_CARD_MIN = 260         # ελάχιστο πλάτος κάρτας αίθουσας· όσες χωρούν ανά γραμμή
+SECTION_GAP = 16            # απόσταση από το διαχωριστικό ανάμεσα στις δύο ενότητες
+REQUEST_CARD_SPACING = 10   # απόσταση ανάμεσα στις κάρτες αιτημάτων
 
 
 def stylesheet(metrics: Metrics | None = None) -> str:
@@ -337,6 +347,20 @@ QScrollBar::add-page, QScrollBar::sub-page {{
     color: {TEXT_MUTED};
     font-size: {m.font_pt(FONT_SMALL)}pt;
 }}
+#sectionCount {{
+    color: {TEXT_MUTED};
+    font-size: {m.font_pt(FONT_SMALL)}pt;
+}}
+#sectionCount[warn="true"] {{
+    color: {LIVE};
+}}
+#divider {{
+    background: {DIVIDER};
+    border: none;
+}}
+#requestTitle[final="true"] {{
+    color: {TEXT_MUTED};
+}}
 #requestTitle, #roomTitle {{
     font-weight: 600;
 }}
@@ -398,11 +422,36 @@ QScrollBar::add-page, QScrollBar::sub-page {{
     background: transparent;
     color: {TEXT_MUTED};
     border-radius: {px(NAV_RADIUS)}px;
-    padding: 0 {px(8)}px;
-    min-height: {px(26)}px;
+    padding: 0;
 }}
 #rowMenu:hover, #rowMenu:pressed {{
     background: {WINDOW_BG};
+}}
+#actionMenu {{
+    font-size: {m.font_pt()}pt;  /* ίδιο με το κείμενο των καρτών (απόφαση 22/11/2026) */
+    /* Διάφανο περιθώριο γύρω από το μενού για τη σκιά (ActionMenu, qt_security.py). */
+    margin: {px(MENU_SHADOW)}px;
+    background: {CARD_BG};
+    border: 1px solid {CARD_BORDER};
+    border-radius: {px(CARD_RADIUS)}px;
+    padding: {px(4)}px;
+    color: {TEXT};
+}}
+#actionMenu::item {{
+    padding: {px(6)}px {px(16)}px {px(6)}px {px(8)}px;
+    border-radius: {px(NAV_RADIUS)}px;
+    background: transparent;
+}}
+#actionMenu::item:selected {{
+    background: {WINDOW_BG};
+}}
+#actionMenu::icon {{
+    padding-left: {px(8)}px;
+}}
+#actionMenu::separator {{
+    height: 1px;
+    background: {CARD_BORDER};
+    margin: {px(4)}px {px(6)}px;
 }}
 #rowMenu::menu-indicator {{
     width: 0;

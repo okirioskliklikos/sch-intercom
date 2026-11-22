@@ -106,10 +106,10 @@ button, input { font: inherit; color: inherit; }
 .room-row { display: flex; align-items: center; gap: 9px; height: 32px; font-size: 1.1em; font-weight: 600; }
 .room-row .count { margin-left: auto; font-size: .82em; font-weight: 400; color: var(--text-muted); }
 .pc { display: flex; align-items: center; gap: 9px; min-height: 30px; padding-left: 26px; }
-.pc .name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pc .name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .pc .state { font-size: .92em; color: var(--text-muted); white-space: nowrap; }
-.pc .menu { margin-left: auto; border: 0; background: none; color: var(--text-muted); width: 30px; height: 28px; border-radius: 6px; cursor: pointer; }
-.pc .menu:hover { background: var(--window-bg); }
+.menu { border: 0; background: none; color: var(--text-muted); width: 26px; height: 26px; padding: 0; font-size: 18px; line-height: 1; border-radius: 6px; cursor: pointer; }
+.menu:hover { background: var(--window-bg); }
 .room + .room { margin-top: 4px; }
 
 /* Πιστοποιητικά */
@@ -130,6 +130,39 @@ th { border-top: 0; font-weight: 400; color: var(--text-muted); font-size: .92em
 
 .note { font-size: .92em; color: var(--text-muted); border-left: 3px solid var(--primary-light); padding-left: 10px; margin: 0; }
 
+
+/* Πρόταση 22/11/2026: κάθε αίθουσα δική της κάρτα */
+.grid { grid-template-columns: minmax(380px, 440px) minmax(0, 1fr); }
+.reg-head { display: flex; align-items: baseline; gap: 12px; margin: 2px 2px 10px; }
+.reg-head h2 { margin: 0; font-size: 1.15em; font-weight: 600; }
+.room-cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 14px; align-items: start; }
+.room-card { padding: 10px 14px 10px; }
+.room-card .room-row { margin-bottom: 2px; }
+.room-card .pc { padding-left: 18px; }
+.room-card .room-row .rname { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.room-card .room-row .count { white-space: nowrap; }
+.room-card .room-row .menu { margin-left: 4px; }
+
+/* Πρόταση 22/11/2026 (2): κάθε αίτημα δική του κάρτα, σε μία στήλη */
+.req-list { display: flex; flex-direction: column; gap: 10px; }
+.req-card { padding: 11px 14px 12px; display: flex; flex-direction: column; gap: 8px; }
+.req-card .req-title { display: flex; align-items: baseline; gap: 10px; flex-wrap: nowrap; }
+.req-card .req-title b { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.req-card .result { margin-left: auto; font-size: .92em; white-space: nowrap; color: var(--live); }
+.req-card .result.ok { color: var(--connected); }
+.req-card.done b { color: var(--text-muted); }
+.reg-head .limit { margin-left: auto; color: var(--live); font-size: .92em; white-space: nowrap; }
+.reg-head .muted { margin-left: auto; }
+.app:not(.full) .st-full, .app.full .st-normal { display: none !important; }
+.app.full:not(.warn) .st-warn-only, .app.warn .st-full-only { display: none !important; }
+/* Κάτω από 45: γκρι «N αιτήματα»· 45–49: κόκκινο «N/50 αιτήματα»· 50: «Συμπληρώθηκε το όριο (50)». */
+
+/* Αναθεώρηση 22/11/2026: κωδικός γεμίζει αριστερά, κουμπιά τέρμα δεξιά, ήπιο διαχωριστικό */
+.req-card .req-actions { flex-wrap: nowrap; }
+.req-card .code { flex: 1 1 auto; width: auto; min-width: 10ch; }
+.grid { gap: 0; }
+.grid > :first-child { padding-right: 16px; }
+.grid > :last-child { border-left: 1px solid #b3bcc8; padding-left: 16px; min-height: 100%; }
 </style>
 </head>
 <body>
@@ -170,64 +203,79 @@ th { border-top: 0; font-weight: 400; color: var(--text-muted); font-size: .92em
 
     <!-- Tab: Υπολογιστές -->
     <section id="pcs" role="tabpanel" aria-labelledby="tab-pcs" class="grid">
-      <div class="card">
-        <div class="card-head">
-          <h2>Νέες εγγραφές</h2>
-        </div>
-
-        <div class="requests" id="requests">
-          <div class="req" data-code="237891">
-            <div class="req-title"><b>C2627-Γ1 · Board1</b></div>
-            <div class="req-meta">ID 68e0a623 · πριν 20″ · λήγει αύριο 07:12</div>
-            <div class="req-actions">
-              <input class="code" id="code-1" inputmode="numeric" maxlength="6" placeholder="······" aria-label="Κωδικός για C2627-Γ1 Board1" autocomplete="off">
-              <button class="act add" type="button" data-act="approve"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m5 12.5 4.5 4.5L19 7.5"/></svg>Έγκριση</button>
-              <button class="act remove" type="button" data-act="deny"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 6.5h14M10 6.5V4.5h4v2M7 6.5v11.5a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2V6.5M10.5 10v6.5M13.5 10v6.5"/></svg>Απόρριψη</button>
-            </div>
+      <div>
+        <div class="reg-head"><h2>Νέες εγγραφές</h2><span class="muted small count2 st-normal">3 αιτήματα</span><span class="limit st-full st-warn-only">47/50 αιτήματα</span><span class="limit st-full st-full-only">Συμπληρώθηκε το όριο (50)</span></div>
+        <div class="req-list st-normal">
+          <div class="card req-card">
+            <div class="req-title"><b title="C2627-Γ1 · Board1">C2627-Γ1 · Board1</b></div>
+            <div class="req-meta">ID 68e0a623 · μόλις τώρα · λήγει αύριο 07:12</div>
+            <div class="req-actions"><input class="code" inputmode="numeric" maxlength="6" placeholder="······" value="" autocomplete="off"><button class="act add" type="button"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m5 12.5 4.5 4.5L19 7.5"/></svg>Έγκριση</button><button class="act remove" type="button"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 6.5h14M10 6.5V4.5h4v2M7 6.5v11.5a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2V6.5M10.5 10v6.5M13.5 10v6.5"/></svg>Απόρριψη</button></div>
           </div>
-          <div class="req" data-code="536494">
-            <div class="req-title"><b>C2627-Γ1 · PC</b></div>
+          <div class="card req-card">
+            <div class="req-title"><b title="C2627-Γ1 · PC">C2627-Γ1 · PC</b></div>
             <div class="req-meta">ID 0b8266e9 · πριν 3 λεπτά · λήγει αύριο 07:09</div>
-            <div class="req-actions">
-              <input class="code" id="code-2" inputmode="numeric" maxlength="6" placeholder="······" aria-label="Κωδικός για C2627-Γ1 PC" autocomplete="off">
-              <button class="act add" type="button" data-act="approve"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m5 12.5 4.5 4.5L19 7.5"/></svg>Έγκριση</button>
-              <button class="act remove" type="button" data-act="deny"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 6.5h14M10 6.5V4.5h4v2M7 6.5v11.5a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2V6.5M10.5 10v6.5M13.5 10v6.5"/></svg>Απόρριψη</button>
-            </div>
+            <div class="req-actions"><input class="code" inputmode="numeric" maxlength="6" placeholder="······" value="" autocomplete="off"><button class="act add" type="button"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m5 12.5 4.5 4.5L19 7.5"/></svg>Έγκριση</button><button class="act remove" type="button"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 6.5h14M10 6.5V4.5h4v2M7 6.5v11.5a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2V6.5M10.5 10v6.5M13.5 10v6.5"/></svg>Απόρριψη</button></div>
           </div>
-          <div class="req" data-code="104733">
-            <div class="req-title"><b>C2627-Δ2 · Board1</b></div>
+          <div class="card req-card">
+            <div class="req-title"><b title="C2627-Δ2 · Board1">C2627-Δ2 · Board1</b></div>
             <div class="req-meta">ID 7c41d0b2 · πριν 11 λεπτά · λήγει αύριο 07:01</div>
-            <div class="req-actions">
-              <input class="code" id="code-3" inputmode="numeric" maxlength="6" placeholder="······" aria-label="Κωδικός για C2627-Δ2 Board1" autocomplete="off">
-              <button class="act add" type="button" data-act="approve"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m5 12.5 4.5 4.5L19 7.5"/></svg>Έγκριση</button>
-              <button class="act remove" type="button" data-act="deny"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 6.5h14M10 6.5V4.5h4v2M7 6.5v11.5a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2V6.5M10.5 10v6.5M13.5 10v6.5"/></svg>Απόρριψη</button>
-            </div>
+            <div class="req-actions"><input class="code" inputmode="numeric" maxlength="6" placeholder="······" value="" autocomplete="off"><button class="act add" type="button"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m5 12.5 4.5 4.5L19 7.5"/></svg>Έγκριση</button><button class="act remove" type="button"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 6.5h14M10 6.5V4.5h4v2M7 6.5v11.5a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2V6.5M10.5 10v6.5M13.5 10v6.5"/></svg>Απόρριψη</button></div>
+          </div>
+        </div>
+        <div class="req-list st-full">
+          <div class="card req-card">
+            <div class="req-title"><b title="C2627-Γ1 · Board1">C2627-Γ1 · Board1</b><span class="result">Λάθος κωδικός · απομένουν 2</span></div>
+            <div class="req-meta">ID 68e0a623 · μόλις τώρα · λήγει αύριο 07:12</div>
+            <div class="req-actions"><input class="code" inputmode="numeric" maxlength="6" placeholder="······" value="123455" autocomplete="off"><button class="act add" type="button"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m5 12.5 4.5 4.5L19 7.5"/></svg>Έγκριση</button><button class="act remove" type="button"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 6.5h14M10 6.5V4.5h4v2M7 6.5v11.5a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2V6.5M10.5 10v6.5M13.5 10v6.5"/></svg>Απόρριψη</button></div>
+          </div>
+          <div class="card req-card done">
+            <div class="req-title"><b title="C2627-Γ1 · PC">C2627-Γ1 · PC</b><span class="result ok">Εγκρίθηκε ✓</span></div>
+            <div class="req-meta">ID 0b8266e9 · πριν 3 λεπτά · λήγει αύριο 07:09</div>
+          </div>
+          <div class="card req-card done">
+            <div class="req-title"><b title="C2627-Δ2 · Board1">C2627-Δ2 · Board1</b><span class="result">Απορρίφθηκε</span></div>
+            <div class="req-meta">ID 7c41d0b2 · πριν 11 λεπτά · λήγει αύριο 07:01</div>
           </div>
         </div>
       </div>
 
-      <div class="card">
-        <div class="card-head">
-          <h2>Εγγεγραμμένοι υπολογιστές</h2>
-          <span class="muted small">5 υπολογιστές · 3 online</span>
-        </div>
-        <div class="rooms">
-          <div class="room">
-            <div class="room-row"><span class="dot on"></span>C2627-Γ1<span class="count">2 υπολογιστές</span></div>
-            <div class="pc"><span class="dot on"></span><span class="name">Board1</span><span class="state">Online</span><button class="menu" type="button" aria-label="Ενέργειες για Board1">⋯</button></div>
-            <div class="pc"><span class="dot"></span><span class="name">PC</span><span class="state">πριν 2 ώρες</span><button class="menu" type="button" aria-label="Ενέργειες για PC">⋯</button></div>
+      <div>
+        <div class="reg-head"><h2>Εγγεγραμμένοι υπολογιστές</h2><span class="muted small">11 υπολογιστές · 6 online</span></div>
+        <div class="room-cards">
+          <div class="card room-card">
+            <div class="room-row"><span class="dot on"></span><span class="rname" title="C2627-Γ1">C2627-Γ1</span><span class="count">2 υπολογιστές</span><button class="menu" type="button" aria-label="Ενέργειες αίθουσας">⋮</button></div>
+            <div class="pc"><span class="dot on"></span><span class="name">Board1</span><span class="state">Online</span><button class="menu" type="button" aria-label="Ενέργειες για Board1">⋮</button></div>
+            <div class="pc"><span class="dot"></span><span class="name">PC</span><span class="state">πριν 2 ώρες</span><button class="menu" type="button" aria-label="Ενέργειες για PC">⋮</button></div>
           </div>
-          <div class="room">
-            <div class="room-row"><span class="dot on"></span>C2627-Γ2<span class="count">1 υπολογιστής</span></div>
-            <div class="pc"><span class="dot on"></span><span class="name">Board 2</span><span class="state">Online</span><button class="menu" type="button" aria-label="Ενέργειες για Board 2">⋯</button></div>
+          <div class="card room-card">
+            <div class="room-row"><span class="dot on"></span><span class="rname" title="C2627-Γ2">C2627-Γ2</span><span class="count">1 υπολογιστής</span><button class="menu" type="button" aria-label="Ενέργειες αίθουσας">⋮</button></div>
+            <div class="pc"><span class="dot on"></span><span class="name">Board 2</span><span class="state">Online</span><button class="menu" type="button" aria-label="Ενέργειες για Board 2">⋮</button></div>
           </div>
-          <div class="room">
-            <div class="room-row"><span class="dot on"></span>Γραφείο Διευθυντή<span class="count">1 υπολογιστής</span></div>
-            <div class="pc"><span class="dot on"></span><span class="name">Διευθυντής-PC</span><span class="state">Online</span><button class="menu" type="button" aria-label="Ενέργειες για Διευθυντής-PC">⋯</button></div>
+          <div class="card room-card">
+            <div class="room-row"><span class="dot on"></span><span class="rname" title="Γραφείο Διευθυντή">Γραφείο Διευθυντή</span><span class="count">1 υπολογιστής</span><button class="menu" type="button" aria-label="Ενέργειες αίθουσας">⋮</button></div>
+            <div class="pc"><span class="dot on"></span><span class="name">Διευθυντής-PC</span><span class="state">Online</span><button class="menu" type="button" aria-label="Ενέργειες για Διευθυντής-PC">⋮</button></div>
           </div>
-          <div class="room">
-            <div class="room-row"><span class="dot"></span>C2627-Δ1<span class="count">1 υπολογιστής</span></div>
-            <div class="pc"><span class="dot"></span><span class="name">Board1</span><span class="state">πριν 3 ημέρες</span><button class="menu" type="button" aria-label="Ενέργειες για Board1 στη C2627-Δ1">⋯</button></div>
+          <div class="card room-card">
+            <div class="room-row"><span class="dot"></span><span class="rname" title="C2627-Δ1">C2627-Δ1</span><span class="count">1 υπολογιστής</span><button class="menu" type="button" aria-label="Ενέργειες αίθουσας">⋮</button></div>
+            <div class="pc"><span class="dot"></span><span class="name">Board1</span><span class="state">πριν 3 ημέρες</span><button class="menu" type="button" aria-label="Ενέργειες για Board1">⋮</button></div>
+          </div>
+          <div class="card room-card">
+            <div class="room-row"><span class="dot on"></span><span class="rname" title="Εργαστήριο Πληροφορικής">Εργαστήριο Πληροφορικής</span><span class="count">3 υπολογιστές</span><button class="menu" type="button" aria-label="Ενέργειες αίθουσας">⋮</button></div>
+            <div class="pc"><span class="dot on"></span><span class="name">Board1</span><span class="state">Online</span><button class="menu" type="button" aria-label="Ενέργειες για Board1">⋮</button></div>
+            <div class="pc"><span class="dot on"></span><span class="name">PC-Καθηγητή</span><span class="state">Online</span><button class="menu" type="button" aria-label="Ενέργειες για PC-Καθηγητή">⋮</button></div>
+            <div class="pc"><span class="dot"></span><span class="name">PC-01</span><span class="state">πριν 1 ώρα</span><button class="menu" type="button" aria-label="Ενέργειες για PC-01">⋮</button></div>
+          </div>
+          <div class="card room-card">
+            <div class="room-row"><span class="dot"></span><span class="rname" title="C2627-Δ2">C2627-Δ2</span><span class="count">1 υπολογιστής</span><button class="menu" type="button" aria-label="Ενέργειες αίθουσας">⋮</button></div>
+            <div class="pc"><span class="dot"></span><span class="name">Board1</span><span class="state">Δεν έχει συνδεθεί</span><button class="menu" type="button" aria-label="Ενέργειες για Board1">⋮</button></div>
+          </div>
+          <div class="card room-card">
+            <div class="room-row"><span class="dot on"></span><span class="rname" title="Γραφείο Καθηγητών">Γραφείο Καθηγητών</span><span class="count">1 υπολογιστής</span><button class="menu" type="button" aria-label="Ενέργειες αίθουσας">⋮</button></div>
+            <div class="pc"><span class="dot on"></span><span class="name">PC</span><span class="state">Online</span><button class="menu" type="button" aria-label="Ενέργειες για PC">⋮</button></div>
+          </div>
+          <div class="card room-card">
+            <div class="room-row"><span class="dot"></span><span class="rname" title="C2627-Β1">C2627-Β1</span><span class="count">1 υπολογιστής</span><button class="menu" type="button" aria-label="Ενέργειες αίθουσας">⋮</button></div>
+            <div class="pc"><span class="dot"></span><span class="name">Board1</span><span class="state">πριν 20 λεπτά</span><button class="menu" type="button" aria-label="Ενέργειες για Board1">⋮</button></div>
           </div>
         </div>
       </div>
@@ -240,6 +288,8 @@ th { border-top: 0; font-weight: 400; color: var(--text-muted); font-size: .92em
 
 <script>
 (function () {
+  if (location.search.includes('full')) document.querySelector('.app').classList.add('full');
+  if (location.search.includes('warn')) document.querySelector('.app').classList.add('full', 'warn');
   document.querySelectorAll('.sizes button').forEach(b => b.addEventListener('click', () => {
     document.documentElement.style.setProperty('--win', b.dataset.w + 'px');
     document.querySelectorAll('.sizes button').forEach(x => x.classList.toggle('primary', x === b));
@@ -261,29 +311,6 @@ th { border-top: 0; font-weight: 400; color: var(--text-muted); font-size: .92em
   window.addEventListener('hashchange', fromHash);
   fromHash();
 
-  document.getElementById('requests').addEventListener('click', e => {
-    const btn = e.target.closest('button[data-act]');
-    if (!btn) return;
-    const req = btn.closest('.req');
-    const input = req.querySelector('.code');
-    const actions = req.querySelector('.req-actions');
-    const result = document.createElement('span');
-    result.className = 'result';
-    if (btn.dataset.act === 'deny') {
-      result.textContent = 'Απορρίφθηκε';
-    } else if (!/^\d{6}$/.test(input.value)) {
-      input.focus();
-      return;
-    } else if (input.value === req.dataset.code) {
-      result.className += ' ok';
-      result.textContent = 'Εγκρίθηκε ✓ · θα συνδεθεί μόνος του';
-    } else {
-      result.className += ' err';
-      result.textContent = 'Λάθος κωδικός: το αίτημα απορρίφθηκε. Ζητήστε νέα εγγραφή από τον υπολογιστή.';
-    }
-    req.classList.add('done');
-    actions.replaceChildren(result);
-  });
   document.querySelectorAll('.code').forEach(i => i.addEventListener('input', () => {
     i.value = i.value.replace(/\D/g, '').slice(0, 6);
   }));
