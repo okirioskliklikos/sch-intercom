@@ -10,6 +10,7 @@ import argparse
 import base64
 from contextlib import contextmanager
 from datetime import datetime, timezone
+from importlib.metadata import PackageNotFoundError, version
 import getpass
 import hashlib
 import json
@@ -38,6 +39,15 @@ MAX_FILE = 16 * 1024 * 1024
 MAX_HEADER = 4096
 KDF_N = 1 << 17
 ERROR_SECRET = "Λάθος κωδικός ή αλλοιωμένο αρχείο. Ελέγξτε και τη γλώσσα του πληκτρολογίου."
+
+
+def _app_version() -> str:
+    try:
+        return version("school-intercom")
+    except PackageNotFoundError:
+        return "0.1.0"  # pyproject.toml when running directly from source
+
+
 FILES = {
     "enrollment_pending": "enrollment-pending.json",
     "last_seen": "clients-last-seen.json",
@@ -247,7 +257,7 @@ def create(out: Path, password: str, *, registry_file: Path, tls_cert: Path,
             "schema": 1, "folder": str(media_dir), "files": media}
     created = _now()
     manifest = {
-        "backup_format": FORMAT, "created_at": created, "app_version": "4.2C",
+        "backup_format": FORMAT, "created_at": created, "app_version": _app_version(),
         "source_computer": socket.gethostname(), "school_id": info["registry"]["school_id"],
         "registry_version": info["registry"]["registry_version"],
         "registry_hash": info["registry_hash"], "tls_fingerprint": info["fingerprint"],
@@ -258,7 +268,7 @@ def create(out: Path, password: str, *, registry_file: Path, tls_cert: Path,
     payload = canonical({"manifest": manifest, "sections": sections})
     salt, nonce = os.urandom(16), os.urandom(12)
     header = canonical({
-        "format": FORMAT, "created_at": created, "app_version": "4.2C",
+        "format": FORMAT, "created_at": created, "app_version": _app_version(),
         "kdf": {"name": "scrypt", "n": kdf_n, "r": 8, "p": 1, "salt": _b64(salt)},
         "cipher": {"name": "AES-256-GCM", "nonce": _b64(nonce)},
     })
