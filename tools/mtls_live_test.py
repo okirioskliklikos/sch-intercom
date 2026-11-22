@@ -225,6 +225,10 @@ class DirectorRun:
         reply["short"] = line.split("Νέο αίτημα")[1].split("|")[0].strip() if line else None
         return reply, line, mark
 
+    @staticmethod
+    def wrong(code: str, offset: int = 1) -> str:
+        return f"{(int(code) + offset) % 1000000:06d}"
+
     def pending_ids(self, director: Process) -> list[str]:
         mark = director.mark()
         director.send("pending")
@@ -341,21 +345,26 @@ class DirectorRun:
                         reason is not None and joined is not None)
             self.ask_client("stop_client")
 
-            # 11. Εγγραφή 4.2A2: λάθος κωδικός απορρίπτει το συγκεκριμένο αίτημα
+            # 11. Εγγραφή 4.2A2: 3 λάθος κωδικοί απορρίπτουν το συγκεκριμένο αίτημα
             mark = director.mark()
             director.send("enroll on")
             opened = director.wait_for("[Εγγραφή] Ενεργή TLS θύρα", since=mark, timeout=10)
             reply, line, _ = self.enroll(director)
             short = reply["short"]
-            wrong = f"{(int(reply['sas']) + 1) % 1000000:06d}"
-            mark = director.mark()
-            director.send(f"approve {short} {wrong}")
-            refused = director.wait_for("Λάθος κωδικός", short, since=mark, timeout=10)
-            left = self.pending_ids(director)
+            outcomes = []
+            for attempt, expected in ((1, "Απομένουν 2 προσπάθειες"),
+                                      (2, "Απομένει 1 προσπάθεια"),
+                                      (3, "απορρίφθηκε")):
+                mark = director.mark()
+                director.send(f"approve {short} {self.wrong(reply['sas'], attempt)}")
+                seen = director.wait_for("Λάθος κωδικός", short, expected, since=mark,
+                                         timeout=10)
+                outcomes.append(seen is not None and
+                                (short in self.pending_ids(director)) == (attempt < 3))
             _, listing = self.cli("--list-clients")
-            self.result("11. Λάθος κωδικός: το αίτημα απορρίπτεται, καμία έγκριση",
-                        opened is not None and line is not None and refused is not None
-                        and short not in left and reply["client_id"] not in listing)
+            self.result("11. Λάθος κωδικός: 3 προσπάθειες, μετά απόρριψη, καμία έγκριση",
+                        opened is not None and line is not None and all(outcomes)
+                        and reply["client_id"] not in listing, f"προσπάθειες {outcomes}")
 
             # 12. Ο Client κλείνει αμέσως· ο Manager δεν δείχνει τον κωδικό
             reply, line, mark = self.enroll(director)
@@ -367,18 +376,27 @@ class DirectorRun:
                         and not director.seen(code, since=mark),
                         f"κωδικός {code}, Client έκλεισε σε {reply['seconds']:.1f}s")
 
-            # 13. Επανεκκίνηση Manager, κλειστή θύρα και κλειστός Client: έγκριση
+            # 13. Ένα λάθος, επανεκκίνηση Manager (ο μετρητής μένει), έγκριση με κλειστό Client
+            mark = director.mark()
+            director.send(f"approve {short} {self.wrong(code)}")
+            first = director.wait_for("Λάθος κωδικός", "Απομένουν 2", since=mark, timeout=10)
             self.stop_director()
             director = self.start_director()
             kept = short in self.pending_ids(director)
+            mark = director.mark()
+            director.send(f"approve {short} {self.wrong(code, 2)}")
+            second = director.wait_for("Λάθος κωδικός", "Απομένει 1 προσπάθεια", since=mark,
+                                       timeout=10)
             mark = director.mark()
             director.send(f"approve {short} {code}")
             approved = director.wait_for(f"Εγκρίθηκε: {ROOM} | {NEW_NAME} | {board_id}",
                                          since=mark, timeout=10)
             _, listing = self.cli("--list-clients")
             rows = [row for row in listing.splitlines() if board_id in row]
-            self.result("13. Το αίτημα μένει μετά από επανεκκίνηση· έγκριση με κλειστό Client",
-                        kept and approved is not None
+            self.result("13. Αίτημα και μετρητής λαθών μένουν μετά από επανεκκίνηση· "
+                        "έγκριση με κλειστό Client",
+                        first is not None and kept and second is not None
+                        and approved is not None
                         and len(rows) == 1 and rows[0].endswith("approved"))
 
             # 14. Η νέα συσκευή συνδέεται μόνη της

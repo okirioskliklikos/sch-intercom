@@ -84,7 +84,7 @@ def show_help() -> str:
   enroll on/off  Άνοιγμα/κλείσιμο θύρας εγγραφής (τα αιτήματα μένουν)
   pending        Εκκρεμή αιτήματα: ID, αίθουσα, όνομα, λήξη (1 ημέρα)
   approve <ID> <κωδικός>  Έγκριση με τον κωδικό που έγραψε ο Client
-                 (ID = οι 8 χαρακτήρες του pending· λάθος κωδικός = απόρριψη)
+                 (ID = οι 8 χαρακτήρες του pending· 3 προσπάθειες κωδικού)
   deny <ID>      Απόρριψη αιτήματος εγγραφής
   set-room <UUID> <αίθουσα>  Αλλαγή αίθουσας χωρίς νέο κλειδί
   set-name <UUID> <όνομα>    Αλλαγή ονόματος χωρίς νέο κλειδί
@@ -345,9 +345,14 @@ def command_loop(broadcaster: AudioBroadcaster, stop: threading.Event,
                 request_id = enrollment.resolve(values[0])
                 try:
                     info = enrollment.decide(request_id, values[1], approve=True)
-                except IncorrectCodeError:
-                    print(f"Λάθος κωδικός: το αίτημα {request_id[:8]} απορρίφθηκε. "
-                          "Ζητήστε νέα εγγραφή από τον υπολογιστή.", flush=True)
+                except IncorrectCodeError as exc:
+                    if exc.remaining:
+                        left = ("Απομένει 1 προσπάθεια" if exc.remaining == 1
+                                else f"Απομένουν {exc.remaining} προσπάθειες")
+                        print(f"Λάθος κωδικός για {request_id[:8]}. {left}.", flush=True)
+                    else:
+                        print(f"Λάθος κωδικός: το αίτημα {request_id[:8]} απορρίφθηκε "
+                              "(3 λάθη). Ζητήστε νέα εγγραφή από τον υπολογιστή.", flush=True)
                     continue
                 print(f"Εγκρίθηκε: {info['room']} | {info['name']} | {info['client_id']}",
                       flush=True)

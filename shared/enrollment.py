@@ -47,6 +47,7 @@ MAX_ATTEMPTS_PER_MINUTE = 8
 REQUEST_TTL = 24 * 3600  # απόφαση χρήστη: τα αιτήματα ισχύουν μία ημέρα
 NETWORK_TIMEOUT = 8
 PENDING_FILE_VERSION = 1
+MAX_CODE_ATTEMPTS = 3  # απόφαση χρήστη: 3 προσπάθειες κωδικού ανά αίτημα
 
 
 class EnrollmentError(ValueError):
@@ -54,7 +55,12 @@ class EnrollmentError(ValueError):
 
 
 class IncorrectCodeError(EnrollmentError):
-    """Λάθος κωδικός: το συγκεκριμένο αίτημα απορρίφθηκε."""
+    """Λάθος κωδικός· ``remaining`` = προσπάθειες που μένουν (0: το αίτημα απορρίφθηκε)."""
+
+    def __init__(self, remaining: int):
+        super().__init__("Incorrect SAS; enrollment denied" if remaining == 0
+                         else f"Incorrect SAS; {remaining} attempts left")
+        self.remaining = remaining
 
 
 def send_message(stream, message: dict) -> None:
@@ -153,10 +159,11 @@ def sas_code(unsigned: dict, director_nonce: str) -> str:
 
 
 class Pending:
-    def __init__(self, request: dict, code: str, created: float):
+    def __init__(self, request: dict, code: str, created: float, attempts: int = 0):
         self.request = request  # υπογεγραμμένο αίτημα (μαζί με proof)
         self.code = code
         self.created = created  # wall clock: τα αιτήματα επιβιώνουν επανεκκίνηση
+        self.attempts = attempts  # λάθος κωδικοί μέχρι τώρα (σώζονται στο αρχείο)
 
     @property
     def expires(self) -> float:
@@ -206,20 +213,25 @@ class EnrollmentServer:
         for item in data.get("requests", [])[:MAX_PENDING]:
             try:
                 request, code, created = item["request"], item["code"], float(item["created"])
+                attempts = item.get("attempts", 0)
                 unsigned = _unsigned_request(request)  # ξαναελέγχεται η υπογραφή
                 if not (isinstance(code, str) and len(code) == 6 and code.isdigit()):
+                    raise ValueError
+                if type(attempts) is not int or not 0 <= attempts < MAX_CODE_ATTEMPTS:
                     raise ValueError
             except (EnrollmentError, KeyError, TypeError, ValueError):
                 continue
             if created <= now < created + REQUEST_TTL:
-                self._pending[unsigned["request_id"]] = Pending(request, code, created)
+                self._pending[unsigned["request_id"]] = Pending(request, code, created,
+                                                                attempts)
 
     def _save(self) -> None:
         """Ατομική εγγραφή· καλείται με κρατημένο το lock."""
         if self.pending_file is None:
             return
         data = {"version": PENDING_FILE_VERSION, "requests": [
-            {"request": p.request, "code": p.code, "created": p.created}
+            {"request": p.request, "code": p.code, "created": p.created,
+             "attempts": p.attempts}
             for p in self._pending.values()]}
         path = self.pending_file
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -371,24 +383,29 @@ class EnrollmentServer:
                approve: bool = False) -> dict:
         """Έγκριση με τον κωδικό του συγκεκριμένου αιτήματος ή απόρριψη.
 
-        Λάθος κωδικός απορρίπτει το αίτημα (η συσκευή ζητά ξανά εγγραφή).
-        Επιστρέφει αίθουσα/όνομα του αιτήματος για επιβεβαίωση στον διαχειριστή.
+        Λάθος κωδικός μετρά προσπάθεια· μετά από ``MAX_CODE_ATTEMPTS`` λάθη το αίτημα
+        απορρίπτεται (η συσκευή ζητά ξανά εγγραφή). Επιστρέφει αίθουσα/όνομα του
+        αιτήματος για επιβεβαίωση στον διαχειριστή.
         """
         with self._lock:
             self._purge()
-            pending = self._pending.pop(request_id, None)
+            pending = self._pending.get(request_id)
             if pending is None:
                 raise EnrollmentError("No active enrollment request")
+            req = pending.request
+            info = {"client_id": req["client_id"], "room": req["room"], "name": req["name"]}
             try:
-                req = pending.request
-                info = {"client_id": req["client_id"], "room": req["room"],
-                        "name": req["name"]}
-                if not approve:
-                    return info
-                if not isinstance(code, str) or not hmac.compare_digest(code, pending.code):
-                    raise IncorrectCodeError("Incorrect SAS; enrollment denied")
-                self.trust.approve(req["client_id"], req["room"],
-                                   req["cert_pem"].encode("ascii"), name=req["name"])
+                if approve and not (isinstance(code, str)
+                                    and hmac.compare_digest(code, pending.code)):
+                    pending.attempts += 1
+                    remaining = MAX_CODE_ATTEMPTS - pending.attempts
+                    if remaining <= 0:
+                        del self._pending[request_id]
+                    raise IncorrectCodeError(max(remaining, 0))
+                del self._pending[request_id]
+                if approve:
+                    self.trust.approve(req["client_id"], req["room"],
+                                       req["cert_pem"].encode("ascii"), name=req["name"])
                 return info
             finally:
                 self._save()

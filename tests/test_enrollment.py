@@ -92,15 +92,46 @@ class EnrollmentProtocolTests(LocalTLSFixture, unittest.TestCase):
         self.assertEqual(self.trust.context().cert_store_stats()["x509"], 1)
         self.assertFalse(self.server.pending())
 
-    def test_wrong_code_denies_that_request(self):
+    def _wrong(self, code, offset=1):
+        return f"{(int(code) + offset) % 1000000:06d}"
+
+    def test_wrong_code_allows_three_attempts_then_denies(self):
         queued = self._enroll()
-        wrong = f"{(int(queued['code']) + 1) % 1000000:06d}"
-        with self.assertRaises(IncorrectCodeError):
-            self.server.decide(self.request["request_id"], wrong, approve=True)
+        rid = self.request["request_id"]
+        for attempt, left in ((1, 2), (2, 1)):
+            with self.assertRaises(IncorrectCodeError) as caught:
+                self.server.decide(rid, self._wrong(queued["code"], attempt), approve=True)
+            self.assertEqual(caught.exception.remaining, left)
+            self.assertEqual(len(self.server.pending()), 1)  # το αίτημα μένει
+        with self.assertRaises(IncorrectCodeError) as caught:
+            self.server.decide(rid, self._wrong(queued["code"], 3), approve=True)
+        self.assertEqual(caught.exception.remaining, 0)
         self.assertFalse(self.server.pending())
         self.assertIsNone(self.registry.approved_entry(self.client_id))
         with self.assertRaises(EnrollmentError):  # ο σωστός κωδικός δεν σώζει πια το αίτημα
-            self.server.decide(self.request["request_id"], queued["code"], approve=True)
+            self.server.decide(rid, queued["code"], approve=True)
+
+    def test_correct_code_after_typo_approves(self):
+        queued = self._enroll()
+        rid = self.request["request_id"]
+        with self.assertRaises(IncorrectCodeError):
+            self.server.decide(rid, self._wrong(queued["code"]), approve=True)
+        self.server.decide(rid, queued["code"], approve=True)
+        self.assertIsNotNone(self.registry.approved_entry(self.client_id))
+
+    def test_attempt_counter_survives_manager_restart(self):
+        queued = self._enroll()
+        rid = self.request["request_id"]
+        for attempt in (1, 2):
+            with self.assertRaises(IncorrectCodeError):
+                self.server.decide(rid, self._wrong(queued["code"], attempt), approve=True)
+        self.server.stop()
+        restarted = self._server()
+        with self.assertRaises(IncorrectCodeError) as caught:
+            restarted.decide(rid, self._wrong(queued["code"], 3), approve=True)
+        self.assertEqual(caught.exception.remaining, 0)
+        self.assertFalse(restarted.pending())
+        self.assertFalse(self._server().pending())
 
     def test_deny_removes_request(self):
         self._enroll()
