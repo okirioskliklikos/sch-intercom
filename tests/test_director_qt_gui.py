@@ -304,6 +304,30 @@ class DirectorWindowTests(TestCase):
                 self.assertEqual(window.stacked, stacked)
                 self.assert_not_clipped(window)
 
+    def test_narrowest_window_never_clips_cards(self):
+        # Πραγματική χρήση 22/11/2026: με το παράθυρο στο ελάχιστο πλάτος και χωρίς
+        # Clients, οι κάρτες κόβονταν δεξιά («Δεν έχει συνδεθεί ακόμη κανένας Cli…»).
+        for count in (0, 3, 40):
+            with self.subTest(rooms=count):
+                window = self.sized(count, 200, 700)
+                self.assertGreaterEqual(window.width(), window.minimumSizeHint().width())
+                self.assertTrue(window.stacked)
+                self.assert_not_clipped(window)
+                if not count:
+                    label = window.empty_rooms
+                    self.assertTrue(label.isVisible())
+                    self.assertGreaterEqual(label.width(), label.sizeHint().width())
+                    right = label.mapTo(window.rooms_card, label.rect().topRight()).x()
+                    self.assertLessEqual(right, window.rooms_card.width())
+                window.hide()
+
+    def test_no_rooms_side_by_side_when_wide(self):
+        window = self.sized(0, 1700, 900)
+        self.assertFalse(window.stacked)
+        self.assert_not_clipped(window)
+        label = window.empty_rooms
+        self.assertGreaterEqual(label.width(), label.sizeHint().width())
+
     def test_preview_label_never_clipped(self):
         window = self.make(self.STATUS)
         window.show()
