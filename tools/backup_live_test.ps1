@@ -2,6 +2,7 @@
 $ErrorActionPreference = "Stop"
 $root = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 Push-Location $root
+$env:PYTHONIOENCODING = "utf-8"
 try {
     if (Test-Path (Join-Path $root ".venv\Scripts\python.exe")) {
         $python = Join-Path $root ".venv\Scripts\python.exe"
