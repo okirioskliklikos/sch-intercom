@@ -388,13 +388,21 @@ class SecurityPageTests(SecurityFixture, unittest.TestCase):
         self.assertTrue(page.tab_computers.isChecked())
         self.assertFalse(page.tab_certificates.isEnabled())
         self.assertEqual((page.port_label.text(), page.port_button.text()),
-                         (PORT_CLOSED, "Άνοιγμα"))
+                         (PORT_CLOSED, ""))
+        self.assertEqual(page.port_label.property("portOpen"), "false")
+        self.assertEqual(page.port_button.property("portOpen"), "false")
+        self.assertEqual(page.port_button.accessibleName(), "Άνοιγμα εγγραφών")
         page.port_button.click()
         self.assertTrue(self.model.port_open)
         self.assertEqual((page.port_label.text(), page.port_button.text()),
-                         (PORT_OPEN, "Κλείσιμο"))
+                         (PORT_OPEN, ""))
+        self.assertEqual(page.port_label.property("portOpen"), "true")
+        self.assertEqual(page.port_button.property("portOpen"), "true")
+        self.assertEqual(page.port_button.accessibleName(), "Κλείσιμο εγγραφών")
         page.port_button.click()
         self.assertFalse(self.model.port_open)
+        self.assertEqual(page.port_label.property("portOpen"), "false")
+        self.assertEqual(page.port_button.property("portOpen"), "false")
 
     def test_request_row_wrong_codes_and_code_never_shown(self):
         client_id, code = self.submit()
