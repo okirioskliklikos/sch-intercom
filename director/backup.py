@@ -126,12 +126,15 @@ def _read_sections(registry_file: Path, tls_cert: Path, tls_key: Path) -> tuple[
         if name in ("tls_identity", "client_registry") or all(p.exists() for p in paths.values()):
             raw = {}
             for filename, path in paths.items():
-                try:
-                    raw[filename] = path.read_bytes()
-                except (OSError, ValueError):
-                    raw[filename] = path.read_bytes()  # one retry on concurrent atomic replace
+                raw[filename] = path.read_bytes()
                 if name in JSON_SECTIONS:
-                    _json(raw[filename])
+                    try:
+                        _json(raw[filename])
+                    except ValueError:
+                        # Μία επανάληψη: ο Manager μπορεί να γράφει το αρχείο εκείνη τη στιγμή.
+                        time.sleep(0.2)
+                        raw[filename] = path.read_bytes()
+                        _json(raw[filename])
             sections[name] = {"schema": 1, "files": {k: _b64(v) for k, v in raw.items()}}
     cert = _un64(sections["tls_identity"]["files"]["cert.pem"])
     secret = _un64(sections["tls_identity"]["files"]["key.pem"])
@@ -431,23 +434,58 @@ def _journal_path(base: Path) -> Path:
     return base / "restore-journal.json"
 
 
+PRE_RESTORE_NOTICE = ("Ο φάκελος {path} περιέχει τα προηγούμενα αρχεία, μαζί με το προηγούμενο "
+                      "ιδιωτικό κλειδί. Σβήστε τον αφού βεβαιωθείτε ότι όλα λειτουργούν.")
+
+
+def _remove_orphans(base: Path) -> None:
+    """Σβήνει staging που δεν ανήκει σε journal (διακοπή πριν από την πρώτη μετακίνηση).
+
+    Καλείται μόνο με το κλείδωμα του Manager και χωρίς journal, άρα κανένα restore
+    δεν τα χρησιμοποιεί. Το staging μπορεί να περιέχει ακρυπτογράφητο κλειδί.
+    """
+    for orphan in base.glob(".restore-staging-*"):
+        shutil.rmtree(orphan, ignore_errors=True)
+    for orphan in base.glob("pre-restore-*"):
+        _remove_empty_tree(orphan)
+    (base / "restore-journal.json.tmp").unlink(missing_ok=True)
+
+
+def _remove_empty_tree(path: Path) -> None:
+    """Σβήνει τον φάκελο μόνο αν δεν περιέχει κανένα αρχείο."""
+    if path.is_dir() and not any(p.is_file() for p in path.rglob("*")):
+        shutil.rmtree(path, ignore_errors=True)
+
+
 def rollback(base: Path) -> bool:
+    """Επαναφέρει την κατάσταση πριν από διακοπτόμενο restore. Ασφαλές σε επανάληψη."""
     base = Path(base)
     path = _journal_path(base)
     if not path.exists():
+        _remove_orphans(base)
         return False
-    journal = _json(path.read_bytes())
-    for item in reversed(journal["moves"]):
+    try:
+        journal = _json(path.read_bytes())
+        moves = journal["moves"]
+    except (ValueError, KeyError, TypeError):
+        # Το journal γράφεται ατομικά πριν από την πρώτη μετακίνηση· άκυρο journal
+        # σημαίνει ότι δεν έγινε καμία μετακίνηση. Μένει μόνο ο καθαρισμός.
+        path.unlink()
+        _remove_orphans(base)
+        return True
+    for item in reversed(moves):
         target = Path(item["target"])
         previous = Path(item["previous"])
         if item["had_previous"]:
             if previous.exists():
                 target.parent.mkdir(parents=True, exist_ok=True)
-                os.replace(previous, target)
+                _replace_with_retry(previous, target)
         elif target.exists():
             target.unlink()
     path.unlink()
-    shutil.rmtree(journal["staging"], ignore_errors=True)
+    if journal.get("staging"):
+        shutil.rmtree(journal["staging"], ignore_errors=True)
+    _remove_orphans(base)
     return True
 
 
@@ -458,6 +496,7 @@ def restore(path: Path, password: str, *, registry_file: Path, tls_cert: Path,
     base = registry_file.parent
     with manager_lock(base):
         ensure_no_interrupted_restore(base)
+        _remove_orphans(base)
         _, data = _read_backup(Path(path), password)
         manifest, sections, warnings = _validate_contents(data)
         locations = _paths(registry_file, tls_cert, tls_key)
@@ -487,6 +526,15 @@ def restore(path: Path, password: str, *, registry_file: Path, tls_cert: Path,
         staging.mkdir(parents=True, exist_ok=False)
         previous_dir.mkdir(parents=True, exist_ok=False)
         moves = []
+        operations = 0
+
+        def step() -> None:
+            # Μόνο για tests/scripts: τεχνητή διακοπή (σαν kill) μετά από N μετακινήσεις.
+            nonlocal operations
+            operations += 1
+            if fail_after is not None and operations >= fail_after:
+                raise KeyboardInterrupt("Injected restore interruption")
+
         try:
             for name, sec in sections.items():
                 if name not in locations:
@@ -507,24 +555,38 @@ def restore(path: Path, password: str, *, registry_file: Path, tls_cert: Path,
                                       "previous": str((previous_dir / name / filename).resolve()),
                                       "had_previous": target.exists()})
             journal = {"staging": str(staging.resolve()), "moves": moves}
-            _write_exclusive(_journal_path(base), canonical(journal))
-            for idx, item in enumerate(moves):
+            # Ατομικά: είτε υπάρχει πλήρες journal είτε κανένα (πριν από κάθε μετακίνηση).
+            journal_tmp = base / "restore-journal.json.tmp"
+            _write_exclusive(journal_tmp, canonical(journal))
+            _replace_with_retry(journal_tmp, _journal_path(base))
+        except BaseException:
+            # Καμία μετακίνηση δεν έγινε: σβήνουμε το staging (περιέχει το κλειδί).
+            shutil.rmtree(staging, ignore_errors=True)
+            _remove_empty_tree(previous_dir)
+            (base / "restore-journal.json.tmp").unlink(missing_ok=True)
+            raise
+        try:
+            for item in moves:
                 target, prior = Path(item["target"]), Path(item["previous"])
                 if item["had_previous"]:
                     prior.parent.mkdir(parents=True, exist_ok=True)
-                    os.replace(target, prior)
+                    _replace_with_retry(target, prior)
+                    step()
                 if item["stage"] is not None:
                     target.parent.mkdir(parents=True, exist_ok=True)
-                    os.replace(item["stage"], target)
-                if fail_after is not None and idx + 1 >= fail_after:
-                    raise KeyboardInterrupt("Injected restore interruption")
+                    _replace_with_retry(Path(item["stage"]), target)
+                    step()
         except Exception:
-            if _journal_path(base).exists():
-                rollback(base)
+            # Κανονικό σφάλμα: αυτόματη επιστροφή. Σε kill/διακοπή (BaseException)
+            # το journal μένει και ο Manager αρνείται να ξεκινήσει μέχρι το rollback.
+            rollback(base)
             raise
         _journal_path(base).unlink()
         shutil.rmtree(staging, ignore_errors=True)
-        diff = _media_diff(sections.get("media_manifest"), media_dir)
+        _remove_empty_tree(previous_dir)
+        if previous_dir.exists():
+            warnings.append(PRE_RESTORE_NOTICE.format(path=previous_dir))
+        copied = []
         if restore_media and sections.get("media_manifest"):
             source = Path(path).with_name(Path(path).stem + "-media")
             for entry in sections["media_manifest"]["files"]:
@@ -537,9 +599,14 @@ def restore(path: Path, password: str, *, registry_file: Path, tls_cert: Path,
                         hashlib.sha256(original.read_bytes()).hexdigest() == entry["sha256"]):
                     target.parent.mkdir(parents=True, exist_ok=True)
                     shutil.copyfile(original, target)
+                    copied.append(name)
+        # Η αναφορά MP3 βγαίνει ΜΕΤΑ το --restore-media, ώστε να δείχνει την τελική κατάσταση.
+        diff = _media_diff(sections.get("media_manifest"), media_dir)
+        diff["copied"] = copied
         return {"registry_version": manifest["registry_version"],
                 "tls_fingerprint": manifest["tls_fingerprint"],
-                "previous": str(previous_dir), "media": diff, "warnings": warnings}
+                "previous": str(previous_dir) if previous_dir.exists() else None,
+                "media": diff, "warnings": warnings}
 
 
 def _passphrase(command: str, env: str | None) -> str:
