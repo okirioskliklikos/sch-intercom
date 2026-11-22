@@ -1,0 +1,308 @@
+<!doctype html>
+<html lang="el">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Director — Ασφάλεια / Υπολογιστές (mockup)</title>
+<style>
+body { margin: 0; }
+/* Διάταξη: όπως η εφαρμογή Director — αριστερό μενού, κεφαλίδα, tabs, κάρτες (docs/ui-style.md).
+   Μονό ανοιχτό θέμα, όπως η εφαρμογή. */
+:root {
+  --primary: #1d5a99;
+  --primary-light: #dde7f4;
+  --primary-dark: #164a80;
+  --window-bg: #f3f5f9;
+  --sidebar-bg: #e6ebf3;
+  --card-bg: #ffffff;
+  --card-border: #dde3ec;
+  --text: #1f2937;
+  --text-muted: #5b6575;
+  --control-border: #8a96a6;
+  --online: #2e9e4f;
+  --connected: #2e8b57;
+  --live: #c62828;
+  --live-light: #f6d5d5;
+  --app-icon: #0e7490;
+  --offline: #8a96a6;
+  --font: "Segoe UI", system-ui, -apple-system, "Noto Sans", Ubuntu, sans-serif;
+  --mono: ui-monospace, "Cascadia Mono", Consolas, "DejaVu Sans Mono", monospace;
+  --base: 15px;
+  color-scheme: light;
+}
+* { box-sizing: border-box; }
+[hidden] { display: none !important; }
+body { background: var(--window-bg); color: var(--text); font: 400 var(--base)/1.4 var(--font); }
+button, input { font: inherit; color: inherit; }
+.stage { overflow-x: auto; padding-block: 12px 16px; padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px)); }
+.sizes { display: flex; gap: 6px; margin: 0 0 10px; }
+.app { display: grid; grid-template-columns: 232px minmax(0, 1fr); min-height: 860px; width: var(--win, 1680px); margin: 0 auto; border: 1px solid var(--card-border); border-radius: 8px; overflow: hidden; background: var(--window-bg); }
+
+/* Αριστερό μενού */
+.sidebar { background: var(--sidebar-bg); padding: 14px 10px; display: flex; flex-direction: column; gap: 6px; }
+.brand { display: flex; align-items: center; gap: 10px; padding: 2px 6px 12px; font-size: 1.12em; }
+.brand-icon { width: 28px; height: 28px; border-radius: 7px; background: var(--app-icon); display: grid; place-items: center; flex: none; }
+.nav { display: flex; align-items: center; gap: 9px; padding: 8px 12px; border-radius: 6px; border: 1px solid transparent; color: var(--text-muted); font-size: 1.08em; text-decoration: none; }
+.nav svg { width: 17px; height: 17px; flex: none; }
+.nav.on { background: var(--primary-light); border-color: var(--primary); color: var(--primary); font-weight: 600; }
+
+/* Περιεχόμενο */
+.main { padding-block: 14px 24px; padding-left: max(22px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px)); display: flex; flex-direction: column; gap: 14px; min-width: 0; }
+.head { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+.head h1 { margin: 0; font-size: 1.4em; font-weight: 600; }
+.status { color: var(--connected); white-space: nowrap; }
+.status::before { content: "● "; }
+
+/* Tabs: ίδιο στυλ με την επιλεγμένη καρτέλα του μενού */
+.tabs { display: flex; gap: 6px; flex-wrap: wrap; }
+.tab { padding: 6px 16px; border-radius: 6px; border: 1px solid var(--card-border); background: var(--card-bg); color: var(--text-muted); cursor: pointer; }
+.tab[aria-selected="true"] { background: var(--primary-light); border-color: var(--primary); color: var(--primary); font-weight: 600; }
+.tab:focus-visible, .pill:focus-visible, .code:focus-visible, .menu:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
+
+.grid { display: grid; grid-template-columns: minmax(0, 1.05fr) minmax(0, 1fr); gap: 14px; align-items: start; }
+.card { background: var(--card-bg); border: 1px solid var(--card-border); border-radius: 8px; padding: 13px 16px 16px; min-width: 0; }
+.card-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap; margin-bottom: 10px; }
+.card h2 { margin: 0; font-size: 1.15em; font-weight: 600; }
+.muted { color: var(--text-muted); }
+.small { font-size: .92em; }
+
+/* Pill κουμπιά */
+.pill { display: inline-flex; align-items: center; gap: 6px; height: 32px; padding: 0 14px; border-radius: 999px; border: 1px solid var(--control-border); background: var(--card-bg); white-space: nowrap; cursor: pointer; }
+.pill.sm { height: 28px; padding: 0 11px; font-size: .92em; }
+.pill.primary { background: var(--primary); border-color: var(--primary); color: #fff; }
+.pill.primary:hover { background: var(--primary-dark); }
+/* Κουμπιά ενέργειας (ui-style.md §7): μόνο υπάρχοντα tokens */
+.act { display: inline-flex; align-items: center; gap: 7px; height: 32px; padding: 0 14px; border-radius: 6px; border: 1px solid var(--control-border); background: var(--card-bg); white-space: nowrap; cursor: pointer; }
+.act svg { width: 16px; height: 16px; }
+.act.add { background: var(--connected); border-color: var(--connected); color: #fff; }
+.act.add:hover { background: var(--online); border-color: var(--online); }
+.act.remove { color: var(--live); }
+.act.remove:hover { background: var(--live-light); }
+.act:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
+.pill svg { width: 16px; height: 16px; }
+
+/* Θύρα εγγραφής */
+.port { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.dot { width: 9px; height: 9px; border-radius: 50%; background: var(--offline); display: inline-block; flex: none; }
+.dot.on { background: var(--online); }
+.port-state { display: inline-flex; align-items: center; gap: 7px; }
+
+/* Αιτήματα: πληροφορίες σε δική τους γραμμή, από κάτω κωδικός/έγκριση/απόρριψη */
+.requests { display: flex; flex-direction: column; }
+.req { padding: 11px 0 12px; display: flex; flex-direction: column; gap: 8px; border-top: 1px solid var(--card-border); }
+.req:first-child { border-top: 0; padding-top: 2px; }
+.req-title { display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; }
+.req-title b { font-weight: 600; }
+.req-meta { font-size: .92em; color: var(--text-muted); font-variant-numeric: tabular-nums; }
+.req-actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.code { width: 9.5ch; height: 32px; padding: 0 10px; border: 1px solid var(--control-border); border-radius: 6px; background: var(--card-bg); font-family: var(--mono); font-size: 1.05em; letter-spacing: .18em; text-align: center; }
+.code::placeholder { color: #b3bcc8; letter-spacing: .18em; }
+.req.done { color: var(--text-muted); }
+.req .result { font-size: .92em; }
+.req .result.ok { color: var(--connected); }
+.req .result.err { color: var(--live); }
+.hint { margin: 10px 0 0; font-size: .92em; color: var(--text-muted); }
+
+/* Υπολογιστές ανά αίθουσα, με εσοχή */
+.rooms { display: flex; flex-direction: column; gap: 6px; }
+.room-row { display: flex; align-items: center; gap: 9px; height: 32px; font-size: 1.1em; font-weight: 600; }
+.room-row .count { margin-left: auto; font-size: .82em; font-weight: 400; color: var(--text-muted); }
+.pc { display: flex; align-items: center; gap: 9px; min-height: 30px; padding-left: 26px; }
+.pc .name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pc .state { font-size: .92em; color: var(--text-muted); white-space: nowrap; }
+.pc .menu { margin-left: auto; border: 0; background: none; color: var(--text-muted); width: 30px; height: 28px; border-radius: 6px; cursor: pointer; }
+.pc .menu:hover { background: var(--window-bg); }
+.room + .room { margin-top: 4px; }
+
+/* Πιστοποιητικά */
+.kv { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 7px 16px; margin: 0; }
+.kv dt { color: var(--text-muted); }
+.kv dd { margin: 0; min-width: 0; overflow-wrap: anywhere; }
+.fp { font-family: var(--mono); font-size: .95em; letter-spacing: .02em; }
+.badge { display: inline-flex; align-items: center; gap: 6px; padding: 1px 10px; border-radius: 999px; background: var(--primary-light); color: var(--primary); font-size: .9em; white-space: nowrap; }
+.badge.ok { background: #e3f3e8; color: var(--connected); }
+.actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 14px; }
+.later { font-size: .85em; color: var(--text-muted); }
+.pill[disabled] { color: var(--text-muted); border-color: var(--card-border); cursor: default; }
+table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
+th, td { text-align: left; padding: 7px 8px 7px 0; border-top: 1px solid var(--card-border); vertical-align: top; }
+th { border-top: 0; font-weight: 400; color: var(--text-muted); font-size: .92em; }
+.scroll { overflow-x: auto; }
+.span2 { grid-column: 1 / -1; }
+
+.note { font-size: .92em; color: var(--text-muted); border-left: 3px solid var(--primary-light); padding-left: 10px; margin: 0; }
+
+</style>
+</head>
+<body>
+
+<div class="stage">
+<div class="sizes" role="group" aria-label="Πλάτος παραθύρου">
+  <button class="pill sm" type="button" data-w="1366">1366</button>
+  <button class="pill sm primary" type="button" data-w="1680">1680</button>
+  <button class="pill sm" type="button" data-w="1920">1920</button>
+</div>
+<div class="app">
+  <nav class="sidebar" aria-label="Μενού">
+    <div class="brand">
+      <span class="brand-icon" aria-hidden="true">
+        <svg width="20" height="20" viewBox="0 0 20 20"><circle cx="10" cy="10" r="2.2" fill="#fff"/><circle cx="10" cy="10" r="5" fill="none" stroke="#fff" stroke-opacity=".8" stroke-width="1.6"/><circle cx="10" cy="10" r="8" fill="none" stroke="#fff" stroke-opacity=".5" stroke-width="1.6"/></svg>
+      </span>
+      School Intercom
+    </div>
+    <span class="nav"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 11l9-7 9 7v9a1 1 0 0 1-1 1h-5v-6H9v6H4a1 1 0 0 1-1-1z"/></svg>Κεντρική</span>
+    <span class="nav"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></svg>Αίθουσες</span>
+    <span class="nav"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 10v4h4l7 5V5L7 10z"/><path d="M18 8a5 5 0 0 1 0 8"/></svg>Ανακοινώσεις</span>
+    <span class="nav"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 6h16M4 12h16M4 18h10"/></svg>Σενάρια</span>
+    <span class="nav"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>Καταγραφές</span>
+    <span class="nav on" aria-current="page"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3 5 6v5c0 4.5 3 8 7 10 4-2 7-5.5 7-10V6z"/><path d="m9 12 2 2 4-4"/></svg>Ασφάλεια</span>
+    <span class="nav"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>Ρυθμίσεις</span>
+  </nav>
+
+  <main class="main">
+    <div class="head">
+      <h1>Ασφάλεια</h1>
+      <span class="status">Συνδεδεμένος</span>
+    </div>
+
+    <div class="tabs" role="tablist" aria-label="Ασφάλεια">
+      <button class="tab" role="tab" id="tab-pcs" aria-controls="pcs" aria-selected="true">Υπολογιστές</button>
+      <button class="tab" role="tab" id="tab-certs" aria-selected="false" disabled title="Σχεδιάζεται σε επόμενο βήμα">Πιστοποιητικά</button>
+    </div>
+
+    <!-- Tab: Υπολογιστές -->
+    <section id="pcs" role="tabpanel" aria-labelledby="tab-pcs" class="grid">
+      <div class="card">
+        <div class="card-head">
+          <h2>Νέες εγγραφές</h2>
+          <div class="port">
+            <span class="port-state small"><span class="dot on" id="port-dot"></span><span id="port-text">Θύρα εγγραφής ανοιχτή</span></span>
+            <button class="pill sm" id="port-btn" type="button"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="5" y="11" width="14" height="9" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/></svg><span>Κλείσιμο</span></button>
+          </div>
+        </div>
+
+        <div class="requests" id="requests">
+          <div class="req" data-code="237891">
+            <div class="req-title"><b>C2627-Γ1 · Board1</b></div>
+            <div class="req-meta">ID 68e0a623 · πριν 20″ · λήγει αύριο 07:12</div>
+            <div class="req-actions">
+              <input class="code" id="code-1" inputmode="numeric" maxlength="6" placeholder="······" aria-label="Κωδικός για C2627-Γ1 Board1" autocomplete="off">
+              <button class="act add" type="button" data-act="approve"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m5 12.5 4.5 4.5L19 7.5"/></svg>Έγκριση</button>
+              <button class="act remove" type="button" data-act="deny"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 6.5h14M10 6.5V4.5h4v2M7 6.5v11.5a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2V6.5M10.5 10v6.5M13.5 10v6.5"/></svg>Απόρριψη</button>
+            </div>
+          </div>
+          <div class="req" data-code="536494">
+            <div class="req-title"><b>C2627-Γ1 · PC</b></div>
+            <div class="req-meta">ID 0b8266e9 · πριν 3 λεπτά · λήγει αύριο 07:09</div>
+            <div class="req-actions">
+              <input class="code" id="code-2" inputmode="numeric" maxlength="6" placeholder="······" aria-label="Κωδικός για C2627-Γ1 PC" autocomplete="off">
+              <button class="act add" type="button" data-act="approve"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m5 12.5 4.5 4.5L19 7.5"/></svg>Έγκριση</button>
+              <button class="act remove" type="button" data-act="deny"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 6.5h14M10 6.5V4.5h4v2M7 6.5v11.5a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2V6.5M10.5 10v6.5M13.5 10v6.5"/></svg>Απόρριψη</button>
+            </div>
+          </div>
+          <div class="req" data-code="104733">
+            <div class="req-title"><b>C2627-Δ2 · Board1</b></div>
+            <div class="req-meta">ID 7c41d0b2 · πριν 11 λεπτά · λήγει αύριο 07:01</div>
+            <div class="req-actions">
+              <input class="code" id="code-3" inputmode="numeric" maxlength="6" placeholder="······" aria-label="Κωδικός για C2627-Δ2 Board1" autocomplete="off">
+              <button class="act add" type="button" data-act="approve"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m5 12.5 4.5 4.5L19 7.5"/></svg>Έγκριση</button>
+              <button class="act remove" type="button" data-act="deny"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 6.5h14M10 6.5V4.5h4v2M7 6.5v11.5a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2V6.5M10.5 10v6.5M13.5 10v6.5"/></svg>Απόρριψη</button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-head">
+          <h2>Εγγεγραμμένοι υπολογιστές</h2>
+          <span class="muted small">5 υπολογιστές · 3 online</span>
+        </div>
+        <div class="rooms">
+          <div class="room">
+            <div class="room-row"><span class="dot on"></span>C2627-Γ1<span class="count">2 υπολογιστές</span></div>
+            <div class="pc"><span class="dot on"></span><span class="name">Board1</span><span class="state">Online</span><button class="menu" type="button" aria-label="Ενέργειες για Board1">⋯</button></div>
+            <div class="pc"><span class="dot"></span><span class="name">PC</span><span class="state">πριν 2 ώρες</span><button class="menu" type="button" aria-label="Ενέργειες για PC">⋯</button></div>
+          </div>
+          <div class="room">
+            <div class="room-row"><span class="dot on"></span>C2627-Γ2<span class="count">1 υπολογιστής</span></div>
+            <div class="pc"><span class="dot on"></span><span class="name">Board 2</span><span class="state">Online</span><button class="menu" type="button" aria-label="Ενέργειες για Board 2">⋯</button></div>
+          </div>
+          <div class="room">
+            <div class="room-row"><span class="dot on"></span>Γραφείο Διευθυντή<span class="count">1 υπολογιστής</span></div>
+            <div class="pc"><span class="dot on"></span><span class="name">Διευθυντής-PC</span><span class="state">Online</span><button class="menu" type="button" aria-label="Ενέργειες για Διευθυντής-PC">⋯</button></div>
+          </div>
+          <div class="room">
+            <div class="room-row"><span class="dot"></span>C2627-Δ1<span class="count">1 υπολογιστής</span></div>
+            <div class="pc"><span class="dot"></span><span class="name">Board1</span><span class="state">πριν 3 ημέρες</span><button class="menu" type="button" aria-label="Ενέργειες για Board1 στη C2627-Δ1">⋯</button></div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+
+  </main>
+</div>
+</div>
+
+<script>
+(function () {
+  document.querySelectorAll('.sizes button').forEach(b => b.addEventListener('click', () => {
+    document.documentElement.style.setProperty('--win', b.dataset.w + 'px');
+    document.querySelectorAll('.sizes button').forEach(x => x.classList.toggle('primary', x === b));
+  }));
+  const tabs = document.querySelectorAll('.tab[aria-controls]');
+  function show(id) {
+    tabs.forEach(t => {
+      const on = t.getAttribute('aria-controls') === id;
+      t.setAttribute('aria-selected', on ? 'true' : 'false');
+      document.getElementById(t.getAttribute('aria-controls')).hidden = !on;
+    });
+  }
+  tabs.forEach(t => t.addEventListener('click', () => {
+    const id = t.getAttribute('aria-controls');
+    show(id);
+    try { history.replaceState(null, '', '#' + id); } catch (e) {}
+  }));
+  function fromHash() { const h = location.hash.slice(1); if (h === 'certs' || h === 'pcs') show(h); }
+  window.addEventListener('hashchange', fromHash);
+  fromHash();
+
+  const portBtn = document.getElementById('port-btn');
+  portBtn.addEventListener('click', () => {
+    const dot = document.getElementById('port-dot');
+    const open = dot.classList.toggle('on');
+    document.getElementById('port-text').textContent = open ? 'Θύρα εγγραφής ανοιχτή' : 'Θύρα εγγραφής κλειστή';
+    portBtn.innerHTML = open ? '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="5" y="11" width="14" height="9" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/></svg><span>Κλείσιμο</span>' : '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="5" y="11" width="14" height="9" rx="2"/><path d="M8 11V8a4 4 0 0 1 7.7-1.5"/></svg><span>Άνοιγμα</span>';
+  });
+
+  document.getElementById('requests').addEventListener('click', e => {
+    const btn = e.target.closest('button[data-act]');
+    if (!btn) return;
+    const req = btn.closest('.req');
+    const input = req.querySelector('.code');
+    const actions = req.querySelector('.req-actions');
+    const result = document.createElement('span');
+    result.className = 'result';
+    if (btn.dataset.act === 'deny') {
+      result.textContent = 'Απορρίφθηκε';
+    } else if (!/^\d{6}$/.test(input.value)) {
+      input.focus();
+      return;
+    } else if (input.value === req.dataset.code) {
+      result.className += ' ok';
+      result.textContent = 'Εγκρίθηκε ✓ · θα συνδεθεί μόνος του';
+    } else {
+      result.className += ' err';
+      result.textContent = 'Λάθος κωδικός: το αίτημα απορρίφθηκε. Ζητήστε νέα εγγραφή από τον υπολογιστή.';
+    }
+    req.classList.add('done');
+    actions.replaceChildren(result);
+  });
+  document.querySelectorAll('.code').forEach(i => i.addEventListener('input', () => {
+    i.value = i.value.replace(/\D/g, '').slice(0, 6);
+  }));
+})();
+</script>
+
+</body>
+</html>
