@@ -82,13 +82,17 @@ button, input { font: inherit; color: inherit; }
 .pill svg { width: 16px; height: 16px; }
 
 /* Θύρα εγγραφής */
-.port { display: flex; flex-direction: column; align-items: flex-end; gap: 6px; } 
-.port #port-btn { border-radius: 6px; border: 1px solid var(--live); background: var(--live); color: #fff; padding: 6px 14px; }
+.port { display: flex; align-items: center; gap: 7px; }
+.card-head { align-items: flex-start; }
+.port #port-btn { display: inline-flex; align-items: center; justify-content: center; width: 32px; height: 32px; padding: 0; border-radius: 6px; border: 1px solid var(--live); background: var(--live); color: #fff; }
 .port #port-btn.open { background: var(--connected); border-color: var(--connected); }
 .port #port-btn.open:hover { background: var(--online); border-color: var(--online); }
-.port #port-btn:not(.open):hover { background: var(--live-light); color: var(--live); }
+.port-state { color: var(--live); }
+.port-state.open { color: var(--connected); }
 .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--offline); display: inline-block; flex: none; }
 .dot.on { background: var(--online); }
+.port-state .dot { background: var(--live); }
+.port-state .dot.on { background: var(--online); }
 .port-state { display: inline-flex; align-items: center; gap: 7px; }
 
 /* Αιτήματα: πληροφορίες σε δική τους γραμμή, από κάτω κωδικός/έγκριση/απόρριψη */
@@ -180,8 +184,8 @@ th { border-top: 0; font-weight: 400; color: var(--text-muted); font-size: .92em
         <div class="card-head">
           <h2>Νέες εγγραφές</h2>
           <div class="port">
-            <span class="port-state small"><span class="dot" id="port-dot"></span><span id="port-text">Θύρα εγγραφής κλειστή</span></span>
-            <button class="pill sm" id="port-btn" type="button"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="5" y="11" width="14" height="9" rx="2"/><path d="M8 11V8a4 4 0 0 1 7.7-1.5"/></svg><span>Άνοιγμα</span></button>
+            <span class="port-state small"><span class="dot" id="port-dot"></span><span id="port-text">Εγγραφές κλειστές</span></span>
+            <button class="pill sm" id="port-btn" type="button" aria-label="Άνοιγμα εγγραφών" title="Άνοιγμα εγγραφών"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="5" y="11" width="14" height="9" rx="2"/><path d="M8 11V8a4 4 0 0 1 7.7-1.5"/></svg></button>
           </div>
         </div>
 
@@ -276,8 +280,11 @@ th { border-top: 0; font-weight: 400; color: var(--text-muted); font-size: .92em
     const dot = document.getElementById('port-dot');
     const open = dot.classList.toggle('on');
     portBtn.classList.toggle('open', open);
-    document.getElementById('port-text').textContent = open ? 'Θύρα εγγραφής ανοιχτή' : 'Θύρα εγγραφής κλειστή';
-    portBtn.innerHTML = open ? '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="5" y="11" width="14" height="9" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/></svg><span>Κλείσιμο</span>' : '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="5" y="11" width="14" height="9" rx="2"/><path d="M8 11V8a4 4 0 0 1 7.7-1.5"/></svg><span>Άνοιγμα</span>';
+    document.querySelector('.port-state').classList.toggle('open', open);
+    document.getElementById('port-text').textContent = open ? 'Εγγραφές ανοιχτές' : 'Εγγραφές κλειστές';
+    portBtn.setAttribute('aria-label', open ? 'Κλείσιμο εγγραφών' : 'Άνοιγμα εγγραφών');
+    portBtn.title = portBtn.getAttribute('aria-label');
+    portBtn.innerHTML = open ? '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="5" y="11" width="14" height="9" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/></svg>' : '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="5" y="11" width="14" height="9" rx="2"/><path d="M8 11V8a4 4 0 0 1 7.7-1.5"/></svg>';
   });
 
   document.getElementById('requests').addEventListener('click', e => {
