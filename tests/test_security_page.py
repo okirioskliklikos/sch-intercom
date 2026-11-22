@@ -28,6 +28,7 @@ from shared.enrollment import (MAX_PENDING, REQUEST_TTL, TEXT_FULL, EnrollmentSe
 from tests.tls_support import LocalTLSFixture
 
 try:
+    from PySide6.QtCore import Qt
     from PySide6.QtTest import QTest
     from PySide6.QtWidgets import QApplication
     from director.qt_gui import DirectorWindow, create_application, release_window
@@ -417,7 +418,7 @@ class SecurityPageTests(SecurityFixture, unittest.TestCase):
         self.asked.append((title, value))
         return self.answers.pop(0)
 
-    def confirm(self, title, text):
+    def confirm(self, title, text, action):
         self.asked.append((title, text))
         return self.confirm_answer
 
@@ -645,6 +646,57 @@ class SecurityPageTests(SecurityFixture, unittest.TestCase):
         self.assertGreater(columns[1920], columns[1366])
         self.assertTrue(all(columns[a] <= columns[b]
                             for a, b in ((1366, 1680), (1680, 1920))))
+
+    def test_state_right_aligned_and_menu_button_is_icon(self):
+        # Απόφαση χρήστη 22/11/2026: κατάσταση δεξιά, μικρό κουμπί ⋮, εικονίδια στα μενού.
+        a = self.approved("C2627-Γ1", "Board1", "a")
+        self.page.refresh()
+        QApplication.processEvents()
+        row = self.page.computer_rows[a]
+        self.assertTrue(row.state.alignment() & Qt.AlignmentFlag.AlignRight)
+        state_right = row.state.mapTo(row, row.state.rect().topRight()).x()
+        self.assertLessEqual(row.menu_button.x() - state_right, row.layout().spacing() + 2)
+        header = self.page.room_headers["C2627-Γ1"]
+        for button in (row.menu_button, header.menu_button):
+            self.assertEqual(button.text(), "")
+            self.assertFalse(button.icon().isNull())
+            self.assertEqual(button.width(), button.height())
+        for action in [*row.actions.values(), *header.actions.values()]:
+            self.assertFalse(action.icon().isNull(), action.text())
+        self.assertEqual([a.text() for a in header.menu_button.menu().actions()],
+                         ["Μετονομασία αίθουσας…"])
+
+    def test_rename_room_moves_all_its_computers(self):
+        a = self.approved("C2627-Γ1", "Board1", "a")
+        b = self.approved("C2627-Γ1", "PC", "b")
+        self.page.refresh()
+        self.answers = ["C2627-Γ9"]
+        self.page.room_headers["C2627-Γ1"].actions["rename_room"].trigger()
+        self.assertEqual(set(self.page.room_headers), {"C2627-Γ9"})
+        self.assertEqual({self.registry.approved_entry(cid)["room"] for cid in (a, b)},
+                         {"C2627-Γ9"})
+        self.assertEqual(self.asked[-1][0], "Μετονομασία αίθουσας")  # χωρίς επιβεβαίωση
+        self.answers = [None]  # Ακύρωση
+        self.page.room_headers["C2627-Γ9"].actions["rename_room"].trigger()
+        self.assertEqual(set(self.page.room_headers), {"C2627-Γ9"})
+        self.assertEqual(self.warnings, [])
+
+    def test_rename_room_to_existing_asks_to_merge(self):
+        a = self.approved("C2627-Γ1", "Board1", "a")
+        b = self.approved("C2627-Γ2", "PC", "b")
+        self.page.refresh()
+        self.confirm_answer = False
+        self.answers = ["C2627-Γ2"]
+        self.page.room_headers["C2627-Γ1"].actions["rename_room"].trigger()
+        self.assertEqual(self.asked[-1][0], "Συγχώνευση αιθουσών")
+        self.assertEqual(set(self.page.room_headers), {"C2627-Γ1", "C2627-Γ2"})
+        self.confirm_answer = True
+        self.answers = ["C2627-Γ2"]
+        self.page.room_headers["C2627-Γ1"].actions["rename_room"].trigger()
+        self.assertEqual(set(self.page.room_headers), {"C2627-Γ2"})
+        self.assertEqual({self.registry.approved_entry(cid)["room"] for cid in (a, b)},
+                         {"C2627-Γ2"})
+        self.assertEqual(len(self.page.room_cards["C2627-Γ2"].rows), 2)
 
     def test_invalid_rename_shows_warning(self):
         client_id = self.approved("C2627-Γ1", "Board1", "a")

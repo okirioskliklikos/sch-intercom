@@ -106,10 +106,10 @@ button, input { font: inherit; color: inherit; }
 .room-row { display: flex; align-items: center; gap: 9px; height: 32px; font-size: 1.1em; font-weight: 600; }
 .room-row .count { margin-left: auto; font-size: .82em; font-weight: 400; color: var(--text-muted); }
 .pc { display: flex; align-items: center; gap: 9px; min-height: 30px; padding-left: 26px; }
-.pc .name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pc .name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .pc .state { font-size: .92em; color: var(--text-muted); white-space: nowrap; }
-.pc .menu { margin-left: auto; border: 0; background: none; color: var(--text-muted); width: 30px; height: 28px; border-radius: 6px; cursor: pointer; }
-.pc .menu:hover { background: var(--window-bg); }
+.menu { border: 0; background: none; color: var(--text-muted); width: 26px; height: 26px; padding: 0; font-size: 18px; line-height: 1; border-radius: 6px; cursor: pointer; }
+.menu:hover { background: var(--window-bg); }
 .room + .room { margin-top: 4px; }
 
 /* Πιστοποιητικά */
@@ -141,6 +141,7 @@ th { border-top: 0; font-weight: 400; color: var(--text-muted); font-size: .92em
 .room-card .pc { padding-left: 18px; }
 .room-card .room-row .rname { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .room-card .room-row .count { white-space: nowrap; }
+.room-card .room-row .menu { margin-left: 4px; }
 
 /* Πρόταση 22/11/2026 (2): κάθε αίτημα δική του κάρτα, σε μία στήλη */
 .req-list { display: flex; flex-direction: column; gap: 10px; }
@@ -242,39 +243,39 @@ th { border-top: 0; font-weight: 400; color: var(--text-muted); font-size: .92em
         <div class="reg-head"><h2>Εγγεγραμμένοι υπολογιστές</h2><span class="muted small">11 υπολογιστές · 6 online</span></div>
         <div class="room-cards">
           <div class="card room-card">
-            <div class="room-row"><span class="dot on"></span><span class="rname" title="C2627-Γ1">C2627-Γ1</span><span class="count">2 υπολογιστές</span></div>
-            <div class="pc"><span class="dot on"></span><span class="name">Board1</span><span class="state">Online</span><button class="menu" type="button" aria-label="Ενέργειες για Board1">⋯</button></div>
-            <div class="pc"><span class="dot"></span><span class="name">PC</span><span class="state">πριν 2 ώρες</span><button class="menu" type="button" aria-label="Ενέργειες για PC">⋯</button></div>
+            <div class="room-row"><span class="dot on"></span><span class="rname" title="C2627-Γ1">C2627-Γ1</span><span class="count">2 υπολογιστές</span><button class="menu" type="button" aria-label="Ενέργειες αίθουσας">⋮</button></div>
+            <div class="pc"><span class="dot on"></span><span class="name">Board1</span><span class="state">Online</span><button class="menu" type="button" aria-label="Ενέργειες για Board1">⋮</button></div>
+            <div class="pc"><span class="dot"></span><span class="name">PC</span><span class="state">πριν 2 ώρες</span><button class="menu" type="button" aria-label="Ενέργειες για PC">⋮</button></div>
           </div>
           <div class="card room-card">
-            <div class="room-row"><span class="dot on"></span><span class="rname" title="C2627-Γ2">C2627-Γ2</span><span class="count">1 υπολογιστής</span></div>
-            <div class="pc"><span class="dot on"></span><span class="name">Board 2</span><span class="state">Online</span><button class="menu" type="button" aria-label="Ενέργειες για Board 2">⋯</button></div>
+            <div class="room-row"><span class="dot on"></span><span class="rname" title="C2627-Γ2">C2627-Γ2</span><span class="count">1 υπολογιστής</span><button class="menu" type="button" aria-label="Ενέργειες αίθουσας">⋮</button></div>
+            <div class="pc"><span class="dot on"></span><span class="name">Board 2</span><span class="state">Online</span><button class="menu" type="button" aria-label="Ενέργειες για Board 2">⋮</button></div>
           </div>
           <div class="card room-card">
-            <div class="room-row"><span class="dot on"></span><span class="rname" title="Γραφείο Διευθυντή">Γραφείο Διευθυντή</span><span class="count">1 υπολογιστής</span></div>
-            <div class="pc"><span class="dot on"></span><span class="name">Διευθυντής-PC</span><span class="state">Online</span><button class="menu" type="button" aria-label="Ενέργειες για Διευθυντής-PC">⋯</button></div>
+            <div class="room-row"><span class="dot on"></span><span class="rname" title="Γραφείο Διευθυντή">Γραφείο Διευθυντή</span><span class="count">1 υπολογιστής</span><button class="menu" type="button" aria-label="Ενέργειες αίθουσας">⋮</button></div>
+            <div class="pc"><span class="dot on"></span><span class="name">Διευθυντής-PC</span><span class="state">Online</span><button class="menu" type="button" aria-label="Ενέργειες για Διευθυντής-PC">⋮</button></div>
           </div>
           <div class="card room-card">
-            <div class="room-row"><span class="dot"></span><span class="rname" title="C2627-Δ1">C2627-Δ1</span><span class="count">1 υπολογιστής</span></div>
-            <div class="pc"><span class="dot"></span><span class="name">Board1</span><span class="state">πριν 3 ημέρες</span><button class="menu" type="button" aria-label="Ενέργειες για Board1">⋯</button></div>
+            <div class="room-row"><span class="dot"></span><span class="rname" title="C2627-Δ1">C2627-Δ1</span><span class="count">1 υπολογιστής</span><button class="menu" type="button" aria-label="Ενέργειες αίθουσας">⋮</button></div>
+            <div class="pc"><span class="dot"></span><span class="name">Board1</span><span class="state">πριν 3 ημέρες</span><button class="menu" type="button" aria-label="Ενέργειες για Board1">⋮</button></div>
           </div>
           <div class="card room-card">
-            <div class="room-row"><span class="dot on"></span><span class="rname" title="Εργαστήριο Πληροφορικής">Εργαστήριο Πληροφορικής</span><span class="count">3 υπολογιστές</span></div>
-            <div class="pc"><span class="dot on"></span><span class="name">Board1</span><span class="state">Online</span><button class="menu" type="button" aria-label="Ενέργειες για Board1">⋯</button></div>
-            <div class="pc"><span class="dot on"></span><span class="name">PC-Καθηγητή</span><span class="state">Online</span><button class="menu" type="button" aria-label="Ενέργειες για PC-Καθηγητή">⋯</button></div>
-            <div class="pc"><span class="dot"></span><span class="name">PC-01</span><span class="state">πριν 1 ώρα</span><button class="menu" type="button" aria-label="Ενέργειες για PC-01">⋯</button></div>
+            <div class="room-row"><span class="dot on"></span><span class="rname" title="Εργαστήριο Πληροφορικής">Εργαστήριο Πληροφορικής</span><span class="count">3 υπολογιστές</span><button class="menu" type="button" aria-label="Ενέργειες αίθουσας">⋮</button></div>
+            <div class="pc"><span class="dot on"></span><span class="name">Board1</span><span class="state">Online</span><button class="menu" type="button" aria-label="Ενέργειες για Board1">⋮</button></div>
+            <div class="pc"><span class="dot on"></span><span class="name">PC-Καθηγητή</span><span class="state">Online</span><button class="menu" type="button" aria-label="Ενέργειες για PC-Καθηγητή">⋮</button></div>
+            <div class="pc"><span class="dot"></span><span class="name">PC-01</span><span class="state">πριν 1 ώρα</span><button class="menu" type="button" aria-label="Ενέργειες για PC-01">⋮</button></div>
           </div>
           <div class="card room-card">
-            <div class="room-row"><span class="dot"></span><span class="rname" title="C2627-Δ2">C2627-Δ2</span><span class="count">1 υπολογιστής</span></div>
-            <div class="pc"><span class="dot"></span><span class="name">Board1</span><span class="state">Δεν έχει συνδεθεί</span><button class="menu" type="button" aria-label="Ενέργειες για Board1">⋯</button></div>
+            <div class="room-row"><span class="dot"></span><span class="rname" title="C2627-Δ2">C2627-Δ2</span><span class="count">1 υπολογιστής</span><button class="menu" type="button" aria-label="Ενέργειες αίθουσας">⋮</button></div>
+            <div class="pc"><span class="dot"></span><span class="name">Board1</span><span class="state">Δεν έχει συνδεθεί</span><button class="menu" type="button" aria-label="Ενέργειες για Board1">⋮</button></div>
           </div>
           <div class="card room-card">
-            <div class="room-row"><span class="dot on"></span><span class="rname" title="Γραφείο Καθηγητών">Γραφείο Καθηγητών</span><span class="count">1 υπολογιστής</span></div>
-            <div class="pc"><span class="dot on"></span><span class="name">PC</span><span class="state">Online</span><button class="menu" type="button" aria-label="Ενέργειες για PC">⋯</button></div>
+            <div class="room-row"><span class="dot on"></span><span class="rname" title="Γραφείο Καθηγητών">Γραφείο Καθηγητών</span><span class="count">1 υπολογιστής</span><button class="menu" type="button" aria-label="Ενέργειες αίθουσας">⋮</button></div>
+            <div class="pc"><span class="dot on"></span><span class="name">PC</span><span class="state">Online</span><button class="menu" type="button" aria-label="Ενέργειες για PC">⋮</button></div>
           </div>
           <div class="card room-card">
-            <div class="room-row"><span class="dot"></span><span class="rname" title="C2627-Β1">C2627-Β1</span><span class="count">1 υπολογιστής</span></div>
-            <div class="pc"><span class="dot"></span><span class="name">Board1</span><span class="state">πριν 20 λεπτά</span><button class="menu" type="button" aria-label="Ενέργειες για Board1">⋯</button></div>
+            <div class="room-row"><span class="dot"></span><span class="rname" title="C2627-Β1">C2627-Β1</span><span class="count">1 υπολογιστής</span><button class="menu" type="button" aria-label="Ενέργειες αίθουσας">⋮</button></div>
+            <div class="pc"><span class="dot"></span><span class="name">Board1</span><span class="state">πριν 20 λεπτά</span><button class="menu" type="button" aria-label="Ενέργειες για Board1">⋮</button></div>
           </div>
         </div>
       </div>

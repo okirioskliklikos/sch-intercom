@@ -420,8 +420,7 @@ QScrollBar::add-page, QScrollBar::sub-page {{
     background: transparent;
     color: {TEXT_MUTED};
     border-radius: {px(NAV_RADIUS)}px;
-    padding: 0 {px(8)}px;
-    min-height: {px(26)}px;
+    padding: 0;
 }}
 #rowMenu:hover, #rowMenu:pressed {{
     background: {WINDOW_BG};

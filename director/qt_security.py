@@ -45,6 +45,33 @@ def _section_head(title: str) -> tuple[QWidget, QLabel]:
     return head, count
 
 
+def _menu_icon(name: str, color: str = theme.TEXT_MUTED):
+    """Εικονίδιο στοιχείου μενού: γραμμικό 16px όπως τα κουμπιά (ui-style.md §6)."""
+    return icons.icon(name, color, size=px(16), stroke_width=2.0)
+
+
+def _menu_button(accessible: str, actions: list[QAction | None]) -> QToolButton:
+    """Μικρό τετράγωνο κουμπί με εικονίδιο ⋮ και μενού (None = διαχωριστικό)."""
+    button = QToolButton()
+    button.setObjectName("rowMenu")
+    button.setIcon(icons.icon("more", theme.TEXT_MUTED, size=px(16), stroke_width=3.0))
+    button.setIconSize(QSize(px(16), px(16)))
+    button.setFixedSize(px(26), px(26))
+    button.setAccessibleName(accessible)
+    button.setToolTip("Ενέργειες")
+    button.setCursor(Qt.CursorShape.PointingHandCursor)
+    button.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+    menu = QMenu(button)
+    for action in actions:
+        if action is None:
+            menu.addSeparator()
+        else:
+            action.setParent(menu)
+            menu.addAction(action)
+    button.setMenu(menu)
+    return button
+
+
 def _label(text: str, name: str) -> QLabel:
     label = QLabel(text)
     label.setObjectName(name)
@@ -144,7 +171,7 @@ class RequestRow(QFrame):
 
 
 class ComputerRow(QWidget):
-    """Υπολογιστής με εσοχή: κουκκίδα, όνομα, κατάσταση, μενού «⋯» τέρμα δεξιά."""
+    """Υπολογιστής με εσοχή: κουκκίδα, όνομα, κατάσταση, μενού «⋮» τέρμα δεξιά."""
 
     def __init__(self, computer: ComputerView, page: "SecurityPage", parent=None):
         super().__init__(parent)
@@ -157,32 +184,24 @@ class ComputerRow(QWidget):
         self.name = ElidedLabel(computer.name)
         self.name.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Preferred)
         self.state = _label("", "small")
-        self.menu_button = QToolButton()
-        self.menu_button.setObjectName("rowMenu")
-        self.menu_button.setText("⋯")
-        self.menu_button.setAccessibleName(f"Ενέργειες για {computer.name}")
-        self.menu_button.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.menu_button.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
-        menu = QMenu(self.menu_button)
+        self.state.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         cid = computer.client_id
         self.actions = {
-            "room": QAction("Αλλαγή αίθουσας…", menu),
-            "rename": QAction("Μετονομασία…", menu),
-            "revoke": QAction("Ανάκληση…", menu),
+            "room": QAction(_menu_icon("move"), "Αλλαγή αίθουσας…"),
+            "rename": QAction(_menu_icon("edit"), "Μετονομασία…"),
+            "revoke": QAction(_menu_icon("trash", theme.LIVE), "Ανάκληση…"),
         }
         self.actions["room"].triggered.connect(lambda: page.change_room(cid))
         self.actions["rename"].triggered.connect(lambda: page.rename(cid))
         self.actions["revoke"].triggered.connect(lambda: page.revoke(cid))
-        menu.addAction(self.actions["room"])
-        menu.addAction(self.actions["rename"])
-        menu.addSeparator()
-        menu.addAction(self.actions["revoke"])
-        self.menu_button.setMenu(menu)
+        self.menu_button = _menu_button(
+            f"Ενέργειες για {computer.name}",
+            [self.actions["room"], self.actions["rename"], None, self.actions["revoke"]])
         layout.addWidget(self.dot)
-        layout.addWidget(self.name)
-        # Ο επιπλέον χώρος πάει στην κατάσταση (στοίχιση αριστερά), ώστε το όνομα να
-        # κόβεται με «…» μόνο όταν πραγματικά δεν χωρά.
-        layout.addWidget(self.state, 1)
+        # Το όνομα παίρνει τον επιπλέον χώρο· η κατάσταση στοιχίζεται δεξιά, δίπλα στο ⋮
+        # (απόφαση χρήστη 22/11/2026)· το όνομα κόβεται με «…» μόνο όταν δεν χωρά.
+        layout.addWidget(self.name, 1)
+        layout.addWidget(self.state)
         layout.addWidget(self.menu_button)
 
     def update_state(self, computer: ComputerView, now: float) -> None:
@@ -194,7 +213,7 @@ class ComputerRow(QWidget):
 
 
 class RoomHeader(QWidget):
-    def __init__(self, room: RoomView, parent=None):
+    def __init__(self, room: RoomView, page: "SecurityPage | None" = None, parent=None):
         super().__init__(parent)
         layout = QHBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -207,6 +226,14 @@ class RoomHeader(QWidget):
         layout.addWidget(self.dot)
         layout.addWidget(self.name, 1)
         layout.addWidget(self.count)
+        # Μενού αίθουσας: μετονομασία για όλους τους υπολογιστές της μαζί.
+        name = room.room
+        self.actions = {"rename_room": QAction(_menu_icon("edit"), "Μετονομασία αίθουσας…")}
+        if page is not None:
+            self.actions["rename_room"].triggered.connect(lambda: page.rename_room(name))
+        self.menu_button = _menu_button(f"Ενέργειες για την αίθουσα {name}",
+                                        [self.actions["rename_room"]])
+        layout.addWidget(self.menu_button)
 
     def update_state(self, room: RoomView, now: float) -> None:
         self.dot.set_color(theme.ROOM_DOT_ONLINE if room.online else theme.ROOM_DOT_OFFLINE)
@@ -223,7 +250,7 @@ class RoomCard(QFrame):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(px(14), px(8), px(10), px(8))
         layout.setSpacing(0)
-        self.header = RoomHeader(room)
+        self.header = RoomHeader(room, page)
         layout.addWidget(self.header)
         self.rows: dict[str, ComputerRow] = {}
         for computer in room.computers:
@@ -241,7 +268,7 @@ class SecurityPage(QWidget):
 
     def __init__(self, model: SecurityModel, *, clock: Callable[[], float] = time.time,
                  ask_text: Callable[[str, str, str], str | None] | None = None,
-                 confirm: Callable[[str, str], bool] | None = None,
+                 confirm: Callable[[str, str, str], bool] | None = None,
                  warn: Callable[[str], None] | None = None, parent=None):
         super().__init__(parent)
         self.model = model
@@ -473,6 +500,31 @@ class SecurityPage(QWidget):
             return
         self._apply(lambda: self.model.rename(client_id, name))
 
+    def rename_room(self, room: str) -> None:
+        """Νέο όνομα για όλους τους υπολογιστές της αίθουσας. Αν υπάρχει ήδη αίθουσα
+        με αυτό το όνομα, ζητείται επιβεβαίωση και οι υπολογιστές μεταφέρονται εκεί."""
+        rooms = {view.room: view for view in self.model.rooms()}
+        current = rooms.get(room)
+        if current is None:
+            return
+        new = self.ask_text("Μετονομασία αίθουσας",
+                            f"Νέο όνομα για την αίθουσα «{room}» "
+                            f"({computers_text(len(current.computers))}):", room)
+        if new is None or new.strip() == room:
+            return
+        new = new.strip()
+        if new in rooms:
+            question = (f"Η αίθουσα «{new}» υπάρχει ήδη.\n\n"
+                        f"Να μεταφερθούν εκεί και οι {computers_text(len(current.computers))} "
+                        f"της «{room}»; Οι δύο αίθουσες γίνονται μία.")
+            if not self.confirm("Συγχώνευση αιθουσών", question, "Συγχώνευση"):
+                return
+
+        def apply() -> None:
+            for computer in current.computers:
+                self.model.change_room(computer.client_id, new)
+        self._apply(apply)
+
     def revoke(self, client_id: str) -> None:
         computer = self._computer(client_id)
         if computer is None:
@@ -480,7 +532,7 @@ class SecurityPage(QWidget):
         question = (f"Ανάκληση του «{computer.name}» ({computer.room});\n\n"
                     "Ο υπολογιστής αποσυνδέεται αμέσως. Για να ξαναμπεί χρειάζεται "
                     "νέα εγγραφή με νέο κλειδί.")
-        if self.confirm("Ανάκληση υπολογιστή", question):
+        if self.confirm("Ανάκληση υπολογιστή", question, "Ανάκληση"):
             self._apply(lambda: self.model.revoke(client_id))
 
     def _apply(self, action: Callable[[], object]) -> None:
@@ -495,13 +547,13 @@ class SecurityPage(QWidget):
         text, ok = QInputDialog.getText(self, title, label, QLineEdit.EchoMode.Normal, value)
         return text if ok else None
 
-    def _confirm(self, title: str, text: str) -> bool:
+    def _confirm(self, title: str, text: str, action: str) -> bool:
         box = QMessageBox(QMessageBox.Icon.Warning, title, text,
                           QMessageBox.StandardButton.Cancel, self)
-        revoke = box.addButton("Ανάκληση", QMessageBox.ButtonRole.DestructiveRole)
+        accept = box.addButton(action, QMessageBox.ButtonRole.DestructiveRole)
         box.setDefaultButton(QMessageBox.StandardButton.Cancel)
         box.exec()
-        return box.clickedButton() is revoke
+        return box.clickedButton() is accept
 
     def _warn(self, text: str) -> None:
         QMessageBox.warning(self, PAGE_TITLE, text)

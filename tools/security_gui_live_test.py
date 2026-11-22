@@ -1,7 +1,7 @@
 """Αυτόματη πραγματική δοκιμή της σελίδας «Ασφάλεια» (GUI Director) σε δύο υπολογιστές.
 
 Στο Linux ανοίγει το πραγματικό παράθυρο Director (PySide6) και η δοκιμή το οδηγεί
-όπως ο διαχειριστής: μενού, κωδικός, Έγκριση/Απόρριψη, μενού «⋯», όριο αιτημάτων.
+όπως ο διαχειριστής: μενού, κωδικός, Έγκριση/Απόρριψη, μενού «⋮», όριο αιτημάτων.
 Ο Client στα Windows είναι ο ίδιος με το tools/mtls_live_test (ίδια εντολή).
 Χρησιμοποιούνται προσωρινά κλειδιά/μητρώο: η κανονική εγκατάσταση δεν αγγίζεται.
 Οι διάλογοι «Αλλαγή αίθουσας»/«Μετονομασία»/«Ανάκληση» απαντώνται από τη δοκιμή.
@@ -253,7 +253,7 @@ class SecurityGuiRun(DirectorRun):
                     bool(online) and listed["state"] == "Online"
                     and listed["totals"] == "1 υπολογιστής · 1 online", f"{listed}")
 
-        # 7. Μενού ⋯ → Αλλαγή αίθουσας
+        # 7. Μενού ⋮ → Αλλαγή αίθουσας
         self.answers = [OTHER_ROOM]
         self.gui(lambda: self.page.computer_rows[board_id].actions["room"].trigger())
         listed = self.computer(board_id)
@@ -263,7 +263,7 @@ class SecurityGuiRun(DirectorRun):
                     and self.gui(lambda: OTHER_ROOM in self.page.room_headers),
                     f"hints {hints}")
 
-        # 8. Μενού ⋯ → Μετονομασία
+        # 8. Μενού ⋮ → Μετονομασία
         self.answers = [RENAMED]
         self.gui(lambda: self.page.computer_rows[board_id].actions["rename"].trigger())
         listed = self.computer(board_id)
@@ -320,7 +320,7 @@ class SecurityGuiRun(DirectorRun):
                     text == TEXT_DENIED and not pending
                     and self.runtime.trust.registry.approved_entry(reply["client_id"]) is None)
 
-        # 12. Ανάκληση από το μενού ⋯ με τον υπολογιστή συνδεδεμένο
+        # 12. Ανάκληση από το μενού ⋮ με τον υπολογιστή συνδεδεμένο
         self.ask_client("start_client", room=ROOM, new_key=False, profile="gui")
         online = self.wait(lambda: (self._computer_state(board_id) or {}).get("online"), timeout=40)
         self.gui(lambda: self.page.computer_rows[board_id].actions["revoke"].trigger())
