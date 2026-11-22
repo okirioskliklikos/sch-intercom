@@ -334,7 +334,7 @@ class DirectorMicrophone:
             self.error = None
 
 
-def run_gui(args, *, accept_clients, stream_microphone) -> None:
+def run_gui(args, *, accept_clients, stream_microphone, **security) -> None:
     """Σημείο εισόδου του `director --gui`. Το PySide6 φορτώνεται μόνο εδώ."""
     try:
         from director.qt_gui import run_qt_gui
@@ -342,4 +342,5 @@ def run_gui(args, *, accept_clients, stream_microphone) -> None:
         raise SystemExit(
             "Το --gui χρειάζεται PySide6: pip install -e .[gui]  "
             f"({exc})") from exc
-    run_qt_gui(args, accept_clients=accept_clients, stream_microphone=stream_microphone)
+    run_qt_gui(args, accept_clients=accept_clients, stream_microphone=stream_microphone,
+               **security)

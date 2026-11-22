@@ -14,6 +14,7 @@ import threading
 import time
 
 from director.broadcast import AudioBroadcaster, MAX_CLIENTS
+from director.security import LastSeenStore, last_seen_path, track_last_seen
 from shared.client_registry import RegistryError, SignedClientRegistry
 from shared.enrollment import (EnrollmentError, EnrollmentServer, ENROLL_PORT,
                                IncorrectCodeError)
@@ -453,16 +454,19 @@ def main() -> None:
     trust = RegistryTrust(registry, args.tls_cert, args.tls_key)
     secure_accept = partial(accept_clients, tls_context=trust.context(),
                             registry=registry, context_provider=trust.context)
-    if args.gui:
-        from director.gui import run_gui
-        run_gui(args, accept_clients=secure_accept, stream_microphone=stream_microphone)
-        return
-
-    broadcaster = AudioBroadcaster(max_clients=MAX_CLIENTS, on_event=lambda s: print(s, flush=True))
+    # Η θύρα εγγραφής ξεκινά κλειστή (enroll on / κουμπί «Άνοιγμα» στη σελίδα Ασφάλεια).
     enrollment = EnrollmentServer(args.tls_cert, args.tls_key, trust,
                                   host=args.host, port=args.enrollment_port,
                                   pending_file=args.registry_file.with_name(
                                       "enrollment-pending.json"))
+    last_seen = LastSeenStore(last_seen_path(args.registry_file))
+    if args.gui:
+        from director.gui import run_gui
+        run_gui(args, accept_clients=secure_accept, stream_microphone=stream_microphone,
+                enrollment=enrollment, trust=trust, last_seen=last_seen)
+        return
+
+    broadcaster = AudioBroadcaster(max_clients=MAX_CLIENTS, on_event=lambda s: print(s, flush=True))
     stop = threading.Event()
     stats = DirectorStats()
     identifier = director_id(args.director_id_file)
@@ -488,6 +492,9 @@ def main() -> None:
                                     args=(stats, broadcaster, stop),
                                     daemon=True, name="director-stats")
         reporter.start()
+        seen = threading.Thread(target=track_last_seen, args=(last_seen, broadcaster, stop),
+                                daemon=True, name="director-last-seen")
+        seen.start()
         try:
             stream_microphone(broadcaster, device=args.device, latency=args.latency,
                               stop=stop, stats=stats)
@@ -499,6 +506,7 @@ def main() -> None:
             receiver.join(timeout=1)
             beacon.join(timeout=1)
             reporter.join(timeout=1)
+            seen.join(timeout=2)
             broadcaster.close()
 
 
