@@ -452,13 +452,17 @@ def restore(path: Path, password: str, *, registry_file: Path, tls_cert: Path,
         manifest, sections, warnings = _validate_contents(data)
         locations = _paths(registry_file, tls_cert, tls_key)
         backup_cert = _un64(sections["tls_identity"]["files"]["cert.pem"])
+        identity_matches = True
         if tls_cert.exists():
             existing_fp = x509.load_pem_x509_certificate(tls_cert.read_bytes()).fingerprint(
                 hashes.SHA256()).hex(":").upper()
-            if existing_fp != manifest["tls_fingerprint"] and not replace_identity:
+            identity_matches = existing_fp == manifest["tls_fingerprint"]
+            if not identity_matches and not replace_identity:
                 raise BackupError(
                     "Αυτός ο υπολογιστής έχει άλλη ταυτότητα Manager. Χρειάζεται --replace-identity.", 5)
-        if registry_file.exists():
+        # A deliberate identity replacement is not a registry-history merge:
+        # two different installations cannot share ancestry.
+        if registry_file.exists() and identity_matches:
             current_doc = _json(registry_file.read_bytes())
             current = verify_document(current_doc, tls_cert.read_bytes())
             from_backup = _json(_un64(sections["client_registry"]["files"]["clients-registry.json"]))["registry"]
