@@ -346,23 +346,24 @@ class _ResizeNotifier(QWidget):
         self._on_resize()
 
 
-class RoomsSplitHandle(QWidget):
-    """Λαβή ανάμεσα στην «Ανακοίνωση» και τις αίθουσες (απόφαση χρήστη 22/11/2026).
+class SplitHandle(QWidget):
+    """Λαβή ανάμεσα σε δύο στήλες σελίδας (απόφαση χρήστη 22/11/2026, ui-style.md §2).
 
-    Πιάνει το κενό ανάμεσα στις κάρτες· τρεις κάθετες τελείες στο κέντρο. Σύρσιμο
-    αριστερά δίνει πλάτος στις αίθουσες, διπλό κλικ επαναφέρει την προεπιλογή.
+    Πιάνει το κενό ανάμεσα στις στήλες· τρεις κάθετες τελείες στο κέντρο. Το
+    `on_drag` παίρνει τη μετακίνηση από την αρχή του συρσίματος (θετική = δεξιά),
+    διπλό κλικ επαναφέρει την προεπιλογή. Κοινή για Κεντρική και Ασφάλεια.
     """
 
     def __init__(self, on_drag: Callable[[int], None], on_release: Callable[[], None],
-                 on_reset: Callable[[], None], parent=None):
+                 on_reset: Callable[[], None], *, width: int, tooltip: str, parent=None):
         super().__init__(parent)
-        self.setObjectName("roomsSplitHandle")
+        self.setObjectName("splitHandle")
         self._on_drag, self._on_release, self._on_reset = on_drag, on_release, on_reset
         self._start: float | None = None
         self._hover = False
-        self.setFixedWidth(px(theme.CARD_SPACING))
+        self.setFixedWidth(width)
         self.setCursor(Qt.CursorShape.SplitHCursor)
-        self.setToolTip("Σύρετε για πλάτος αιθουσών · διπλό κλικ: προεπιλογή")
+        self.setToolTip(tooltip)
         self.setAttribute(Qt.WidgetAttribute.WA_Hover)
 
     def enterEvent(self, event) -> None:
@@ -382,8 +383,7 @@ class RoomsSplitHandle(QWidget):
 
     def mouseMoveEvent(self, event) -> None:
         if self._start is not None:
-            # Προς τα αριστερά = περισσότερο πλάτος για τις αίθουσες.
-            self._on_drag(round(self._start - event.globalPosition().x()))
+            self._on_drag(round(event.globalPosition().x() - self._start))
         super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event) -> None:
@@ -403,10 +403,19 @@ class RoomsSplitHandle(QWidget):
         painter.setBrush(QColor(theme.TEXT_MUTED if self._hover else theme.CONTROL_BORDER))
         radius = max(1.5, px(theme.SPLIT_DOT) / 2)
         gap = px(theme.SPLIT_DOT_GAP)
-        cx, cy = self.width() / 2, self.height() / 2
+        # Στο κέντρο του ορατού τμήματος (η λαβή μπορεί να είναι ψηλότερη από την
+        # οθόνη σε σελίδα με κύλιση· η σελίδα καλεί update() όταν κυλά).
+        visible = self.visibleRegion().boundingRect()
+        if visible.isEmpty():
+            visible = self.rect()
+        cx, cy = self.width() / 2, visible.center().y()
         for offset in (-gap, 0, gap):
             painter.drawEllipse(QPointF(cx, cy + offset), radius, radius)
         painter.end()
+
+
+# Πλάτη σε px του mockup (ανεξάρτητα από την κλίμακα γραμματοσειράς).
+LAYOUT_KEYS = ("rooms_extra_width", "security_left_width")
 
 
 def load_layout_settings(path: Path | None) -> dict:
@@ -419,20 +428,24 @@ def load_layout_settings(path: Path | None) -> dict:
         return {}
     if not isinstance(data, dict) or data.get("version") != 1:
         return {}
-    extra = data.get("rooms_extra_width")
-    if type(extra) not in (int, float) or not 0 <= extra <= 10000:
-        return {}
-    return {"rooms_extra_width": float(extra)}
+    result = {}
+    for key in LAYOUT_KEYS:
+        value = data.get(key)
+        if type(value) in (int, float) and 0 <= value <= 10000:
+            result[key] = float(value)
+    return result
 
 
 def save_layout_settings(path: Path | None, settings: dict) -> None:
+    """Γράφει τις τιμές που δόθηκαν, κρατώντας τις υπόλοιπες του αρχείου."""
     if path is None:
         return
     path = Path(path)
+    merged = {**load_layout_settings(path), **settings}
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         tmp = path.with_suffix(path.suffix + ".tmp")
-        tmp.write_text(json.dumps({"version": 1, **settings}), encoding="utf-8")
+        tmp.write_text(json.dumps({"version": 1, **merged}), encoding="utf-8")
         tmp.replace(path)
     except OSError:
         pass  # η εμφάνιση δεν σταματά τον Director
@@ -581,7 +594,8 @@ class DirectorWindow(QMainWindow):
         self.pages.addWidget(self._build_page())
         if self.security is not None:
             from director.qt_security import SecurityPage
-            self.security_page = SecurityPage(self.security, **self._security_options)
+            options = {"layout_settings": self._layout_settings, **self._security_options}
+            self.security_page = SecurityPage(self.security, **options)
             self.pages.addWidget(self.security_page)
             self.page_keys.append("security")
         layout.addWidget(self.pages, 1)
@@ -650,8 +664,11 @@ class DirectorWindow(QMainWindow):
             QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Expanding)
         right_top.addWidget(self.rooms_card)
         columns.addWidget(self.rooms_area, 0, 2)
-        self.split_handle = RoomsSplitHandle(self._drag_rooms, self._save_rooms_extra,
-                                             self._reset_rooms_extra)
+        self.split_handle = SplitHandle(
+            # Προς τα αριστερά = περισσότερο πλάτος για τις αίθουσες.
+            lambda delta: self._drag_rooms(-delta), self._save_rooms_extra,
+            self._reset_rooms_extra, width=px(theme.CARD_SPACING),
+            tooltip="Σύρετε για πλάτος αιθουσών · διπλό κλικ: προεπιλογή")
         columns.addWidget(self.split_handle, 0, 1, 2, 1)
 
         self.selection_card = self._build_selection_card()
@@ -665,6 +682,8 @@ class DirectorWindow(QMainWindow):
         self.page_scroll.setFrameShape(QFrame.Shape.NoFrame)
         self.page_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.page_scroll.setWidget(body)
+        self.page_scroll.verticalScrollBar().valueChanged.connect(
+            lambda _v: self.split_handle.update())
         layout.addWidget(self.page_scroll, 1)
         return page
 

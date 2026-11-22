@@ -33,7 +33,6 @@ CONNECTED = "#2e8b57"
 LIVE = "#c62828"
 LIVE_LIGHT = "#f6d5d5"
 APP_ICON = "#0e7490"
-DIVIDER = "#b3bcc8"
 
 #: Όνομα token όπως στο ui-style.md → τιμή.
 TOKENS: dict[str, str] = {
@@ -52,7 +51,6 @@ TOKENS: dict[str, str] = {
     "live": LIVE,
     "live_light": LIVE_LIGHT,
     "app_icon": APP_ICON,
-    "divider": DIVIDER,
 }
 
 # Λευκό σε έγχρωμο φόντο (τικ, εικονίδιο μικροφώνου) δεν είναι token.
@@ -355,10 +353,6 @@ QScrollBar::add-page, QScrollBar::sub-page {{
 }}
 #sectionCount[warn="true"] {{
     color: {LIVE};
-}}
-#divider {{
-    background: {DIVIDER};
-    border: none;
 }}
 #requestTitle[final="true"] {{
     color: {TEXT_MUTED};

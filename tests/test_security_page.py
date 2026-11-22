@@ -555,7 +555,8 @@ class SecurityPageTests(SecurityFixture, unittest.TestCase):
         self.page.refresh()
         for width, expected in ((1400, True), (900, False), (1400, True)):
             self.window.resize(width, 800)
-            QApplication.processEvents()
+            for _ in range(3):  # αναδιάταξη στον επόμενο κύκλο γεγονότων
+                QApplication.processEvents()
             with self.subTest(width=width):
                 self.assertEqual(self.page.side_by_side, expected)
                 body = self.page.scroll.widget()
@@ -614,7 +615,7 @@ class SecurityPageTests(SecurityFixture, unittest.TestCase):
         eight_digits = row.code.fontMetrics().horizontalAdvance("0" * 8)
         self.assertGreater(row.code.width(), eight_digits)
 
-    def test_room_cards_fill_rows_and_divider_follows_layout(self):
+    def test_room_cards_fill_rows_and_handle_follows_layout(self):
         for index, room in enumerate(("C2627-Α1", "C2627-Β1", "C2627-Γ1", "C2627-Δ1")):
             self.approved(room, "PC", f"r{index}")
         self.page.refresh()
@@ -639,10 +640,8 @@ class SecurityPageTests(SecurityFixture, unittest.TestCase):
                     self.assertLessEqual(card.mapTo(page.scroll.viewport(),
                                                     card.rect().topRight()).x(),
                                          page.scroll.viewport().width())
-                if page.side_by_side:
-                    self.assertEqual(page.divider.width(), 1)
-                else:
-                    self.assertEqual(page.divider.height(), 1)
+                # Λαβή αντί για διαχωριστικό, μόνο δίπλα-δίπλα.
+                self.assertEqual(page.split_handle.isVisible(), page.side_by_side)
         self.assertGreater(columns[1920], columns[1366])
         self.assertTrue(all(columns[a] <= columns[b]
                             for a, b in ((1366, 1680), (1680, 1920))))
@@ -709,6 +708,50 @@ class SecurityPageTests(SecurityFixture, unittest.TestCase):
         self.assertEqual({self.registry.approved_entry(cid)["room"] for cid in (a, b)},
                          {"C2627-Γ2"})
         self.assertEqual(len(self.page.room_cards["C2627-Γ2"].rows), 2)
+
+    def test_handle_sets_requests_width_and_is_remembered(self):
+        # Απόφαση χρήστη 22/11/2026: λαβή αντί για διαχωριστικό, όπως στην Κεντρική.
+        import tempfile
+        from director.qt_security import SecurityPage
+        settings = Path(tempfile.mkdtemp()) / "director-gui.json"
+        self.approved("C2627-Γ1", "Board1", "a")
+
+        def page_at(width):
+            page = SecurityPage(self.model, clock=self.clock, layout_settings=settings)
+            self.addCleanup(page.deleteLater)
+            page.resize(width, 700)
+            page.show()
+            page.refresh()
+            for _ in range(4):
+                QApplication.processEvents()
+            return page
+
+        page = page_at(1500)
+        self.assertTrue(page.side_by_side)
+        self.assertTrue(page.split_handle.isVisible())
+        default = page.left_width
+        page._drag_left(120)
+        page._save_left()
+        QApplication.processEvents()
+        self.assertEqual(page.left_width, default + 120)
+        again = page_at(1500)
+        self.assertAlmostEqual(again.left_width, default + 120, delta=2)
+        # Όρια: όχι κάτω από το ελάχιστο, όχι τόσο που να μη χωρά μία κάρτα αίθουσας.
+        again._drag_left(-5000)
+        QApplication.processEvents()
+        self.assertEqual(again.left_width, again._left_minimum())
+        again._save_left()
+        again._drag_left(5000)
+        QApplication.processEvents()
+        self.assertGreaterEqual(again.computers_section.width(), again._right_minimum())
+        again._save_left()
+        again._reset_left()
+        QApplication.processEvents()
+        self.assertEqual(again.left_width, default)
+        self.assertEqual(page_at(1500).left_width, default)  # και η προεπιλογή θυμάται
+        narrow = page_at(700)
+        self.assertFalse(narrow.side_by_side)
+        self.assertFalse(narrow.split_handle.isVisible())
 
     def test_invalid_rename_shows_warning(self):
         client_id = self.approved("C2627-Γ1", "Board1", "a")
