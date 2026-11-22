@@ -339,14 +339,21 @@ QScrollBar::add-page, QScrollBar::sub-page {{
 }}
 #portState {{
     font-size: {m.font_pt(FONT_SMALL)}pt;
+    color: {LIVE};
+}}
+#portState[portOpen="true"] {{
+    color: {CONNECTED};
 }}
 #enrollmentPortButton {{
     background: {LIVE};
     border: 1px solid {LIVE};
     border-radius: {px(NAV_RADIUS)}px;
     color: {WHITE};
-    padding: {px(6)}px {px(14)}px;
+    padding: {px(6)}px;
+    min-width: {px(ACTION_HEIGHT) - 2}px;
+    max-width: {px(ACTION_HEIGHT) - 2}px;
     min-height: {px(ACTION_HEIGHT) - 2}px;
+    max-height: {px(ACTION_HEIGHT) - 2}px;
 }}
 #enrollmentPortButton[portOpen="true"] {{
     background: {CONNECTED};
