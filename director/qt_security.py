@@ -1,7 +1,7 @@
 """Σελίδα «Ασφάλεια» του Director σε PySide6 (docs/ui-style.md §6).
 
 Μόνο εμφάνιση και σύνδεση σημάτων· η λογική είναι στο `director/security.py`.
-Tab «Υπολογιστές»: «Νέες εγγραφές» (θύρα, αιτήματα, κωδικός, Έγκριση/Απόρριψη)
+Tab «Υπολογιστές»: «Νέες εγγραφές» (αιτήματα, κωδικός, Έγκριση/Απόρριψη)
 και «Εγγεγραμμένοι υπολογιστές» (ανά αίθουσα, μενού ⋯). Το tab «Πιστοποιητικά»
 φαίνεται ανενεργό μέχρι να σχεδιαστεί.
 """
@@ -316,10 +316,15 @@ class SecurityPage(QWidget):
         row = QHBoxLayout(head)
         row.setContentsMargins(0, 0, 0, 0)
         row.setSpacing(px(8))
-        row.addWidget(_label("Νέες εγγραφές", "cardTitle"), 0, Qt.AlignmentFlag.AlignTop)
+        row.addWidget(_label("Νέες εγγραφές", "cardTitle"))
         row.addStretch(1)
         card, layout = _card(head)
         self.requests_card = card
+        # Οι εγγραφές είναι πάντα ανοιχτές· κείμενο μόνο αν η θύρα δεν άνοιξε ή γέμισε.
+        self.port_notice = _label("", "result")
+        self.port_notice.setWordWrap(True)
+        self.port_notice.hide()
+        layout.addWidget(self.port_notice)
         self.requests_layout = QVBoxLayout()
         self.requests_layout.setContentsMargins(0, 0, 0, 0)
         self.requests_layout.setSpacing(0)
@@ -347,12 +352,6 @@ class SecurityPage(QWidget):
         return card
 
     # --- ενέργειες ---------------------------------------------------------
-    def toggle_port(self) -> None:
-        error = self.model.set_port_open(not self.model.port_open)
-        if error:
-            self.warn(error)
-        self.refresh()
-
     def approve(self, request_id: str, code: str) -> None:
         row = self.request_rows.get(request_id)
         if row is None or row.final:
@@ -432,6 +431,9 @@ class SecurityPage(QWidget):
     # --- ανανέωση ----------------------------------------------------------
     def refresh(self) -> None:
         now = self.clock()
+        notice = self.model.port_notice()
+        self.port_notice.setText(notice or "")
+        self.port_notice.setVisible(bool(notice))
         self._refresh_requests(now)
         self._refresh_rooms(now)
         self._relayout()

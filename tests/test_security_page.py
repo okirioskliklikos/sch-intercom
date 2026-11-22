@@ -12,23 +12,27 @@ import tempfile
 import time
 import unittest
 import uuid
+from unittest import mock
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from director.main import RegistryTrust
 from director.security import (LAST_SEEN_SAVE_SECONDS, TEXT_APPROVED, TEXT_DENIED,
-                               TEXT_EXPIRED, TEXT_NEVER, TEXT_REJECTED, LastSeenStore,
+                               TEXT_EXPIRED, TEXT_FULL_NOTICE, TEXT_NEVER, TEXT_REJECTED,
+                               LastSeenStore, full_notice,
                                SecurityModel, ago_text, expires_text, last_seen_path)
 from shared.client_registry import SignedClientRegistry
 from shared.device_identity import create_device_identity
-from shared.enrollment import (REQUEST_TTL, EnrollmentServer, enroll_client, make_request)
+from shared.enrollment import (MAX_PENDING, REQUEST_TTL, TEXT_FULL, EnrollmentServer,
+                               RequestsFullError, enroll_client, make_request)
 from tests.tls_support import LocalTLSFixture
 
 try:
     from PySide6.QtTest import QTest
     from PySide6.QtWidgets import QApplication
     from director.qt_gui import DirectorWindow, create_application, release_window
-    from director.qt_security import RESULT_SECONDS, PORT_CLOSED, PORT_OPEN
+    from PySide6.QtWidgets import QLabel, QPushButton
+    from director.qt_security import RESULT_SECONDS
 except ImportError as exc:  # pragma: no cover - εξαρτάται από το περιβάλλον
     QT_ERROR = str(exc)
 else:
@@ -169,6 +173,7 @@ class SecurityFixture(LocalTLSFixture):
                                            port=0, pending_file=self.root / "pending.json",
                                            log=lambda _m: None, clock=self.clock)
         self.addCleanup(self.enrollment.stop)
+        self.assertTrue(self.enrollment.open())  # όπως στον Director: πάντα ανοιχτή
         self.broadcaster = FakeBroadcaster()
         self.last_seen = LastSeenStore(last_seen_path(self.registry_file), clock=self.clock,
                                        log=lambda _m: None)
@@ -205,21 +210,57 @@ class SecurityFixture(LocalTLSFixture):
 
 
 class SecurityModelTests(SecurityFixture, unittest.TestCase):
-    def test_port_starts_closed_and_toggles(self):
-        self.assertFalse(self.model.port_open)
-        self.assertIsNone(self.model.set_port_open(True))
-        self.assertTrue(self.model.port_open)
-        self.assertIsNone(self.model.set_port_open(False))
-        self.assertFalse(self.model.port_open)
+    def test_registration_always_open_without_notice(self):
+        # Απόφαση χρήστη 22/11/2026: εγγραφές πάντα ανοιχτές, χωρίς κουμπί θύρας.
+        self.assertTrue(self.enrollment.is_open)
+        self.assertIsNone(self.model.port_notice())
+        self.assertFalse(hasattr(self.model, "set_port_open"))
 
-    def test_busy_port_reports_error(self):
+    def test_busy_port_reports_notice_and_approval_still_works(self):
+        self.enrollment.stop()
+        client_id, code = self.submit()
         with socket.socket() as busy:
             busy.bind(("127.0.0.1", 0))
             busy.listen(1)
             self.enrollment.port = busy.getsockname()[1]
-            error = self.model.set_port_open(True)
-        self.assertIn("δεν άνοιξε", error)
-        self.assertFalse(self.model.port_open)
+            self.assertFalse(self.enrollment.open())
+        notice = self.model.port_notice()
+        self.assertIn(f"Η θύρα εγγραφής {self.enrollment.port} δεν άνοιξε", notice)
+        result = self.model.approve(self.request_id(), code)
+        self.assertTrue(result.ok)
+        self.assertIsNotNone(self.registry.approved_entry(client_id))
+
+    def test_limit_is_fifty_requests(self):
+        self.assertEqual(MAX_PENDING, 50)
+        self.assertEqual(TEXT_FULL_NOTICE, "Συμπληρώθηκε το όριο αιτημάτων (50): νέα αιτήματα απορρίπτονται")
+
+    def test_full_list_rejects_new_requests_until_one_is_answered(self):
+        with mock.patch.object(self.enrollment, "_max_pending", 2):
+            _first, code = self.submit(name="PC1", device="d1")
+            self.submit(name="PC2", device="d2")
+            self.assertTrue(self.enrollment.is_full)
+            self.assertEqual(self.model.port_notice(), full_notice(2))
+            with self.assertRaises(RequestsFullError) as caught:
+                self.submit(name="PC3", device="d3")
+            self.assertEqual(str(caught.exception), TEXT_FULL)
+            self.assertEqual(len(self.model.requests()), 2)
+            # Νέο αίτημα του ίδιου υπολογιστή αντικαθιστά το παλιό και δεν μετρά διπλά.
+            self.submit(name="PC2", device="d2")
+            self.assertEqual(len(self.model.requests()), 2)
+            # Μόλις απαντηθεί ένα, χωρά νέο.
+            self.assertTrue(self.model.approve(self.request_id(name="PC1"), code).ok)
+            self.assertIsNone(self.model.port_notice())
+            self.submit(name="PC3", device="d3")
+            self.assertEqual(len(self.model.requests()), 2)
+
+    def test_expired_requests_free_the_list(self):
+        with mock.patch.object(self.enrollment, "_max_pending", 1):
+            self.submit(name="PC1", device="d1")
+            self.assertTrue(self.enrollment.is_full)
+            self.clock.now += REQUEST_TTL + 1
+            self.assertFalse(self.enrollment.is_full)
+            self.submit(name="PC2", device="d2")
+            self.assertEqual([r.name for r in self.model.requests()], ["PC2"])
 
     def test_requests_newest_first_without_code(self):
         self.submit(name="Board1", device="d1")
@@ -256,7 +297,8 @@ class SecurityModelTests(SecurityFixture, unittest.TestCase):
 
     def test_correct_code_approves_even_with_port_closed(self):
         client_id, code = self.submit()
-        self.assertFalse(self.model.port_open)
+        self.enrollment.stop()
+        self.assertFalse(self.enrollment.is_open)
         result = self.model.approve(self.request_id(), code)
         self.assertEqual((result.text, result.ok, result.final), (TEXT_APPROVED, True, True))
         entry = self.registry.approved_entry(client_id)
@@ -383,26 +425,28 @@ class SecurityPageTests(SecurityFixture, unittest.TestCase):
         keys = list(window.nav_buttons)
         self.assertEqual(keys.index("security") + 1, keys.index("settings"))
 
-    def test_tabs_and_port_button(self):
+    def test_tabs_and_no_port_controls(self):
         page = self.page
         self.assertTrue(page.tab_computers.isChecked())
         self.assertFalse(page.tab_certificates.isEnabled())
-        self.assertEqual((page.port_label.text(), page.port_button.text()),
-                         (PORT_CLOSED, ""))
-        self.assertEqual(page.port_label.property("portOpen"), "false")
-        self.assertEqual(page.port_button.property("portOpen"), "false")
-        self.assertEqual(page.port_button.accessibleName(), "Άνοιγμα εγγραφών")
-        page.port_button.click()
-        self.assertTrue(self.model.port_open)
-        self.assertEqual((page.port_label.text(), page.port_button.text()),
-                         (PORT_OPEN, ""))
-        self.assertEqual(page.port_label.property("portOpen"), "true")
-        self.assertEqual(page.port_button.property("portOpen"), "true")
-        self.assertEqual(page.port_button.accessibleName(), "Κλείσιμο εγγραφών")
-        page.port_button.click()
-        self.assertFalse(self.model.port_open)
-        self.assertEqual(page.port_label.property("portOpen"), "false")
-        self.assertEqual(page.port_button.property("portOpen"), "false")
+        for name in ("port_button", "port_label", "port_dot", "toggle_port"):
+            self.assertFalse(hasattr(page, name), name)
+        self.assertFalse(page.port_notice.isVisible())
+        self.assertEqual(page.port_notice.text(), "")
+        # Μόνο ο τίτλος στην κεφαλίδα της κάρτας «Νέες εγγραφές».
+        head = page.requests_card.layout().itemAt(0).widget()
+        self.assertEqual([w.text() for w in head.findChildren(QLabel)], ["Νέες εγγραφές"])
+        self.assertEqual(head.findChildren(QPushButton), [])
+
+    def test_full_list_notice_on_page(self):
+        with mock.patch.object(self.enrollment, "_max_pending", 1):
+            self.submit()
+            self.page.refresh()
+            self.assertTrue(self.page.port_notice.isVisible())
+            self.assertEqual(self.page.port_notice.text(), full_notice(1))
+            self.assertEqual(len(self.page.request_rows), 1)
+        self.page.refresh()
+        self.assertFalse(self.page.port_notice.isVisible())
 
     def test_request_row_wrong_codes_and_code_never_shown(self):
         client_id, code = self.submit()
