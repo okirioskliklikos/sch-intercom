@@ -663,14 +663,14 @@ class SecurityPageTests(SecurityFixture, unittest.TestCase):
             self.assertEqual(button.width(), button.height())
         for action in [*row.actions.values(), *header.actions.values()]:
             self.assertFalse(action.icon().isNull(), action.text())
-        # Μεγαλύτερα εικονίδια και +1pt στο κείμενο του μενού (απόφαση 22/11/2026).
+        # Μεγαλύτερα εικονίδια, κείμενο μενού ίδιο με των καρτών (απόφαση 22/11/2026).
         from director.qt_gui import px
         from shared.ui import theme
         menu = row.menu_button.menu()
         self.assertEqual(menu.objectName(), "actionMenu")
         self.assertEqual(menu.style().pixelMetric(menu.style().PixelMetric.PM_SmallIconSize),
                          px(theme.MENU_ICON))
-        self.assertGreater(menu.font().pointSizeF(), row.font().pointSizeF())
+        self.assertEqual(menu.font().pointSizeF(), row.name.font().pointSizeF())
         self.assertEqual([a.text() for a in header.menu_button.menu().actions()],
                          ["Μετονομασία αίθουσας…"])
 
