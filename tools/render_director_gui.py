@@ -4,7 +4,8 @@
     python -m tools.render_director_gui --out-dir screenshots
 
 Γράφει director-main-idle.png, director-main-live.png,
-director-main-live-muted.png και director-main-narrow.png (πολλές αίθουσες σε στενό
+director-main-live-muted.png, director-main-rooms-wide.png (λαβή αιθουσών συρμένη)
+και director-main-narrow.png (πολλές αίθουσες σε στενό
 παράθυρο: η μία κάρτα κάτω από την άλλη) με ψεύτικους
 Clients (τα 17 ενδεικτικά ονόματα του ui-design.md) και ψεύτικο μικρόφωνο.
 Χρησιμεύει για σύγκριση με το docs/mockups/ και για τα PR. Δεν είναι δοκιμή
@@ -82,6 +83,17 @@ def main() -> None:
     window.mute_button.click()
     settle(500)
     window.grab().save(str(args.out_dir / "director-main-live-muted.png"))
+    window.mute_button.click()
+    window.toggle_announcement()
+    settle(500)
+    # Λαβή ανάμεσα σε «Ανακοίνωση» και αίθουσες: σύρσιμο για πλατύτερες στήλες
+    # (σε φαρδύ παράθυρο, όπου οι κάρτες είναι δίπλα-δίπλα).
+    window.resize(m.px(1250), m.px(680))
+    settle()
+    window._drag_rooms(m.px(120))
+    window._drag_start_extra = None
+    settle()
+    window.grab().save(str(args.out_dir / "director-main-rooms-wide.png"))
     window.close()
     release_window(window)
     app.processEvents()

@@ -6,7 +6,9 @@
 """
 from __future__ import annotations
 
+import json
 import math
+from pathlib import Path
 import socket
 import threading
 import time
@@ -344,6 +346,98 @@ class _ResizeNotifier(QWidget):
         self._on_resize()
 
 
+class RoomsSplitHandle(QWidget):
+    """Λαβή ανάμεσα στην «Ανακοίνωση» και τις αίθουσες (απόφαση χρήστη 22/11/2026).
+
+    Πιάνει το κενό ανάμεσα στις κάρτες· τρεις κάθετες τελείες στο κέντρο. Σύρσιμο
+    αριστερά δίνει πλάτος στις αίθουσες, διπλό κλικ επαναφέρει την προεπιλογή.
+    """
+
+    def __init__(self, on_drag: Callable[[int], None], on_release: Callable[[], None],
+                 on_reset: Callable[[], None], parent=None):
+        super().__init__(parent)
+        self.setObjectName("roomsSplitHandle")
+        self._on_drag, self._on_release, self._on_reset = on_drag, on_release, on_reset
+        self._start: float | None = None
+        self._hover = False
+        self.setFixedWidth(px(theme.CARD_SPACING))
+        self.setCursor(Qt.CursorShape.SplitHCursor)
+        self.setToolTip("Σύρετε για πλάτος αιθουσών · διπλό κλικ: προεπιλογή")
+        self.setAttribute(Qt.WidgetAttribute.WA_Hover)
+
+    def enterEvent(self, event) -> None:
+        self._hover = True
+        self.update()
+        super().enterEvent(event)
+
+    def leaveEvent(self, event) -> None:
+        self._hover = False
+        self.update()
+        super().leaveEvent(event)
+
+    def mousePressEvent(self, event) -> None:
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._start = event.globalPosition().x()
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event) -> None:
+        if self._start is not None:
+            # Προς τα αριστερά = περισσότερο πλάτος για τις αίθουσες.
+            self._on_drag(round(self._start - event.globalPosition().x()))
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event) -> None:
+        if self._start is not None:
+            self._start = None
+            self._on_release()
+        super().mouseReleaseEvent(event)
+
+    def mouseDoubleClickEvent(self, event) -> None:
+        self._start = None
+        self._on_reset()
+
+    def paintEvent(self, _event) -> None:
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QColor(theme.TEXT_MUTED if self._hover else theme.CONTROL_BORDER))
+        radius = max(1.5, px(theme.SPLIT_DOT) / 2)
+        gap = px(theme.SPLIT_DOT_GAP)
+        cx, cy = self.width() / 2, self.height() / 2
+        for offset in (-gap, 0, gap):
+            painter.drawEllipse(QPointF(cx, cy + offset), radius, radius)
+        painter.end()
+
+
+def load_layout_settings(path: Path | None) -> dict:
+    """Ρυθμίσεις εμφάνισης παραθύρου (π.χ. πλάτος αιθουσών)· άγνωστο αρχείο = προεπιλογές."""
+    if path is None:
+        return {}
+    try:
+        data = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(data, dict) or data.get("version") != 1:
+        return {}
+    extra = data.get("rooms_extra_width")
+    if type(extra) not in (int, float) or not 0 <= extra <= 10000:
+        return {}
+    return {"rooms_extra_width": float(extra)}
+
+
+def save_layout_settings(path: Path | None, settings: dict) -> None:
+    if path is None:
+        return
+    path = Path(path)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(path.suffix + ".tmp")
+        tmp.write_text(json.dumps({"version": 1, **settings}), encoding="utf-8")
+        tmp.replace(path)
+    except OSError:
+        pass  # η εμφάνιση δεν σταματά τον Director
+
+
 def _card(title: QWidget | str) -> tuple[QFrame, QVBoxLayout]:
     card = QFrame()
     card.setObjectName("card")
@@ -364,8 +458,15 @@ class DirectorWindow(QMainWindow):
     def __init__(self, broadcaster, microphone: DirectorMicrophone, *,
                  server_up: Callable[[], bool] = lambda: True,
                  clock: Callable[[], float] = time.monotonic,
-                 security=None, security_options: dict | None = None):
+                 security=None, security_options: dict | None = None,
+                 layout_settings: Path | None = None):
         super().__init__()
+        # Επιπλέον πλάτος αιθουσών από τη λαβή, σε px του mockup (ανεξάρτητο κλίμακας).
+        self._layout_settings = layout_settings
+        self._rooms_extra = load_layout_settings(layout_settings).get("rooms_extra_width", 0.0)
+        self._rooms_extra_max = 0
+        self._drag_start_extra: int | None = None
+        self._layout_pending = False
         self.broadcaster = broadcaster
         self.security = security
         self.security_page = None
@@ -507,7 +608,7 @@ class DirectorWindow(QMainWindow):
 
     def _build_page(self) -> QWidget:
         # Αλλαγή πλάτους σελίδας μπορεί να χωρά ή να αφαιρεί στήλη αιθουσών.
-        page = _ResizeNotifier(self._layout_rooms)
+        page = _ResizeNotifier(self._request_layout)
         page.setObjectName("page")
         self.page = page
         layout = QVBoxLayout(page)
@@ -522,11 +623,14 @@ class DirectorWindow(QMainWindow):
         columns = QGridLayout(body)
         self.main_grid = columns
         self.stacked = False
-        columns.setContentsMargins(0, 0, 0, 0)
-        columns.setHorizontalSpacing(px(theme.CARD_SPACING))
+        # Κενό ανάμεσα στις κάρτες και τη γραμμή κύλισης (ui-style.md §2).
+        columns.setContentsMargins(0, 0, px(theme.SCROLL_GAP), 0)
+        # Το οριζόντιο κενό ανάμεσα στις στήλες το πιάνει η λαβή (στήλη 1).
+        columns.setHorizontalSpacing(0)
         columns.setVerticalSpacing(px(theme.CARD_SPACING))
         columns.setColumnStretch(0, 1)
         columns.setColumnStretch(1, 0)
+        columns.setColumnStretch(2, 0)
         columns.setRowStretch(0, 1)
         columns.setRowStretch(1, 0)
 
@@ -535,7 +639,7 @@ class DirectorWindow(QMainWindow):
             QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         columns.addWidget(self.announcement_card, 0, 0)
 
-        self.rooms_area = _ResizeNotifier(self._layout_rooms)
+        self.rooms_area = _ResizeNotifier(self._request_layout)
         self.rooms_area.setSizePolicy(
             QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Expanding)
         right_top = QVBoxLayout(self.rooms_area)
@@ -545,12 +649,15 @@ class DirectorWindow(QMainWindow):
         self.rooms_card.setSizePolicy(
             QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Expanding)
         right_top.addWidget(self.rooms_card)
-        columns.addWidget(self.rooms_area, 0, 1)
+        columns.addWidget(self.rooms_area, 0, 2)
+        self.split_handle = RoomsSplitHandle(self._drag_rooms, self._save_rooms_extra,
+                                             self._reset_rooms_extra)
+        columns.addWidget(self.split_handle, 0, 1, 2, 1)
 
         self.selection_card = self._build_selection_card()
         self.selection_card.setSizePolicy(
             QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Fixed)
-        columns.addWidget(self.selection_card, 1, 1)
+        columns.addWidget(self.selection_card, 1, 2)
 
         self.page_scroll = QScrollArea()
         self.page_scroll.setObjectName("pageScroll")
@@ -572,6 +679,8 @@ class DirectorWindow(QMainWindow):
             grid.removeWidget(widget)
         free = 16777215  # QWIDGETSIZE_MAX: χωρίς σταθερό πλάτος
         if stacked:
+            grid.setHorizontalSpacing(px(theme.CARD_SPACING))
+            self.split_handle.hide()
             grid.addWidget(self.announcement_card, 0, 0)
             grid.addWidget(self.rooms_area, 1, 0)
             grid.addWidget(self.selection_card, 2, 0)
@@ -583,9 +692,10 @@ class DirectorWindow(QMainWindow):
             self.rooms_area.setSizePolicy(QSizePolicy.Policy.Preferred,
                                           QSizePolicy.Policy.Preferred)
         else:
+            grid.setHorizontalSpacing(0)
             grid.addWidget(self.announcement_card, 0, 0)
-            grid.addWidget(self.rooms_area, 0, 1)
-            grid.addWidget(self.selection_card, 1, 1)
+            grid.addWidget(self.rooms_area, 0, 2)
+            grid.addWidget(self.selection_card, 1, 2)
             for row, stretch in enumerate((1, 0, 0, 0)):
                 grid.setRowStretch(row, stretch)
             self.rooms_area.setSizePolicy(QSizePolicy.Policy.Preferred,
@@ -861,9 +971,31 @@ class DirectorWindow(QMainWindow):
         available = (self.page.width() - margins.left() - margins.right()
                      - px(theme.CARD_SPACING) - announce
                      - card.left() - card.right() - 2
-                     - px(theme.SCROLLBAR) - px(6))
+                     - self._scroll_reserve())
         spacing = self.room_grid.horizontalSpacing()
         return max(0, (available + spacing) // (column_width + spacing))
+
+    def _request_layout(self) -> None:
+        """Αναδιάταξη μετά από αλλαγή μεγέθους, στον επόμενο κύκλο γεγονότων.
+
+        Το resizeEvent έρχεται μέσα από το setGeometry του layout· αν εκεί αλλάξει
+        η θέση των καρτών στο ίδιο grid (δίπλα-δίπλα ↔ η μία κάτω από την άλλη), το
+        Qt μπορεί να καταρρεύσει (segfault όταν στενεύει και χαμηλώνει μαζί το
+        παράθυρο). Γι' αυτό η αναδιάταξη γίνεται αμέσως μετά, μία φορά.
+        """
+        if not self._layout_pending:
+            self._layout_pending = True
+            QTimer.singleShot(0, self._run_requested_layout)
+
+    def _run_requested_layout(self) -> None:
+        self._layout_pending = False
+        if self.page is not None:
+            self._layout_rooms()
+
+    @staticmethod
+    def _scroll_reserve() -> int:
+        """Χώρος για τη γραμμή κύλισης της σελίδας και το κενό πριν από αυτή."""
+        return px(theme.SCROLLBAR) + px(6) + px(theme.SCROLL_GAP)
 
     def _announce_min_width(self) -> int:
         return max(px(theme.ANNOUNCE_MIN_WIDTH),
@@ -875,7 +1007,7 @@ class DirectorWindow(QMainWindow):
             return True
         margins = self.page.layout().contentsMargins()
         available = (self.page.width() - margins.left() - margins.right()
-                     - px(theme.SCROLLBAR) - px(6))
+                     - self._scroll_reserve())
         needed = (self._announce_min_width() + px(theme.CARD_SPACING)
                   + self._right_column_width())
         return needed <= available
@@ -888,7 +1020,7 @@ class DirectorWindow(QMainWindow):
                     self.selection_card.minimumSizeHint().width(),
                     self.rooms_title.sizeHint().width() + card.left() + card.right() + 2,
                     self.empty_rooms.sizeHint().width() + card.left() + card.right() + 2)
-                + px(theme.SCROLLBAR) + px(6))
+                + self._scroll_reserve())
 
     def _update_page_minimum(self) -> None:
         """Το παράθυρο δεν στενεύει τόσο ώστε να κόβονται κάρτες δεξιά."""
@@ -930,6 +1062,7 @@ class DirectorWindow(QMainWindow):
         if not self.room_rows:
             # Χωρίς αίθουσες: δίπλα-δίπλα μόνο αν χωρά και το κείμενο «Δεν έχει συνδεθεί…».
             self._set_stacked(not self._empty_side_by_side_fits())
+            self.split_handle.hide()  # χωρίς αίθουσες δεν υπάρχει τι να φαρδύνει
             if not self.stacked:
                 self._fix_right_column_width()
             return
@@ -942,12 +1075,14 @@ class DirectorWindow(QMainWindow):
         spacing = self.room_grid.horizontalSpacing()
         self._set_stacked(not self._side_by_side_fits(len(names), width, chrome))
         if self.stacked:
-            inner = (self.page.width() - px(theme.SCROLLBAR) - px(6)
+            inner = (self.page.width() - self._scroll_reserve()
                      - margins.left() - margins.right() - 2)
             columns = max(1, (inner + spacing) // (width + spacing))
             rows = math.ceil(len(names) / columns)
             rows_fit = rows
             rows, columns = rows, math.ceil(len(names) / rows)
+            # Όλο το πλάτος της κάρτας στις στήλες, ώστε τα ονόματα να μην κόβονται άσκοπα.
+            width = max(width, (inner - spacing * (columns - 1)) // columns)
         else:
             available = self.rooms_area.height() - chrome
             rows_fit = max(1, available // row_height)
@@ -961,9 +1096,11 @@ class DirectorWindow(QMainWindow):
                 self.room_grid.removeWidget(row)
             for index, room in enumerate(names):
                 self.room_grid.addWidget(self.room_rows[room], index % rows, index // rows)
+        scrolls = rows > rows_fit
+        if not self.stacked:
+            width += self._room_extra_per_column(columns, width, scrolls)
         for row in self.room_rows.values():
             row.setFixedWidth(width)
-        scrolls = rows > rows_fit
         scrollbar = px(theme.SCROLLBAR) + px(6) if scrolls else 0
         self.room_scroll.setVerticalScrollBarPolicy(
             Qt.ScrollBarPolicy.ScrollBarAsNeeded if scrolls else
@@ -971,9 +1108,61 @@ class DirectorWindow(QMainWindow):
         grid_width = width * columns + self.room_grid.horizontalSpacing() * (columns - 1)
         self.room_grid_widget.setFixedSize(grid_width, rows * row_height)
         self.room_scroll.setFixedSize(grid_width + scrollbar, min(rows, rows_fit) * row_height)
+        self.split_handle.setVisible(not self.stacked)
         if self.stacked:
             return
         self._fix_right_column_width()
+
+    def _room_extra_per_column(self, columns: int, width: int, scrolls: bool) -> int:
+        """Πλάτος που πρόσθεσε η λαβή, μοιρασμένο στις στήλες αιθουσών.
+
+        Ποτέ τόσο ώστε η «Ανακοίνωση» να πέσει κάτω από το ελάχιστο πλάτος της.
+        """
+        if self.page is None:
+            return 0
+        margins = self.page.layout().contentsMargins()
+        card = self.rooms_card_layout.contentsMargins()
+        spacing = self.room_grid.horizontalSpacing()
+        scrollbar = px(theme.SCROLLBAR) + px(6) if scrolls else 0
+        auto = (columns * width + spacing * (columns - 1) + scrollbar
+                + card.left() + card.right() + 2)
+        auto = max(auto, self.selection_card.minimumSizeHint().width())
+        available = (self.page.width() - margins.left() - margins.right()
+                     - px(theme.CARD_SPACING) - self._announce_min_width()
+                     - self._scroll_reserve())
+        self._rooms_extra_max = max(0, available - auto)
+        extra = min(self._rooms_extra_px(), self._rooms_extra_max)
+        return max(0, extra) // max(1, columns)
+
+    @property
+    def rooms_extra_width(self) -> int:
+        """Επιπλέον πλάτος αιθουσών σε πραγματικά pixel (για δοκιμές)."""
+        return min(self._rooms_extra_px(), self._rooms_extra_max)
+
+    def _rooms_extra_px(self) -> int:
+        return px(self._rooms_extra) if self._rooms_extra > 0 else 0
+
+    def _scale(self) -> float:
+        return px(1000) / 1000
+
+    def _drag_rooms(self, delta: int) -> None:
+        if self._drag_start_extra is None:
+            self._drag_start_extra = self.rooms_extra_width
+        real = max(0, min(self._drag_start_extra + delta, self._rooms_extra_max))
+        self._rooms_extra = real / self._scale()
+        self._room_shape = None
+        self._layout_rooms()
+
+    def _save_rooms_extra(self) -> None:
+        self._drag_start_extra = None
+        save_layout_settings(self._layout_settings,
+                             {"rooms_extra_width": round(self._rooms_extra, 1)})
+
+    def _reset_rooms_extra(self) -> None:
+        self._rooms_extra = 0.0
+        self._room_shape = None
+        self._layout_rooms()
+        self._save_rooms_extra()
 
     def _right_column_width(self) -> int:
         return max(self.rooms_card.sizeHint().width(),
@@ -1098,6 +1287,10 @@ class GuiRuntime:
         self.trust = trust
         self.last_seen = last_seen
         self.security_options = security_options
+        # Ρυθμίσεις εμφάνισης δίπλα στο μητρώο (π.χ. ~/.school-intercom/director-gui.json).
+        registry_file = getattr(args, "registry_file", None)
+        self.layout_settings = (Path(registry_file).with_name("director-gui.json")
+                                if registry_file is not None else None)
         self.stop = threading.Event()
         self.broadcaster = AudioBroadcaster(max_clients=MAX_CLIENTS,
                                             on_event=lambda s: print(s, flush=True))
@@ -1143,7 +1336,8 @@ class GuiRuntime:
         self.window = DirectorWindow(
             self.broadcaster, self.microphone,
             server_up=lambda: all(thread.is_alive() for thread in core),
-            security=security, security_options=self.security_options)
+            security=security, security_options=self.security_options,
+            layout_settings=self.layout_settings)
         return self.window
 
     def shutdown(self) -> None:
