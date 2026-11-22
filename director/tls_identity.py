@@ -20,6 +20,7 @@ from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.x509.oid import ExtendedKeyUsageOID, NameOID
 
 from shared.device_identity import NO_EXPIRY, _write_secret
+from shared.manager_key import password_path, write_protected
 from shared.transport_security import DEFAULT_SERVER_NAME
 
 
@@ -30,7 +31,7 @@ def create_director_identity(certfile: Path, keyfile: Path, *,
     Επιστρέφει το SHA-256 fingerprint για επιβεβαίωση εκτός δικτύου στους Clients.
     """
     certfile, keyfile = Path(certfile), Path(keyfile)
-    if certfile.exists() or keyfile.exists():
+    if certfile.exists() or keyfile.exists() or password_path(keyfile).exists():
         raise FileExistsError("Υπάρχει ήδη ταυτότητα TLS· δεν αντικαθίσταται")
     key = ec.generate_private_key(ec.SECP256R1())
     name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, server_name)])
@@ -49,14 +50,16 @@ def create_director_identity(certfile: Path, keyfile: Path, *,
         .add_extension(x509.ExtendedKeyUsage([ExtendedKeyUsageOID.SERVER_AUTH]), critical=False)
         .add_extension(x509.SubjectKeyIdentifier.from_public_key(key.public_key()), critical=False)
         .sign(key, hashes.SHA256()))
-    # Το Director φορτώνει σήμερα κλειδί χωρίς κωδικό· η κρυπτογράφηση έρχεται με το backup 4.2C.
-    _write_secret(keyfile, key.private_bytes(serialization.Encoding.PEM,
-                                             serialization.PrivateFormat.PKCS8,
-                                             serialization.NoEncryption()))
+    # 4.2C2: κρυπτογραφημένο PKCS#8, κωδικός στο .pass (DPAPI στα Windows).
+    keyfile.parent.mkdir(parents=True, exist_ok=True)
+    write_protected(keyfile, key.private_bytes(serialization.Encoding.PEM,
+                                               serialization.PrivateFormat.PKCS8,
+                                               serialization.NoEncryption()))
     try:
         _write_secret(certfile, certificate.public_bytes(serialization.Encoding.PEM))
     except BaseException:
         keyfile.unlink(missing_ok=True)
+        password_path(keyfile).unlink(missing_ok=True)
         raise
     return certificate.fingerprint(hashes.SHA256()).hex(":").upper()
 

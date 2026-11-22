@@ -140,8 +140,12 @@ class SignedClientRegistry:
                  *, key_password: bytes | None = None):
         self.path = Path(path)
         self._cert_pem = Path(manager_cert).read_bytes()
-        self._signing_key = serialization.load_pem_private_key(
-            Path(manager_key).read_bytes(), password=key_password)
+        if key_password is None:
+            from shared.manager_key import load_private_key
+            self._signing_key = load_private_key(manager_key)
+        else:
+            self._signing_key = serialization.load_pem_private_key(
+                Path(manager_key).read_bytes(), password=key_password)
         cert_pub = x509.load_pem_x509_certificate(self._cert_pem).public_key()
         if cert_pub.public_bytes(serialization.Encoding.DER,
                               serialization.PublicFormat.SubjectPublicKeyInfo) != (
