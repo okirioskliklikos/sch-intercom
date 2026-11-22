@@ -13,7 +13,7 @@ from collections.abc import Callable
 
 from PySide6.QtCore import QRegularExpression, QSize, Qt
 from PySide6.QtGui import QAction, QColor, QFontDatabase, QPalette, QRegularExpressionValidator
-from PySide6.QtWidgets import (QFrame, QGridLayout, QHBoxLayout, QInputDialog, QLabel,
+from PySide6.QtWidgets import (QApplication, QFrame, QProxyStyle, QStyle, QGridLayout, QHBoxLayout, QInputDialog, QLabel,
                                QLineEdit, QMenu,
                                QMessageBox, QPushButton, QScrollArea, QSizePolicy,
                                QToolButton, QVBoxLayout, QWidget)
@@ -47,7 +47,16 @@ def _section_head(title: str) -> tuple[QWidget, QLabel]:
 
 def _menu_icon(name: str, color: str = theme.TEXT_MUTED):
     """Εικονίδιο στοιχείου μενού: γραμμικό 16px όπως τα κουμπιά (ui-style.md §6)."""
-    return icons.icon(name, color, size=px(16), stroke_width=2.0)
+    return icons.icon(name, color, size=px(theme.MENU_ICON), stroke_width=1.8)
+
+
+class _MenuStyle(QProxyStyle):
+    """Μεγαλύτερα εικονίδια στα μενού ⋮ (το QSS icon-size δεν ισχύει για QMenu)."""
+
+    def pixelMetric(self, metric, option=None, widget=None):
+        if metric == QStyle.PixelMetric.PM_SmallIconSize:
+            return px(theme.MENU_ICON)
+        return super().pixelMetric(metric, option, widget)
 
 
 def _menu_button(accessible: str, actions: list[QAction | None]) -> QToolButton:
@@ -62,6 +71,10 @@ def _menu_button(accessible: str, actions: list[QAction | None]) -> QToolButton:
     button.setCursor(Qt.CursorShape.PointingHandCursor)
     button.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
     menu = QMenu(button)
+    menu.setObjectName("actionMenu")
+    style = _MenuStyle(QApplication.style().name())
+    style.setParent(menu)
+    menu.setStyle(style)
     for action in actions:
         if action is None:
             menu.addSeparator()

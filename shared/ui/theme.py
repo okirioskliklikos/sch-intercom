@@ -79,6 +79,7 @@ FONT_SMALL = 0.92        # pill «Προεπισκόπηση»
 FONT_NAV = 1.08          # αριστερό μενού
 FONT_ROOM = 1.1          # ονόματα αιθουσών
 FONT_CARD_TITLE = 1.15   # τίτλος κάρτας
+FONT_MENU = 1.08         # μενού ⋮ (≈ +1pt στα 12pt, απόφαση χρήστη 22/11/2026)
 FONT_PAGE_TITLE = 1.4    # τίτλος σελίδας
 
 
@@ -139,6 +140,7 @@ METER_BAR = 6
 METER_GAP = 4
 SCROLLBAR = 8               # πλάτος scroll bar, χωρίς βελάκια
 SCROLLBAR_HANDLE_MIN = 32   # ελάχιστο μήκος λαβής
+MENU_ICON = 20              # εικονίδια στοιχείων μενού ⋮
 SCROLL_GAP = 12             # κενό περιεχομένου πριν από τη γραμμή κύλισης (σελίδα «Ασφάλεια»)
 # Σελίδα «Ασφάλεια» (ui-style.md §6)
 ACTION_HEIGHT = 32          # κουμπιά Έγκριση/Απόρριψη και πεδίο κωδικού
@@ -424,6 +426,10 @@ QScrollBar::add-page, QScrollBar::sub-page {{
 }}
 #rowMenu:hover, #rowMenu:pressed {{
     background: {WINDOW_BG};
+}}
+#actionMenu {{
+    font-size: {m.font_pt(FONT_MENU)}pt;
+    icon-size: {px(MENU_ICON)}px;
 }}
 #rowMenu::menu-indicator {{
     width: 0;
