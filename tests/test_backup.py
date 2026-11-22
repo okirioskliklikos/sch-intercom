@@ -222,8 +222,10 @@ class BackupTests(unittest.TestCase):
         original = (self.new / "clients-registry.json").read_bytes()
         try:
             self.transfer(fail_after=2)
-        except RuntimeError:
-            pass
+        except KeyboardInterrupt:
+            # Simulates a terminated restore: the recovery journal must remain.
+            self.assertTrue((self.new / "restore-journal.json").exists())
+            self.assertTrue(rollback(self.new))
         self.assertEqual((self.new / "clients-registry.json").read_bytes(), original)
         self.assertFalse((self.new / "restore-journal.json").exists())
         self.assertFalse(rollback(self.new))
