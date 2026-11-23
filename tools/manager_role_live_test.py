@@ -204,11 +204,11 @@ class LiveTest:
         p2 = self.b.command(f"set-room {self.one.client_id} Z1", "Εφεδρικός")
         rc1, _ = self.b.offline(
             "director.main", "--approve-client-cert",
-            str(self.one.dir / "credentials" / "client.crt"),
+            str(self.one.dir / "credentials" / "client-cert.pem"),
             "--approve-room", ROOM)
         rc2, _ = self.b.offline("director.main",
                                "--revoke-client", str(self.one.client_id))
-        return p1 and p2 and rc2 == 6 and self.b.registry.read_bytes() == previous, (
+        return p1 and p2 and rc1 == 6 and rc2 == 6 and self.b.registry.read_bytes() == previous, (
             f"CLI αρνήσεις={p1}/{p2}, offline revoke={rc2}, approve={rc1}")
 
     def s07(self):
