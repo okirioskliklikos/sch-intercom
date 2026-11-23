@@ -147,6 +147,7 @@ class RegistrySyncTests(unittest.TestCase):
 
     def test_offline_locked_import_but_status_export_allowed(self):
         from director.backup import manager_lock
+        self.approve(self.ra, "one")
         source = self.export_a()
         with manager_lock(self.b):
             self.assertEqual(sync_main([
