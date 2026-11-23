@@ -29,7 +29,7 @@
 | `gui_settings` | `director-gui.json` | όχι | προεπιλεγμένα πλάτη |
 | `media_manifest` | λίστα MP3 (όνομα, μέγεθος, SHA-256, ρόλος) | όχι | καμία αναφορά MP3 |
 
-Δεν μπαίνουν: logs, `restore-journal.json`, φάκελοι `pre-restore-*`, `last-backup.json`, προσωρινά αρχεία.
+Δεν μπαίνουν: logs, `restore-journal.json`, φάκελοι `pre-restore-*`, `last-backup.json`, προσωρινά αρχεία, και τα τοπικά αρχεία της 4.2D (`manager-state.json`, `registry-export.json`, `registry-merges.log`, βλ. [phase4-2d.md](phase4-2d.md)). Μετά το restore ο υπολογιστής γίνεται Εφεδρικός με σταματημένη εξυπηρέτηση (phase4-2d.md §3).
 
 ### Μελλοντικές ενότητες (μόνο ως πλαίσιο, όχι στο 4.2C)
 
