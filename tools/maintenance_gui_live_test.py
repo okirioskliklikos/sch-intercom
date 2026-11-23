@@ -201,6 +201,8 @@ class LiveTest:
         self.gui.pump()
         panel = window.security_page.certificates
         expected = fingerprint(self.pc.cert)
+        hidden = panel.fingerprint.text() == m.fingerprint_short(expected)
+        panel.reveal_button.click()
         shown = panel.fingerprint.text().replace("\n", ":")
         key = panel.key_state.text()
         wanted_key = m.TEXT_KEY_DPAPI if os.name == "nt" else m.TEXT_KEY_PASSFILE
@@ -208,7 +210,7 @@ class LiveTest:
         from PySide6.QtWidgets import QApplication
         copied = QApplication.clipboard().text()
         self.gui.screenshot("pistopoiitika")
-        ok = (shown == expected and wanted_key in key and copied == expected
+        ok = (hidden and shown == expected and wanted_key in key and copied == expected
               and panel.registry_state.text() == m.TEXT_SIGNATURE_OK
               and panel.rows.values["expires"].text() == m.TEXT_NO_EXPIRY)
         return ok, f"αποτύπωμα ίδιο {shown == expected}, κλειδί «{key}», πρόχειρο {copied == expected}"
@@ -287,7 +289,7 @@ class LiveTest:
             dialog.path.setText(str(self.file))
             dialog.password.setText(PASSWORD)
             dialog.load()
-            seen["rows"] = {k: dialog.rows.values[k].text() for k in dialog.rows.values}
+            seen["rows"] = {k: dialog.rows.values[k].text() for k in dialog.rows.values if k != "media"}
             seen["before_consent"] = dialog.restore.isEnabled()
             seen["consent"] = dialog.consent.text()
             seen["media"] = dialog.media.isChecked() and dialog.info["media_copy_available"]

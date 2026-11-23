@@ -120,6 +120,8 @@ class LogicTests(unittest.TestCase):
     # --- κωδικός ----------------------------------------------------------
     def test_passphrase_rules(self):
         self.assertEqual(m.passphrase_problem("κοντός"), m.TEXT_PASS_SHORT)
+        self.assertEqual(m.passphrase_problem("1234567"), m.TEXT_PASS_SHORT)
+        self.assertIsNone(m.passphrase_problem("12345678", "12345678"))
         self.assertEqual(m.passphrase_problem("123456789012", "123456789013"),
                          m.TEXT_PASS_MISMATCH)
         self.assertIsNone(m.passphrase_problem("123456789012", "123456789012"))
@@ -329,7 +331,12 @@ class QtTests(unittest.TestCase):
         self.assertFalse(page.tab_computers.isChecked())
         panel = page.certificates
         identity = self.manager.model.identity()
+        self.assertEqual(panel.fingerprint.text(), m.fingerprint_short(identity.fingerprint))
+        self.assertNotIn(identity.fingerprint, panel.fingerprint.text())
+        panel.reveal_button.click()
         self.assertEqual(panel.fingerprint.text(), m.fingerprint_lines(identity.fingerprint))
+        panel.reveal_button.click()
+        self.assertEqual(panel.fingerprint.text(), m.fingerprint_short(identity.fingerprint))
         self.assertIn(identity.key_text(), panel.key_state.text())
         self.assertEqual(panel.key_state.property("tone"), "ok")
         self.assertEqual(panel.registry_state.text(), m.TEXT_SIGNATURE_OK)

@@ -95,10 +95,13 @@ def _json(data: bytes) -> dict:
     return value
 
 
+PASSWORD_MIN = 8   # Michail 23/11/2026: 8 αντί για 12
+
+
 def _password(value: str, *, strict: bool = True) -> bytes:
     value = unicodedata.normalize("NFC", value)
-    if strict and len(value) < 12:
-        raise BackupError("Ο κωδικός χρειάζεται τουλάχιστον 12 χαρακτήρες.")
+    if strict and len(value) < PASSWORD_MIN:
+        raise BackupError(f"Ο κωδικός χρειάζεται τουλάχιστον {PASSWORD_MIN} χαρακτήρες.")
     return value.encode("utf-8")
 
 

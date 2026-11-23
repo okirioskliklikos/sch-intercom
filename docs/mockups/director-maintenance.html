@@ -36,6 +36,9 @@ body { background: var(--window-bg); color: var(--text); font: 400 16px/1.35 var
 .kv { display:grid; grid-template-columns: max-content minmax(0,1fr); gap: 11px 22px; margin:0; align-items: baseline; }
 .kv dt { color:var(--text-muted); }
 .kv dd { margin:0; min-width:0; }
+.eyebtn { margin-left:auto; width:26px; height:26px; display:inline-flex; align-items:center; justify-content:center; color:var(--text-muted); border-radius:6px; }
+.eyebtn svg { width:16px; height:16px; }
+.kv dd.split { display:flex; justify-content:space-between; gap:12px; }
 .mono { font-family: var(--mono); font-size: 15px; letter-spacing: .01em; line-height:1.5; }
 .ok { color: var(--connected); }
 .err { color: var(--live); }
@@ -50,8 +53,11 @@ body { background: var(--window-bg); color: var(--text); font: 400 16px/1.35 var
 .act.danger { background: var(--live); border-color: var(--live); color:#fff; font-weight:500; }
 .act[disabled] { background:#fff; border-color:var(--card-border); color:#a3acb9; }
 .row { display:flex; gap:10px; align-items:center; flex-wrap:wrap; }
-.fp-row { display:flex; gap:16px; align-items:flex-start; }
-.cards { display:flex; gap:14px; align-items:flex-start; flex-wrap:wrap; }
+.fp-row { display:flex; gap:12px; align-items:center; }
+.cards { display:flex; gap:14px; align-items:stretch; flex-wrap:wrap; }
+.cards .card { display:flex; flex-direction:column; }
+.cards .card > .row:last-child { margin-top:auto !important; padding-top:18px; }
+.pill.same { width:96px; justify-content:center; padding:0; }
 .view { display:none; }
 .view.on { display:flex; flex-direction:column; gap:14px; }
 .view.dialog { display:none; }
@@ -105,12 +111,13 @@ body { background: var(--window-bg); color: var(--text); font: 400 16px/1.35 var
         <dl class="kv">
           <dt>Όνομα</dt><dd>school-intercom-director</dd>
           <dt>Αποτύπωμα SHA-256</dt>
-          <dd><div class="fp-row"><div class="mono">3F:A1:9C:07:5E:D2:84:B6:11:4A:E0:7D:C3:58:92:6F<br>A8:02:D7:4B:91:E6:3C:5A:0F:B4:28:E9:71:CD:06:85</div>
-            <span class="pill" style="margin-left:auto"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V6a2 2 0 0 1 2-2h9"/></svg>Αντιγραφή</span></div></dd>
+          <dd><div class="fp-row"><div class="mono">3F:A1:9C:07 … 71:CD:06:85</div>
+            <span class="eyebtn" title="Εμφάνιση αποτυπώματος"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12z"/><circle cx="12" cy="12" r="3"/></svg></span>
+            <span class="pill"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V6a2 2 0 0 1 2-2h9"/></svg>Αντιγραφή</span></div></dd>
           <dt>Δημιουργήθηκε</dt><dd>21/11/2026 18:42</dd>
           <dt>Λήξη</dt><dd>Χωρίς λήξη</dd>
-          <dt>Κλειδί</dt><dd>ECDSA P-256 · <span class="ok">● Κρυπτογραφημένο (DPAPI)</span></dd>
-          <dt>Μητρώο</dt><dd>v15 · 11 υπολογιστές · <span class="ok">υπογραφή έγκυρη ✓</span></dd>
+          <dt>Κλειδί</dt><dd class="split">ECDSA P-256<span class="ok">● Κρυπτογραφημένο (DPAPI)</span></dd>
+          <dt>Μητρώο</dt><dd class="split">v15 · 11 υπολογιστές<span class="ok">υπογραφή έγκυρη ✓</span></dd>
           <dt>Φάκελος</dt><dd><span class="ell" title="C:\Users\Γραμματεία\.school-intercom\tls">C:\Users\Γραμματεία\.school-intercom\tls</span></dd>
         </dl>
       </div>
@@ -184,7 +191,7 @@ body { background: var(--window-bg); color: var(--text); font: 400 16px/1.35 var
     <div class="dlg-body">
       <div class="field"><label>Αρχείο</label>
         <div class="row"><div class="input" style="flex:1"><span class="ell">E:\sch-intercom-backup-20261122-2241.sicb</span></div><span class="pill">Αλλαγή…</span></div></div>
-      <div class="field"><label>Κωδικός (τουλάχιστον 12 χαρακτήρες)</label>
+      <div class="field"><label>Κωδικός (τουλάχιστον 8 χαρακτήρες)</label>
         <div class="input"><span class="dots">••••••••••••••••</span><span class="eye"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12z"/><circle cx="12" cy="12" r="3"/></svg></span></div></div>
       <div class="field"><label>Επιβεβαίωση κωδικού</label>
         <div class="input focus"><span class="dots">••••••••••••••••</span><span class="ok small" style="margin-left:auto">ίδιος ✓</span></div></div>
@@ -201,18 +208,18 @@ body { background: var(--window-bg); color: var(--text); font: 400 16px/1.35 var
     <div class="dlg-title">Επαναφορά από backup<span class="x">✕</span></div>
     <div class="dlg-body">
       <div class="field"><label>Αρχείο</label>
-        <div class="row"><div class="input" style="flex:1"><span class="ell">E:\sch-intercom-backup-20261120-0815.sicb</span></div><span class="pill">Αλλαγή…</span></div></div>
+        <div class="row"><div class="input" style="flex:1"><span class="ell">E:\sch-intercom-backup-20261120-0815.sicb</span></div><span class="pill same">Αλλαγή…</span></div></div>
       <div class="field"><label>Κωδικός</label>
-        <div class="row"><div class="input" style="flex:1"><span class="dots">••••••••••••••••</span></div><span class="pill">Άνοιγμα</span></div></div>
+        <div class="row"><div class="input" style="flex:1"><span class="dots">••••••••••••••••</span></div><span class="pill same">Άνοιγμα</span></div></div>
       <div class="sep"></div>
       <dl class="kv" style="gap:9px 22px">
         <dt>Δημιουργήθηκε</dt><dd>20/11/2026 08:15 · ΓΡΑΜΜΑΤΕΙΑ-PC</dd>
         <dt>Μητρώο</dt><dd>v12 · 9 υπολογιστές · 1 αίτημα</dd>
         <dt>Ταυτότητα</dt><dd class="ok">ίδια με αυτόν τον Manager ✓</dd>
         <dt>MP3</dt><dd>4 αρχεία · <span class="err">λείπουν 2</span></dd>
+        <dt></dt><dd><div class="check"><span class="box on"><svg viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="m5 12.5 4.5 4.5L19 7.5"/></svg></span>
+          <div>Αντιγραφή των MP3 που λείπουν<div class="muted small">από sch-intercom-backup-20261120-0815-media</div></div></div></dd>
       </dl>
-      <div class="check"><span class="box on"><svg viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="m5 12.5 4.5 4.5L19 7.5"/></svg></span>
-        <div>Αντιγραφή των MP3 που λείπουν<div class="muted small">από sch-intercom-backup-20261120-0815-media</div></div></div>
       <div class="sep"></div>
       <div class="warnline">Το backup έχει παλαιότερο μητρώο (v12 &lt; v15). Εγκρίσεις και ανακλήσεις μετά τη v12 θα χαθούν.</div>
       <div class="check"><span class="box"></span><div>Συνέχεια με το παλαιότερο μητρώο</div></div>

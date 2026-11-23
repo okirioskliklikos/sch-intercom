@@ -27,7 +27,7 @@ from director.security import ago_text
 from shared.client_registry import verify_document
 from shared.manager_key import ManagerKeyError, is_protected, key_password
 
-PASSPHRASE_MIN = 12
+PASSPHRASE_MIN = backup.PASSWORD_MIN
 NO_EXPIRY_YEAR = 9999
 PRE_RESTORE_PREFIX = "pre-restore-"
 
@@ -76,6 +76,14 @@ def fingerprint_lines(fingerprint: str) -> str:
     parts = fingerprint.split(":")
     half = (len(parts) + 1) // 2
     return ":".join(parts[:half]) + "\n" + ":".join(parts[half:])
+
+
+def fingerprint_short(fingerprint: str) -> str:
+    """Κρυμμένο αποτύπωμα (προεπιλογή): τα 4 πρώτα και τα 4 τελευταία bytes."""
+    parts = fingerprint.split(":")
+    if len(parts) <= 8:
+        return fingerprint
+    return ":".join(parts[:4]) + " … " + ":".join(parts[-4:])
 
 
 def _plural(count: int, one: str, many: str) -> str:

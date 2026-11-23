@@ -17,7 +17,7 @@ from PySide6.QtCore import QSize, Qt, QTimer
 from PySide6.QtGui import QAction, QFontDatabase, QGuiApplication
 from PySide6.QtWidgets import (QApplication, QCheckBox, QDialog, QFileDialog, QFrame,
                                QGridLayout, QHBoxLayout, QLabel, QLayout, QLineEdit, QMessageBox,
-                               QPushButton, QScrollArea, QVBoxLayout, QWidget)
+                               QPushButton, QScrollArea, QToolButton, QVBoxLayout, QWidget)
 
 from director import maintenance as m
 from director.backup import EXTENSION, BackupError
@@ -157,9 +157,19 @@ class CertificatesPanel(QWidget):
         self.copy_button.setIconSize(QSize(px(theme.ICON), px(theme.ICON)))
         self.copy_button.setCursor(Qt.CursorShape.PointingHandCursor)
         self.copy_button.clicked.connect(self.copy_fingerprint)
+        self.reveal_button = QToolButton()
+        self.reveal_button.setObjectName("rowMenu")
+        self.reveal_button.setCheckable(True)
+        self.reveal_button.setIconSize(QSize(px(theme.ICON), px(theme.ICON)))
+        self.reveal_button.setFixedSize(px(26), px(26))
+        self.reveal_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.reveal_button.toggled.connect(self._show_fingerprint)
         row.addWidget(self.fingerprint, 1)
+        row.addWidget(self.reveal_button, 0, Qt.AlignmentFlag.AlignVCenter)
         row.addWidget(self.copy_button, 0, Qt.AlignmentFlag.AlignVCenter)
         self.rows.add("fingerprint", "Αποτύπωμα SHA-256", fingerprint_row)
+        self.rows.setAlignment(self.rows.labels["fingerprint"],
+                               Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
         self.rows.add("created", "Δημιουργήθηκε")
         self.rows.add("expires", "Λήξη")
         self.rows.add("key", "Κλειδί", self._pair("key"))
@@ -173,12 +183,13 @@ class CertificatesPanel(QWidget):
         page = QVBoxLayout(self)
         page.setContentsMargins(0, 0, 0, 0)
         page.addWidget(_scroll(body))
+        self._show_fingerprint(False)
         self._copied_timer = QTimer(self)
         self._copied_timer.setSingleShot(True)
         self._copied_timer.timeout.connect(lambda: self.copy_button.setText(COPY))
 
     def _pair(self, key: str) -> QWidget:
-        """«κείμενο · κατάσταση» με τη δεύτερη λέξη σε ok/err χρώμα."""
+        """Κείμενο αριστερά, κατάσταση σε ok/err χρώμα τέρμα δεξιά (σχόλιο 23/11/2026)."""
         widget = QWidget()
         row = QHBoxLayout(widget)
         row.setContentsMargins(0, 0, 0, 0)
@@ -186,8 +197,8 @@ class CertificatesPanel(QWidget):
         main = _label("", "kvValue")
         state = _label("", "kvValue")
         row.addWidget(main)
-        row.addWidget(state)
         row.addStretch(1)
+        row.addWidget(state)
         setattr(self, f"{key}_text", main)
         setattr(self, f"{key}_state", state)
         return widget
@@ -200,20 +211,33 @@ class CertificatesPanel(QWidget):
             return
         self.identity = identity
         self.rows.set("name", identity.name)
-        self.fingerprint.setText(m.fingerprint_lines(identity.fingerprint))
+        self._show_fingerprint(self.reveal_button.isChecked())
         self.rows.set("created", m.date_text(identity.created))
         self.rows.set("expires", identity.expires_text())
-        self.key_text.setText(f"{identity.algorithm} ·")
+        self.key_text.setText(identity.algorithm)
         self.key_state.setText("● " + identity.key_text())
         _repolish(self.key_state, tone="ok" if identity.key_ok else "err")
-        self.registry_text.setText(identity.registry_text()
-                                   + (" ·" if identity.registry_version is not None else ""))
+        self.registry_text.setText(identity.registry_text())
         self.registry_state.setText(m.TEXT_SIGNATURE_OK if identity.signature_ok
                                     else m.TEXT_SIGNATURE_BAD)
         self.registry_state.setVisible(identity.registry_version is not None
                                        or not identity.signature_ok)
         _repolish(self.registry_state, tone="ok" if identity.signature_ok else "err")
         self.rows.set("folder", str(identity.folder))
+
+    def _show_fingerprint(self, shown: bool) -> None:
+        """Μάτι: προεπιλογή κρυμμένο (σχόλιο 23/11/2026)· η Αντιγραφή δίνει πάντα όλο."""
+        name = "eye-off" if shown else "eye"
+        self.reveal_button.setIcon(icons.icon(name, theme.TEXT_MUTED, size=px(theme.ICON)))
+        self.reveal_button.setToolTip("Απόκρυψη αποτυπώματος" if shown
+                                      else "Εμφάνιση αποτυπώματος")
+        self.reveal_button.setAccessibleName(self.reveal_button.toolTip())
+        if self.identity is None:
+            self.fingerprint.setText("")
+            return
+        fingerprint = self.identity.fingerprint
+        self.fingerprint.setText(m.fingerprint_lines(fingerprint) if shown
+                                 else m.fingerprint_short(fingerprint))
 
     def copy_fingerprint(self) -> None:
         if self.identity is None:
@@ -413,6 +437,10 @@ class RestoreDialog(_Dialog):
         self.open_button.clicked.connect(self.load)
         self.password.returnPressed.connect(self.load)
         self.field("Κωδικός", self.password, self.open_button)
+        # Ίδιο πλάτος κουμπιών → τα δύο πεδία στοιχίζονται δεξιά (σχόλιο 23/11/2026).
+        width = max(change.sizeHint().width(), self.open_button.sizeHint().width())
+        change.setFixedWidth(width)
+        self.open_button.setFixedWidth(width)
         self.error = _label("", "warnText")
         self.error.setWordWrap(True)
         self.error.hide()
@@ -430,13 +458,19 @@ class RestoreDialog(_Dialog):
         for key, text in (("created", "Δημιουργήθηκε"), ("registry", "Μητρώο"),
                           ("identity", "Ταυτότητα"), ("mp3", "MP3")):
             self.rows.add(key, text)
-        summary.addLayout(self.rows)
+        # Checkbox στη στήλη των τιμών, ακριβώς κάτω από το «N αρχεία» (σχόλιο 23/11/2026).
+        media = QWidget()
+        media_box = QVBoxLayout(media)
+        media_box.setContentsMargins(0, 0, 0, 0)
+        media_box.setSpacing(px(1))
         self.media = QCheckBox("Αντιγραφή των MP3 που λείπουν")
         self.media.setChecked(True)
         self.media_detail = _label("", "small")
         self.media_detail.setIndent(px(23))
-        summary.addWidget(self.media)
-        summary.addWidget(self.media_detail)
+        media_box.addWidget(self.media)
+        media_box.addWidget(self.media_detail)
+        self.rows.add("media", "", media)
+        summary.addLayout(self.rows)
         self.warning_line = QFrame()
         self.warning_line.setObjectName("dialogSeparator")
         self.warning_line.setFixedHeight(1)
@@ -499,8 +533,7 @@ class RestoreDialog(_Dialog):
             self.rows.set(key, text, tone)
         self.rows.set_visible("mp3", "mp3" in rows)
         copy = info["media_copy_available"]
-        self.media.setVisible(copy)
-        self.media_detail.setVisible(copy)
+        self.rows.set_visible("media", copy)
         self.media_detail.setText("από " + path.stem + "-media")
         warning = m.preview_warning(info)
         for widget in (self.warning_line, self.warning, self.consent):
@@ -658,13 +691,13 @@ class SettingsPage(QWidget):
         self.backup_rows.add("changes", "Από τότε")
         layout.addLayout(self.backup_rows)
         layout.addSpacing(px(4))
+        layout.addStretch(1)   # κουμπί στο κάτω μέρος: ίδια ευθεία με την «Επαναφορά»
         row = QHBoxLayout()
         self.create_button = _button(CREATE_BACKUP, "primaryAction", "backup", theme.WHITE)
         self.create_button.clicked.connect(self.open_backup)
         row.addWidget(self.create_button)
         row.addStretch(1)
         layout.addLayout(row)
-        layout.addStretch(1)
         return card
 
     def _build_restore_card(self) -> QFrame:
@@ -683,6 +716,7 @@ class SettingsPage(QWidget):
         self.restore_rows.add("previous", "Προηγούμενα αρχεία", previous)
         layout.addLayout(self.restore_rows)
         layout.addSpacing(px(4))
+        layout.addStretch(1)
         row = QHBoxLayout()
         row.setSpacing(px(8))
         self.restore_button = _button(OPEN_RESTORE, "secondaryAction", "restore")
@@ -693,7 +727,6 @@ class SettingsPage(QWidget):
         row.addWidget(self.delete_button)
         row.addStretch(1)
         layout.addLayout(row)
-        layout.addStretch(1)
         return card
 
     def _arrange(self, side_by_side: bool) -> None:
@@ -702,10 +735,12 @@ class SettingsPage(QWidget):
         self.side_by_side = side_by_side
         for card in (self.backup_card, self.restore_card):
             self.grid.removeWidget(card)
-        top = Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft
-        self.grid.addWidget(self.backup_card, 0, 0, top)
+        # Δίπλα-δίπλα: ίδιο ύψος, κοινή κάτω ευθεία (σχόλιο 23/11/2026).
+        align = Qt.AlignmentFlag.AlignLeft if side_by_side \
+            else Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft
+        self.grid.addWidget(self.backup_card, 0, 0, align)
         self.grid.addWidget(self.restore_card, 0 if side_by_side else 1,
-                            1 if side_by_side else 0, top)
+                            1 if side_by_side else 0, align)
         for column in range(3):
             self.grid.setColumnStretch(column, 0)
         for row in range(3):
