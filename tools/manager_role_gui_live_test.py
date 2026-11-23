@@ -294,18 +294,17 @@ class LiveTest:
         conflict = self.gui.wait(lambda: self.gui.window.conflict_bar.isVisible(), timeout=15)
         header = self.gui.header()
         caution = self.a.director.wait_for("ΠΡΟΣΟΧΗ: εξυπηρετεί και", since=marker, timeout=10)
-        hidden = not self.gui.window.conflict_stop.isVisible()
+        both = (self.gui.window.conflict_stop.isVisible()
+                and self.gui.card.serve_button.text() == "Διακοπή εξυπηρέτησης εδώ")
         self.gui.screenshot("07-dyo-manager")
         return (bool(conflict) and header == ("Δύο Manager σε λειτουργία (Εφεδρικός)", "conflict")
-                and check_port(self.b.port) and caution is not None and hidden), (
+                and check_port(self.b.port) and caution is not None and both), (
                     f"μπάρα «{header[0]}», θύρα B {check_port(self.b.port)}, "
                     f"προειδοποίηση στον A {caution is not None}, "
-                    f"κουμπί μπάρας κρυφό στα Πιστοποιητικά {hidden}")
+                    f"κουμπί μπάρας και κάρτας στα Πιστοποιητικά {both}")
 
     def s11_stop_from_bar(self):
-        window = self.gui.window
-        window.show_page("home")
-        self.gui.pump()
+        window = self.gui.window   # ακόμη στα «Πιστοποιητικά», με την κάρτα ορατή
         visible = window.conflict_stop.isVisible()
         self.gui.answers = ["reject"]
         window.conflict_stop.click()
@@ -318,9 +317,10 @@ class LiveTest:
         window.conflict_stop.click()
         self.gui.pump()
         stopped = not check_port(self.b.port)
-        return (visible and asked and stopped and not window.conflict_bar.isVisible()
+        card = self.gui.card.serve_button.text() == "Έναρξη εξυπηρέτησης"
+        return (visible and asked and stopped and card and not window.conflict_bar.isVisible()
                 and self.gui.state().get("serving") is False), (
-                    f"κουμπί στην Κεντρική {visible}, επιβεβαίωση (Άκυρο κράτησε) {asked}, "
+                    f"κουμπί μπάρας {visible}, κάρτα ενημερώθηκε {card}, επιβεβαίωση (Άκυρο κράτησε) {asked}, "
                     f"θύρα B κλειστή {stopped}")
 
     def s12_promote_and_serve(self):

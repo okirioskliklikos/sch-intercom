@@ -263,12 +263,11 @@ class WindowTests(unittest.TestCase):
         window.show_page("security")
         window.security_page.show_tab("Πιστοποιητικά")
         self.settle()
-        # Στα «Πιστοποιητικά» το ίδιο κουμπί είναι στην κάρτα ρόλου.
-        self.assertFalse(window.conflict_stop.isVisible())
+        # Και στα «Πιστοποιητικά» (απόφαση χρήστη 23/11/2026), μαζί με το κουμπί της κάρτας.
+        self.assertTrue(window.conflict_stop.isVisible())
         card = window.security_page.role_card
         self.assertEqual(card.serve_button.text(), "Διακοπή εξυπηρέτησης εδώ")
         self.assertEqual(card.serve_button.objectName(), "dangerAction")
-        window.security_page.show_tab("Υπολογιστές")
         window.conflict_stop.click()             # Άκυρο: τίποτα δεν αλλάζει
         self.settle()
         self.assertIsInstance(self.dialogs[-1], qt_role.StopDialog)
@@ -282,6 +281,9 @@ class WindowTests(unittest.TestCase):
         self.assertFalse(self.state().serving)
         self.assertFalse(window.conflict_bar.isVisible())
         self.assertEqual(window.connection_label.text(), "Χωρίς εξυπηρέτηση (Κύριος)")
+        # Η κάρτα ενημερώθηκε μαζί με την μπάρα.
+        self.assertEqual(card.serve_button.text(), "Έναρξη εξυπηρέτησης")
+        self.assertEqual(card.rows.values["serving"].text(), "Σταματημένη")
 
     def test_start_conflict_dialog_then_force(self):
         window = self.window("newer")

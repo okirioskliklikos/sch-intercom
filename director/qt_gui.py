@@ -1117,10 +1117,6 @@ class DirectorWindow(QMainWindow):
         self.conflict_bar.setVisible(status.conflict)
         if status.conflict:
             self.conflict_bar.set_text(status.conflict_html())
-        # Στα «Πιστοποιητικά» το ίδιο κουμπί είναι ήδη στην κάρτα ρόλου (πρόταση, 23/11/2026).
-        on_certificates = (self.security_page is not None and self.current_page == "security"
-                           and self.security_page.current_tab == "Πιστοποιητικά")
-        self.conflict_stop.setVisible(not on_certificates)
         if self.security_page is not None:
             self.security_page.set_role(status)
 
