@@ -78,6 +78,33 @@ class BackupTests(unittest.TestCase):
         self.assertEqual(reread.snapshot()["school_id"],
                          SignedClientRegistry(self.registry, self.cert, self.key).snapshot()["school_id"])
 
+    def test_restore_sets_backup_role_not_exported_from_source(self):
+        from director.manager_state import ManagerState, load, save
+        # Κύριος στον A, με ρόλο που επιτρέπεται να παραμείνει τοπικός.
+        save(self.old / "manager-state.json", ManagerState(role="primary", serving=True))
+        self.make()
+        self.assertNotIn(b"manager-state.json", self.backup.read_bytes())
+        self.transfer()
+        copied = load(self.new / "manager-state.json")
+        self.assertEqual((copied.role, copied.serving, copied.notice),
+                         ("backup", False, "restored_as_backup"))
+
+    def test_restore_rollback_restores_previous_role_and_absence(self):
+        from director.manager_state import ManagerState, load, save
+        self.make()
+        target = self.new / "manager-state.json"
+        save(target, ManagerState(role="primary", serving=False))
+        before = target.read_bytes()
+        with self.assertRaises(KeyboardInterrupt):
+            self.transfer(fail_after=17)
+        self.assertTrue(rollback(self.new))
+        self.assertEqual(target.read_bytes(), before)
+        target.unlink()
+        with self.assertRaises(KeyboardInterrupt):
+            self.transfer(fail_after=9)
+        self.assertTrue(rollback(self.new))
+        self.assertFalse(target.exists())
+
     def test_wrong_password_leaves_destination_untouched(self):
         self.make()
         with self.assertRaises(BackupError) as cm:
@@ -275,9 +302,9 @@ class BackupTests(unittest.TestCase):
                 self.assertFalse(rollback(self.new))
                 continue
             break
-        # 2 κινήσεις ανά υπάρχον αρχείο (παλιό → pre-restore, νέο → θέση) × 8 αρχεία
+        # 2 κινήσεις ανά υπάρχον αρχείο × 9 αρχεία (με manager-state.json)
         # (μαζί με το .pass του κλειδιού, 4.2C2).
-        self.assertEqual(interrupted, 16)
+        self.assertEqual(interrupted, 18)
         after = self.snapshot()
         self.assertNotEqual(after, before)
         self.assertEqual(after["director-gui.json"], b'{"width":999}')

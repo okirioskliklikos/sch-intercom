@@ -10,7 +10,8 @@ import time
 import unittest
 import uuid
 
-from shared.discovery import decode_beacon, encode_beacon, director_id, discover
+from shared.discovery import (BeaconWatcher, decode_beacon, decode_beacon_info,
+                              encode_beacon, director_id, discover)
 from client.main import open_connection, run_with_reconnect
 
 # Τα open_connection είναι mock· αρκεί έγκυρο SSLContext για τον έλεγχο «TLS υποχρεωτικό».
@@ -39,6 +40,49 @@ class DiscoveryTests(unittest.TestCase):
         for port in (0, 65536):
             with self.assertRaises(ValueError):
                 encode_beacon(identifier, port)
+
+    def test_beacon_v2_complete_fields_and_validation(self):
+        identifier, school, instance = (str(uuid.uuid4()) for _ in range(3))
+        packet = encode_beacon(identifier, 50555, school=school, inst=instance,
+                               rv=9, host="Manager-A")
+        info = decode_beacon_info(packet)
+        self.assertEqual((info.id, info.port, info.school, info.inst, info.rv, info.host),
+                         (identifier, 50555, school, instance, 9, "Manager-A"))
+        self.assertEqual(decode_beacon(packet), (identifier, 50555))
+        self.assertLessEqual(len(packet), 512)
+        import json
+        from shared.discovery import MAGIC
+        value = json.loads(packet[len(MAGIC):])
+        for bad in ({"rv": True}, {"rv": 0}, {"host": "bad\\nname"},
+                    {"port": "50555"}, {"school": "other"}, {"unknown": 1}):
+            copy = dict(value)
+            copy.update(bad)
+            with self.subTest(bad=bad), self.assertRaises(ValueError):
+                decode_beacon_info(MAGIC + json.dumps(copy).encode())
+        copy = dict(value)
+        copy.pop("inst")
+        with self.assertRaises(ValueError):
+            decode_beacon_info(MAGIC + json.dumps(copy).encode())
+        with self.assertRaises(ValueError):
+            decode_beacon_info(b"SID1:" + packet[len(MAGIC):])
+        with self.assertRaises(ValueError):
+            decode_beacon_info(packet + b" " * 513)
+
+    def test_watcher_filters_instances_and_expires(self):
+        school, self_id, other_id = (str(uuid.uuid4()) for _ in range(3))
+        now = [100.0]
+        watcher = BeaconWatcher(school, self_id, clock=lambda: now[0])
+        uid = str(uuid.uuid4())
+        watcher.receive(encode_beacon(uid, 50555, school=school,
+                                      inst=self_id, rv=1, host="self"), "127.0.0.1")
+        watcher.receive(encode_beacon(uid, 50555, school=str(uuid.uuid4()),
+                                      inst=other_id, rv=5, host="other-school"), "127.0.0.2")
+        self.assertEqual(watcher.others(), [])
+        watcher.receive(encode_beacon(uid, 50555, school=school,
+                                      inst=other_id, rv=5, host="other"), "127.0.0.2")
+        self.assertEqual(len(watcher.newer(2)), 1)
+        now[0] += 5.1
+        self.assertEqual(watcher.others(), [])
 
     def test_udp_loopback_ignores_invalid_and_accepts_valid(self):
         identifier = str(uuid.uuid4())

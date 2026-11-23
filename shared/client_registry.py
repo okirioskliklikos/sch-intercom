@@ -39,6 +39,110 @@ def digest(data: dict) -> str:
     return hashlib.sha256(canonical(data)).hexdigest()
 
 
+def relation(local: dict, incoming: dict) -> str:
+    """Σχέση υπογεγραμμένων μητρώων με βάση το ιστορικό digests.
+
+    Τα ορίσματα είναι τα εσωτερικά registry dictionaries, όχι τα envelopes.
+    """
+    local_hash, incoming_hash = digest(local), digest(incoming)
+    if local_hash == incoming_hash:
+        return "same"
+    if local_hash in incoming["history"]:
+        return "newer"
+    if incoming_hash in local["history"]:
+        return "older"
+    return "conflict"
+
+
+def merge(local: dict, incoming: dict, prefer: str = "local") -> tuple[dict, dict]:
+    """Ασφαλής συγχώνευση δύο διακλαδώσεων της ίδιας εγκατάστασης.
+
+    Δεν κάνει I/O ούτε υπογράφει. Καμία αποκλεισμένη ταυτότητα SPKI δεν
+    επανενεργοποιείται, ακόμη και με prefer=incoming.
+    """
+    if prefer not in ("local", "incoming"):
+        raise RegistryError("Unknown merge preference")
+    if (local["school_id"] != incoming["school_id"] or
+            local["schema_version"] != incoming["schema_version"]):
+        raise RegistryError("The registries belong to different installations")
+    owners = {}
+    forbidden = set()
+    for source in (local, incoming):
+        for entry in source["clients"]:
+            keys = {entry["spki_sha256"], *entry.get("previous_spki", [])}
+            for key in keys:
+                old_owner = owners.setdefault(key, entry["client_id"])
+                if old_owner != entry["client_id"]:
+                    raise RegistryError("One key belongs to two different Client UUIDs")
+            forbidden.update(entry.get("previous_spki", []))
+            if entry["status"] in ("revoked", "blocked"):
+                forbidden.add(entry["spki_sha256"])
+
+    old_entries = {e["client_id"]: e for e in local["clients"]}
+    new_entries = {e["client_id"]: e for e in incoming["clients"]}
+    order = list(old_entries) + [i for i in new_entries if i not in old_entries]
+    merged = json.loads(json.dumps(local))
+    history = [*local["history"], digest(local)]
+    for ancestry in [*incoming["history"], digest(incoming)]:
+        if ancestry not in history:
+            history.append(ancestry)
+    merged["history"] = history
+    merged["registry_version"] = len(history) + 1
+    result = []
+    decisions = []
+    severity = {"approved": 0, "revoked": 1, "blocked": 2}
+    for client_id in order:
+        left, right = old_entries.get(client_id), new_entries.get(client_id)
+        if left is None or right is None:
+            entry = json.loads(json.dumps(left if right is None else right))
+        else:
+            preferred = left if prefer == "local" else right
+            entry = json.loads(json.dumps(preferred))
+            left_key, right_key = left["spki_sha256"], right["spki_sha256"]
+            if left_key != right_key:
+                allowed = [e for e in (left, right)
+                           if e["spki_sha256"] not in forbidden]
+                chosen = (allowed[0] if len(allowed) == 1
+                          else preferred)
+                # Key and certificate must be taken from exactly the same side.
+                entry["spki_sha256"] = chosen["spki_sha256"]
+                entry["cert_pem"] = chosen["cert_pem"]
+                decisions.append({"client_id": client_id, "decision":
+                                  "key conflict: retained " +
+                                  ("local" if chosen is left else "incoming")})
+            if left["room"] != right["room"] or left.get("name") != right.get("name"):
+                decisions.append({"client_id": client_id, "decision":
+                                  "metadata conflict: preferred " + prefer})
+            if left_key != right_key:
+                if "blocked" in (left["status"], right["status"]):
+                    entry["status"] = "blocked"
+                else:
+                    # Μία παλιά ανακλημένη ταυτότητα δεν ανακαλεί αυτόματα
+                    # το ΝΕΟ, μη απαγορευμένο κλειδί του ίδιου Client.
+                    entry["status"] = chosen["status"]
+            else:
+                entry["status"] = max((left["status"], right["status"]),
+                                      key=lambda status: severity[status])
+            previous = list(dict.fromkeys([
+                *left.get("previous_spki", []),
+                *right.get("previous_spki", []),
+                *([left_key, right_key] if left_key != right_key else [])
+            ]))
+            entry["previous_spki"] = [
+                key for key in previous if key != entry["spki_sha256"]]
+        if entry["spki_sha256"] in forbidden and entry["status"] == "approved":
+            entry["status"] = "revoked"
+            decisions.append({"client_id": client_id, "decision":
+                              "forbidden key revoked"})
+        if entry != left:
+            entry["changed_in_version"] = merged["registry_version"]
+        result.append(entry)
+    merged["clients"] = result
+    return merged, {"decisions": decisions, "local_version": local["registry_version"],
+                    "incoming_version": incoming["registry_version"],
+                    "merged_version": merged["registry_version"]}
+
+
 def public_key_fingerprint(cert_pem: bytes) -> str:
     certificate = x509.load_pem_x509_certificate(cert_pem)
     public_key = certificate.public_key().public_bytes(
@@ -205,6 +309,36 @@ class SignedClientRegistry:
         newer["registry_version"] = older["registry_version"] + 1
         document = _wrap(newer, self._signing_key)
         self._persist(document)  # No in-memory commit if disk write failed.
+        self._document = document
+
+    def apply_import(self, document: dict, expected_digest: str, *,
+                     merged: dict | None = None, prefer: str = "local") -> dict:
+        """Εφαρμογή υπό κλείδωμα, χωρίς race ανάμεσα σε preview και commit."""
+        with self.lock:
+            self._refresh_from_disk()
+            current = self._document["registry"]
+            if digest(current) != expected_digest:
+                raise RegistryError("Το μητρώο άλλαξε· ξαναδοκιμάστε")
+            incoming = verify_document(document, self._cert_pem)
+            if incoming["school_id"] != current["school_id"]:
+                raise RegistryError("Το αρχείο ανήκει σε άλλη εγκατάσταση")
+            if merged is None:
+                if relation(current, incoming) != "newer":
+                    raise RegistryError("Incoming registry is not a newer descendant")
+                self._persist(document)
+                self._document = document
+            else:
+                if relation(current, incoming) != "conflict":
+                    raise RegistryError("Registry relation changed before merge")
+                # Recalculate from current data, rather than trusting a stale preview.
+                candidate, _ = merge(current, incoming, prefer=prefer)
+                self._commit_import(candidate)
+            return self.snapshot()
+
+    def _commit_import(self, registry: dict) -> None:
+        document = _wrap(registry, self._signing_key)
+        verify_document(document, self._cert_pem)
+        self._persist(document)
         self._document = document
 
     def approve(self, client_id: str, room: str, cert_pem: bytes, *, name: str = "") -> None:
