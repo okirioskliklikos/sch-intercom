@@ -201,7 +201,7 @@ class LiveTest:
         self.gui.pump()
         panel = window.security_page.certificates
         expected = fingerprint(self.pc.cert)
-        hidden = panel.fingerprint.text() == m.fingerprint_short(expected)
+        hidden = panel.fingerprint.text() == m.fingerprint_masked(expected)
         panel.reveal_button.click()
         shown = panel.fingerprint.text().replace("\n", ":")
         key = panel.key_state.text()

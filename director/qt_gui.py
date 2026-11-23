@@ -27,10 +27,9 @@ from director.gui import (MODE_ALL, MODE_ROOMS, DirectorMicrophone, choose_targe
                           meter_fraction, room_grid_shape,
                           room_states)
 from shared.discovery import BeaconWatcher, director_id
-from director.manager_state import (PROMOTE_WARNING, acknowledge, change_role,
-                                    load as load_manager_state,
+from director.manager_state import (load as load_manager_state,
                                     path_for as manager_state_path)
-from director.serving import ServingConflict, ServingController, SocketServingService
+from director.serving import ServingController, SocketServingService
 import uuid
 from shared.ui import icons, theme
 
@@ -59,6 +58,8 @@ NAV_ITEMS = [
 ]
 #: Η σελίδα «Ασφάλεια» διαβάζει μητρώο/αιτήματα το πολύ τόσο συχνά.
 SECURITY_REFRESH_SECONDS = 1.0
+#: Ρόλος/εξυπηρέτηση/άλλοι Managers (επάνω μπάρα και ειδοποιήσεις) το πολύ τόσο συχνά.
+ROLE_REFRESH_SECONDS = 0.5
 
 
 _metrics = theme.metrics_for(None)
@@ -253,23 +254,34 @@ class LevelMeter(QWidget):
 
 
 class StatusDot(QWidget):
+    """Γεμάτη κουκκίδα (●) ή, με ``hollow``, κύκλος (○) για «Χωρίς εξυπηρέτηση»."""
+
     def __init__(self, color: str, size: int | None = None, parent=None):
         super().__init__(parent)
         size = size or px(theme.DOT)
         self.color = color
+        self.hollow = False
         self.setFixedSize(size, size)
 
-    def set_color(self, color: str) -> None:
-        if color != self.color:
+    def set_color(self, color: str, *, hollow: bool = False) -> None:
+        if color != self.color or hollow != self.hollow:
             self.color = color
+            self.hollow = hollow
             self.update()
 
     def paintEvent(self, _event) -> None:
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(QColor(self.color))
-        painter.drawEllipse(self.rect())
+        if self.hollow:
+            width = max(1.0, self.width() / 6)
+            painter.setPen(QPen(QColor(self.color), width))
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.drawEllipse(QRectF(self.rect()).adjusted(width / 2, width / 2,
+                                                             -width / 2, -width / 2))
+        else:
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(QColor(self.color))
+            painter.drawEllipse(self.rect())
         painter.end()
 
 
@@ -472,14 +484,74 @@ def _card(title: QWidget | str) -> tuple[QFrame, QVBoxLayout]:
     return card, layout
 
 
+def action_button(text: str, kind: str, icon: str | None = None,
+                  color: str | None = None, stroke: float = 2.0) -> QPushButton:
+    """Ορθογώνιο κουμπί ενέργειας (ui-style.md §8): primaryAction (γεμάτο primary),
+    secondaryAction (λευκό), dangerAction (γεμάτο live), deny (κάδος). Εικονίδιο 18px."""
+    button = QPushButton(text)
+    button.setObjectName(kind)
+    button.setCursor(Qt.CursorShape.PointingHandCursor)
+    if icon:
+        button.setIcon(icons.icon(icon, color or theme.TEXT, disabled_color=theme.TEXT_MUTED,
+                                  size=px(theme.ICON), stroke_width=stroke))
+        button.setIconSize(QSize(px(theme.ICON), px(theme.ICON)))
+    return button
+
+
+class NoticeBar(QFrame):
+    """Ειδοποίηση κάτω από τον τίτλο σελίδας (4.2D2, απόφαση χρήστη 23/11/2026).
+
+    ``kind``: "info" (μπλε, π.χ. μετά από επαναφορά) ή "alarm" (κόκκινη: δεύτερος
+    Manager, νεότερο μητρώο). Εικονίδιο αριστερά, κείμενο (rich text) και κουμπιά δεξιά.
+    """
+
+    def __init__(self, kind: str, parent=None):
+        super().__init__(parent)
+        self.kind = kind
+        self.setObjectName("alarmBar" if kind == "alarm" else "infoBar")
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(px(16), px(9), px(14), px(9))
+        layout.setSpacing(px(14))
+        color = theme.LIVE if kind == "alarm" else theme.PRIMARY
+        self.icon = QLabel()
+        self.icon.setPixmap(icons.pixmap("alert" if kind == "alarm" else "info", color,
+                                         px(20), stroke_width=2.0))
+        self.icon.setStyleSheet("background: transparent;")
+        self.text = QLabel()
+        self.text.setObjectName("barText")
+        self.text.setTextFormat(Qt.TextFormat.RichText)
+        self.text.setWordWrap(True)
+        self.text.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        layout.addWidget(self.icon, 0, Qt.AlignmentFlag.AlignVCenter)
+        layout.addWidget(self.text, 1)
+        self.buttons: list[QPushButton] = []
+        self.hide()
+
+    def add_button(self, button: QPushButton) -> QPushButton:
+        self.layout().addWidget(button, 0, Qt.AlignmentFlag.AlignVCenter)
+        self.buttons.append(button)
+        return button
+
+    def set_text(self, text: str) -> None:
+        if text != self.text.text():
+            self.text.setText(text)
+
+
 class DirectorWindow(QMainWindow):
     def __init__(self, broadcaster, microphone: DirectorMicrophone, *,
                  server_up: Callable[[], bool] = lambda: True,
                  clock: Callable[[], float] = time.monotonic,
                  security=None, security_options: dict | None = None,
                  layout_settings: Path | None = None,
-                 maintenance=None, maintenance_options: dict | None = None):
+                 maintenance=None, maintenance_options: dict | None = None,
+                 role=None, role_options: dict | None = None):
         super().__init__()
+        # Κύριος/Εφεδρικός (director.security.RoleModel)· None = χωρίς μητρώο (δοκιμές).
+        self.role = role
+        self.role_status = None
+        self._role_refreshed = -math.inf
+        self._role_options = dict(role_options or {})
+        self.role_actions = None
         # Επιπλέον πλάτος αιθουσών από τη λαβή, σε px του mockup (ανεξάρτητο κλίμακας).
         self._layout_settings = layout_settings
         self._rooms_extra = load_layout_settings(layout_settings).get("rooms_extra_width", 0.0)
@@ -544,7 +616,7 @@ class DirectorWindow(QMainWindow):
         sidebar.setFixedWidth(px(theme.SIDEBAR_WIDTH))
         layout = QVBoxLayout(sidebar)
         layout.setContentsMargins(px(10), px(14), px(10), px(14))
-        layout.setSpacing(px(4))
+        layout.setSpacing(px(theme.NAV_SPACING))
 
         brand = QHBoxLayout()
         brand.setContentsMargins(px(4), px(2), px(4), px(14))
@@ -600,6 +672,8 @@ class DirectorWindow(QMainWindow):
         header.addWidget(self.connection_dot, 0, Qt.AlignmentFlag.AlignVCenter)
         header.addWidget(self.connection_label)
         layout.addLayout(header)
+        if self.role is not None:
+            self._build_role_bars(layout)
 
         self.pages = QStackedWidget()
         self.page_keys = ["home"]
@@ -609,7 +683,12 @@ class DirectorWindow(QMainWindow):
             options = {"layout_settings": self._layout_settings, **self._security_options}
             if self.maintenance is not None:
                 options.setdefault("identity", self.maintenance.identity)
+            if self.role is not None:
+                from director.qt_role import RoleCard
+                options.setdefault("role_card", RoleCard(self.role_actions))
             self.security_page = SecurityPage(self.security, **options)
+            if self.role is not None:
+                self.security_page.tab_changed = self.refresh_role
             self.pages.addWidget(self.security_page)
             self.page_keys.append("security")
         if self.maintenance is not None:
@@ -624,6 +703,38 @@ class DirectorWindow(QMainWindow):
         layout.addWidget(self.pages, 1)
         return content
 
+    def _build_role_bars(self, layout: QVBoxLayout) -> None:
+        """Ειδοποιήσεις Κύριου/Εφεδρικού κάτω από τον τίτλο, σε όλες τις σελίδες."""
+        from director.qt_role import IMPORT_REGISTRY, MAKE_PRIMARY, STAY_BACKUP, RoleActions, \
+            stop_button
+        options = self._role_options
+        self.role_actions = RoleActions(self.role, self, dialog_hook=options.get("dialog_hook"),
+                                        inform=options.get("inform"),
+                                        on_change=self.refresh_role)
+        actions = self.role_actions
+        self.restored_bar = NoticeBar("info")
+        stay = self.restored_bar.add_button(action_button(STAY_BACKUP, "secondaryAction"))
+        stay.clicked.connect(actions.stay_backup)
+        promote = self.restored_bar.add_button(action_button(MAKE_PRIMARY, "primaryAction"))
+        promote.clicked.connect(actions.promote)
+        self.newer_bar = NoticeBar("alarm")
+        importing = self.newer_bar.add_button(
+            action_button(IMPORT_REGISTRY, "secondaryAction", "import"))
+        importing.clicked.connect(self.open_registry_import)
+        importing.setVisible(self.maintenance is not None)
+        self.conflict_bar = NoticeBar("alarm")
+        self.conflict_stop = self.conflict_bar.add_button(stop_button())
+        self.conflict_stop.clicked.connect(actions.stop)
+        for bar in (self.restored_bar, self.newer_bar, self.conflict_bar):
+            layout.addWidget(bar)
+
+    def open_registry_import(self) -> None:
+        """Από την κόκκινη ειδοποίηση «Το μητρώο χρειάζεται ενημέρωση»."""
+        if self.settings_page is None:
+            return
+        self.show_page("settings")
+        self.settings_page.open_import()
+
     def show_page(self, key: str) -> None:
         """Εναλλαγή σελίδας από το μενού· η τρέχουσα μένει επιλεγμένη."""
         if key not in self.page_keys:
@@ -631,6 +742,7 @@ class DirectorWindow(QMainWindow):
         for name, button in self.nav_buttons.items():
             button.setChecked(name == key)
         self.pages.setCurrentIndex(self.page_keys.index(key))
+        self._role_refreshed = -math.inf
         if key == "security":
             from director.qt_security import PAGE_TITLE as SECURITY_TITLE
             self.page_title.setText(SECURITY_TITLE)
@@ -967,10 +1079,50 @@ class DirectorWindow(QMainWindow):
             if now - self._security_refreshed >= SECURITY_REFRESH_SECONDS:
                 self._security_refreshed = now
                 self.security_page.refresh()
+        if self.role is not None:
+            now = time.monotonic()
+            if now - self._role_refreshed >= ROLE_REFRESH_SECONDS:
+                self.refresh_role()
+            return
         up = self.server_up()
         self.connection_dot.set_color(theme.CONNECTED if up else theme.LIVE)
         self.connection_label.setText("Συνδεδεμένος" if up else "Εκτός λειτουργίας")
         _repolish(self.connection_label, state="up" if up else "down")
+
+    def refresh_role(self) -> None:
+        """Επάνω δεξιά «● Συνδεδεμένος (Κύριος)» κ.λπ., ειδοποιήσεις, κάρτα ρόλου και
+        κλείδωμα του tab «Υπολογιστές» στον Εφεδρικό (απόφαση χρήστη 23/11/2026)."""
+        self._role_refreshed = time.monotonic()
+        try:
+            status = self.role.status()
+        except (OSError, ValueError) as exc:
+            print(f"Ρόλος Manager: {exc}", flush=True)
+            return
+        previous, self.role_status = self.role_status, status
+        if (self.settings_page is not None and previous is not None
+                and previous.role != status.role and self.current_page == "settings"):
+            self.settings_page.refresh()   # «Από τότε» μόνο στον Κύριο
+        text, state = status.header()
+        color = {"up": theme.CONNECTED, "conflict": theme.LIVE}.get(state, theme.TEXT_MUTED)
+        self.connection_dot.set_color(color, hollow=state == "stopped")
+        if self.connection_label.text() != text:
+            self.connection_label.setText(text)
+        _repolish(self.connection_label, state=state)
+        self.restored_bar.setVisible(status.restored)
+        if status.restored:
+            self.restored_bar.set_text(status.restored_html())
+        self.newer_bar.setVisible(bool(status.newer))
+        if status.newer:
+            self.newer_bar.set_text(status.newer_html())
+        self.conflict_bar.setVisible(status.conflict)
+        if status.conflict:
+            self.conflict_bar.set_text(status.conflict_html())
+        # Στα «Πιστοποιητικά» το ίδιο κουμπί είναι ήδη στην κάρτα ρόλου (πρόταση, 23/11/2026).
+        on_certificates = (self.security_page is not None and self.current_page == "security"
+                           and self.security_page.current_tab == "Πιστοποιητικά")
+        self.conflict_stop.setVisible(not on_certificates)
+        if self.security_page is not None:
+            self.security_page.set_role(status)
 
     def _refresh_rooms(self) -> None:
         rooms = room_states(self.broadcaster.status_snapshot())
@@ -1349,11 +1501,14 @@ class GuiRuntime:
                  security_options: dict | None = None,
                  release_lock: Callable[[], None] | None = None,
                  maintenance_options: dict | None = None,
+                 role_options: dict | None = None,
                  quit_app: Callable[[], None] | None = None):
         self.args = args
         # Αφήνει το manager.lock πριν από επαναφορά μέσα από το GUI (Ρυθμίσεις → Συντήρηση).
         self.release_lock = release_lock
         self.maintenance_options = maintenance_options or {}
+        # Για δοκιμές: dialog_hook/inform των διαλόγων Κύριου/Εφεδρικού.
+        self.role_options = role_options or {}
         self.quit_app = quit_app or (lambda: QApplication.instance().quit())
         self.restart_requested = False
         self._stopped = False
@@ -1371,14 +1526,10 @@ class GuiRuntime:
                                             on_event=lambda s: print(s, flush=True))
         self.microphone = DirectorMicrophone(stream_microphone, self.broadcaster,
                                              device=args.device, latency=args.latency)
-        self.threads: list[threading.Thread] = []
-        self.server: socket.socket | None = None
         self.window: DirectorWindow | None = None
         self.controller = None
         self.watcher = None
         self.network = None
-        self._warned_conflicts: set[str] = set()
-        self._dialogs = []
 
     def start(self) -> DirectorWindow:
         from director.security import SecurityModel, track_last_seen
@@ -1411,15 +1562,23 @@ class GuiRuntime:
                 check_seconds=getattr(args, "start_check_seconds", 3.0))
             self.watcher.start()
             self.controller.startup()
-            self.server = self.network.server
-            self.threads = self.network.threads
 
         maintenance = None
         tls_cert, tls_key = getattr(args, "tls_cert", None), getattr(args, "tls_key", None)
         if registry is not None and tls_cert is not None and tls_key is not None:
             from director.maintenance import MaintenanceModel
+            trust = self.trust
+            # Εισαγωγή μητρώου στον Manager που τρέχει (ανανέωση mTLS, αποσυνδέσεις).
+            importer = (None if trust is None else
+                        lambda path, **kw: trust.import_registry(path, self.broadcaster, **kw))
             maintenance = MaintenanceModel(args.registry_file, tls_cert, tls_key,
-                                           registry_version=lambda: registry.version)
+                                           registry_version=lambda: registry.version,
+                                           importer=importer)
+        role = None
+        if self.controller is not None:
+            from director.security import RoleModel
+            role = RoleModel(manager_state_path(args.registry_file), self.controller,
+                             self.watcher, registry_version=lambda: registry.version)
         options = {"stop_serving": self.stop_serving, "restart": self.request_restart,
                    **self.maintenance_options}
         self.window = DirectorWindow(
@@ -1427,91 +1586,27 @@ class GuiRuntime:
             server_up=lambda: self.controller.active if self.controller is not None else False,
             security=security, security_options=self.security_options,
             layout_settings=self.layout_settings,
-            maintenance=maintenance, maintenance_options=options)
+            maintenance=maintenance, maintenance_options=options,
+            role=role, role_options=self.role_options)
         if self.controller is not None:
+            # Μόνο μήνυμα στην κονσόλα· στο παράθυρο τη σύγκρουση τη δείχνει η κόκκινη
+            # ειδοποίηση και η επάνω μπάρα (όχι αναδυόμενα παράθυρα).
             self._monitor_timer = QTimer(self.window)
-            self._monitor_timer.timeout.connect(self._monitor_managers)
+            self._monitor_timer.timeout.connect(self.controller.poll_conflicts)
             self._monitor_timer.start(500)
             state = load_manager_state(manager_state_path(args.registry_file))
-            if state.notice == "restored_as_backup":
-                QTimer.singleShot(0, self._offer_restored)
-            elif state.serving and not self.controller.active:
-                QTimer.singleShot(0, self._offer_force_start)
+            if state.serving and not self.controller.active and self.watcher.others():
+                # Η εξυπηρέτηση ήταν ενεργή αλλά άλλος Manager εξυπηρετεί ήδη.
+                QTimer.singleShot(0, self.window.role_actions.offer_force)
         return self.window
 
-    def _offer_force_start(self):
-        if self.window is None or self.controller is None:
-            return
-        other = self.watcher.others() if self.watcher is not None else []
-        if not other:
-            return
-        candidate = other[0]
-        box = QMessageBox(self.window)
-        box.setIcon(QMessageBox.Icon.Warning)
-        box.setWindowTitle("Άλλος Manager σε λειτουργία")
-        box.setText(f"Ο υπολογιστής {candidate.info.host} εξυπηρετεί ήδη. "
-                    "Σταματήστε τον πρώτα.")
-        force = box.addButton("Έναρξη παρ' όλα αυτά", QMessageBox.ButtonRole.AcceptRole)
-        box.addButton("Άκυρο", QMessageBox.ButtonRole.RejectRole)
-        box.exec()
-        if box.clickedButton() is force:
-            confirmation = QMessageBox.question(
-                self.window, "Επιβεβαίωση επικίνδυνης έναρξης",
-                "Δύο Managers θα εξυπηρετούν την ίδια εγκατάσταση. Να συνεχίσω;",
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
-            if confirmation == QMessageBox.StandardButton.Yes:
-                self.controller.start(force=True)
-                self.server = self.network.server
+    @property
+    def server(self) -> socket.socket | None:
+        return self.network.server if self.network is not None else None
 
-    def _offer_restored(self):
-        if self.window is None or self.controller is None:
-            return
-        dialog = QMessageBox(self.window)
-        dialog.setIcon(QMessageBox.Icon.Information)
-        dialog.setWindowTitle("Επαναφορά Manager")
-        dialog.setText(
-            "Ο υπολογιστής επαναφέρθηκε από backup και είναι Εφεδρικός, "
-            "χωρίς εξυπηρέτηση. Αν αντικαθιστά τον Κύριο, κάντε τον Κύριο "
-            "και ξεκινήστε την εξυπηρέτηση. Πρώτα βεβαιωθείτε ότι ο "
-            "άλλος υπολογιστής έχει σταματήσει.")
-        promote = dialog.addButton("Να γίνει Κύριος και να ξεκινήσει",
-                                   QMessageBox.ButtonRole.AcceptRole)
-        dialog.addButton("Να μείνει Εφεδρικός", QMessageBox.ButtonRole.RejectRole)
-        dialog.exec()
-        state_path = manager_state_path(self.args.registry_file)
-        if dialog.clickedButton() is promote:
-            approval = QMessageBox.question(
-                self.window, "Αλλαγή σε Κύριο", PROMOTE_WARNING,
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
-            if approval == QMessageBox.StandardButton.Yes:
-                change_role(state_path, "primary")
-                try:
-                    self.controller.start()
-                except ServingConflict:
-                    self._offer_force_start()
-                self.server = self.network.server
-        else:
-            acknowledge(state_path)
-
-    def _monitor_managers(self):
-        if self.watcher is None or self.controller is None or self.window is None:
-            return
-        others = self.controller.poll_conflicts()
-        present = {other.info.inst for other in others}
-        for other in others:
-            if not self.controller.active or other.info.inst in self._warned_conflicts:
-                continue
-            self._warned_conflicts.add(other.info.inst)
-            warning = QMessageBox(self.window)
-            warning.setIcon(QMessageBox.Icon.Warning)
-            warning.setWindowTitle("ΠΡΟΣΟΧΗ: Δεύτερος Manager")
-            warning.setText(f"Εξυπηρετεί και ο υπολογιστής {other.info.host} "
-                            f"({other.ip}). Σταματήστε τον έναν.")
-            warning.setModal(False)
-            warning.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
-            warning.show()
-            self._dialogs.append(warning)
-        self._warned_conflicts.intersection_update(present)
+    @property
+    def threads(self) -> list[threading.Thread]:
+        return self.network.threads if self.network is not None else []
 
     def stop_serving(self) -> None:
         """Σταματά Clients, εγγραφή και ανακάλυψη και αφήνει το manager.lock.

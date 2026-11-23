@@ -449,7 +449,8 @@ class SecurityPageTests(SecurityFixture, unittest.TestCase):
         self.assertEqual(page.port_notice.text(), "")
         # Κεφαλίδα ενότητας: τίτλος + ένδειξη πλήθους (κενή χωρίς αιτήματα), χωρίς κουμπιά.
         head = page.request_count.parentWidget()
-        self.assertEqual([w.text() for w in head.findChildren(QLabel)], ["Νέες εγγραφές", ""])
+        visible = [w.text() for w in head.findChildren(QLabel) if w.isVisibleTo(page)]
+        self.assertEqual(visible, ["Νέες εγγραφές", ""])
         self.assertEqual(head.findChildren(QPushButton), [])
 
     def test_full_list_notice_on_page(self):

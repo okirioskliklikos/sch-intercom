@@ -1,0 +1,240 @@
+<!doctype html>
+<html lang="el">
+<head>
+<meta charset="utf-8">
+<title>Director — Κύριος / Εφεδρικός (mockup 4.2D2)</title>
+<style>
+:root {
+  --primary:#1d5a99; --primary-light:#dde7f4; --primary-dark:#164a80;
+  --window-bg:#f3f5f9; --sidebar-bg:#e6ebf3; --card-bg:#ffffff; --card-border:#dde3ec;
+  --text:#1f2937; --text-muted:#5b6575; --control-border:#8a96a6;
+  --online:#2e9e4f; --connected:#2e8b57; --live:#c62828; --live-light:#f6d5d5; --app-icon:#0e7490;
+  --font: "Inter", "Segoe UI", sans-serif;
+  --mono: "JetBrains Mono", Consolas, monospace;
+}
+* { box-sizing: border-box; }
+html, body { margin:0; }
+body { background: var(--window-bg); color: var(--text); font: 400 16px/1.35 var(--font); }
+.app { display:grid; grid-template-columns: 246px 1fr; width: var(--w,1366px); height: 900px; position: relative; overflow: hidden; }
+.sidebar { background: var(--sidebar-bg); padding: 16px 12px; display:flex; flex-direction:column; gap:4px; }
+.brand { display:flex; align-items:center; gap:10px; padding: 2px 4px 14px; font-size: 18px; font-weight: 500; }
+.brand-icon { width:28px; height:28px; border-radius:7px; background:var(--app-icon); display:grid; place-items:center; }
+.nav { display:flex; align-items:center; gap:8px; padding: 7px 12px; border-radius:6px; border:1px solid transparent; color: var(--text-muted); font-size:17px; }
+.nav svg { width:18px; height:18px; }
+.nav.on { background:var(--primary-light); border-color:var(--primary); color:var(--primary); font-weight:600; }
+.main { padding: 14px 22px 20px 22px; display:flex; flex-direction:column; gap:14px; min-width:0; }
+.head { display:flex; justify-content:space-between; align-items:center; }
+.head h1 { margin:0; font-size:22px; font-weight:500; }
+.status { color:var(--connected); font-size:16px; }
+.status::before { content:"● "; }
+.tabs { display:flex; gap:8px; }
+.tab { padding: 7px 20px; border-radius:6px; border:1px solid var(--card-border); background:var(--card-bg); color:var(--text-muted); font-size:16px; }
+.tab.on { background:var(--primary-light); border-color:var(--primary); color:var(--primary); font-weight:600; }
+.card { background:var(--card-bg); border:1px solid var(--card-border); border-radius:8px; padding: 14px 18px 18px; }
+.card h2 { margin:0 0 12px; font-size:18px; font-weight:600; display:flex; align-items:center; gap:10px; }
+.card h2 .right { margin-left:auto; font-size:14.5px; font-weight:400; color:var(--text-muted); }
+.kv { display:grid; grid-template-columns: max-content minmax(0,1fr); gap: 11px 22px; margin:0; align-items: baseline; }
+.kv dt { color:var(--text-muted); }
+.kv dd { margin:0; min-width:0; }
+.mono { font-family: var(--mono); font-size: 15px; letter-spacing: .01em; line-height:1.5; }
+.ok { color: var(--connected); }
+.err { color: var(--live); }
+.muted { color: var(--text-muted); }
+.small { font-size: 14.5px; }
+.ell { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; display:block; }
+.pill { display:inline-flex; align-items:center; gap:7px; height:32px; padding:0 14px; border-radius:999px; border:1px solid var(--control-border); background:#fff; font: inherit; font-size:14.5px; color: var(--text); white-space:nowrap; }
+.pill svg { width:18px; height:18px; }
+.act svg { width:18px; height:18px; }
+.act { display:inline-flex; align-items:center; gap:8px; height:38px; padding:0 18px; border-radius:6px; border:1px solid var(--control-border); background:#fff; font: inherit; color: var(--text); white-space:nowrap; }
+.act.primary { background:var(--primary); border-color:var(--primary); color:#fff; font-weight:500; }
+.act.remove { color: var(--live); }
+.act.danger { background: var(--live); border-color: var(--live); color:#fff; font-weight:500; }
+.act[disabled] { background:#fff; border-color:var(--card-border); color:#a3acb9; }
+.row { display:flex; gap:10px; align-items:center; flex-wrap:wrap; }
+.mono.fp { font-size:14px; letter-spacing:0; }
+.fp-row { display:flex; gap:16px; align-items:center; }
+.cards { display:flex; gap:14px; align-items:flex-start; flex-wrap:wrap; }
+.view { display:none; }
+.view.on { display:flex; flex-direction:column; gap:14px; }
+.view.dialog { display:none; }
+/* Διάλογοι */
+.dim { position:absolute; inset:0; background: rgba(31,41,55,.32); display:none; }
+.dim.on { display:block; }
+.dlg { position:absolute; left:50%; top:50%; transform: translate(-50%,-50%); width: 600px; background: var(--window-bg); border-radius: 8px; border:1px solid var(--card-border); box-shadow: 0 8px 28px rgba(31,41,55,.25); overflow:hidden; display:none; }
+.dlg.on { display:block; }
+.dlg-title { padding: 12px 18px; background:#fff; border-bottom:1px solid var(--card-border); font-weight:600; font-size:16px; display:flex; align-items:center; gap:10px; }
+.dlg-title .x { margin-left:auto; color: var(--text-muted); font-weight:400; }
+.dlg-body { padding: 18px; display:flex; flex-direction:column; gap:14px; }
+.dlg-foot { padding: 0 18px 18px; display:flex; justify-content:flex-end; gap:10px; }
+.field { display:flex; flex-direction:column; gap:6px; }
+.field label { color: var(--text-muted); font-size:14.5px; }
+.input { height:38px; border:1px solid var(--control-border); border-radius:6px; background:#fff; padding: 0 12px; display:flex; align-items:center; gap:8px; min-width:0; }
+.input.focus { border: 2px solid var(--primary); padding: 0 11px; }
+.input .dots { letter-spacing: .25em; font-size: 15px; }
+.input .eye { margin-left:auto; color: var(--text-muted); display:flex; }
+.input .eye svg { width:18px; height:18px; }
+.check { display:flex; gap:10px; align-items:flex-start; }
+.box { width:18px; height:18px; border-radius:3px; border:1.5px solid var(--control-border); background:#fff; flex:none; margin-top:1px; display:grid; place-items:center; }
+.box.on { background: var(--primary); border-color: var(--primary); }
+.box svg { width:13px; height:13px; }
+.warnline { color: var(--live); font-size:14.5px; }
+.sep { height:1px; background: var(--card-border); margin: 2px 0; }
+.steps { display:flex; flex-direction:column; gap:10px; }
+.step { display:flex; gap:10px; align-items:center; }
+.step .ic { width:20px; display:grid; place-items:center; }
+
+.status.off { color: var(--text-muted); }
+.status.off::before { content:"○ "; }
+.status.bad { color: var(--live); font-weight:600; }
+.status.bad::before { content:"● "; }
+.bar { display:flex; align-items:center; gap:14px; border-radius:8px; padding:11px 14px 11px 16px; border:1px solid; }
+.bar.info { background: var(--primary-light); border-color: var(--primary); color: var(--primary-dark); }
+.bar.alarm { background: var(--live-light); border-color: var(--live); color: #8e1c1c; }
+.bar .txt { flex:1; min-width:0; }
+.bar .act { height:34px; }
+.role-big { font-weight:600; }
+.lock { display:inline-flex; align-items:center; gap:6px; color: var(--text-muted); font-size:14.5px; }
+.lock svg { width:15px; height:15px; }
+.grid2 { display:grid; grid-template-columns: 380px 1fr; gap:14px; align-items:start; }
+.reg-head { display:flex; align-items:baseline; gap:10px; margin: 0 0 10px; }
+.reg-head h2 { margin:0; font-size:18px; font-weight:600; }
+.room-cards { display:grid; grid-template-columns: repeat(auto-fill, minmax(260px,1fr)); gap:12px; }
+.room-row, .pc { display:flex; align-items:center; gap:8px; }
+.room-row { font-weight:600; margin-bottom:8px; }
+.room-row .count { margin-left:auto; font-weight:400; color:var(--text-muted); font-size:14.5px; white-space:nowrap; flex:none; padding-left:12px; }
+.room-row > span:nth-child(2) { min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.pc { padding:5px 0; }
+.pc .state { margin-left:auto; color: var(--text-muted); font-size:14.5px; }
+.pc .menu { color:#c3cad4; width:24px; text-align:center; }
+.dot { width:9px; height:9px; border-radius:50%; background:#c3cad4; flex:none; }
+.dot.on { background: var(--online); }
+.empty { color: var(--text-muted); padding: 22px 0 8px; text-align:center; }
+.card.empty { padding: 22px 18px; }
+.list { margin:0; padding:0; list-style:none; display:flex; flex-direction:column; gap:7px; }
+.list li { display:flex; gap:10px; align-items:baseline; }
+.list .tag { width:118px; flex:none; color: var(--text-muted); font-size:14.5px; }
+</style>
+</head>
+<body>
+<div class="app">
+<nav class="sidebar">
+    <div class="brand"><span class="brand-icon"><svg width="20" height="20" viewBox="0 0 20 20"><circle cx="10" cy="10" r="2.2" fill="#fff"/><circle cx="10" cy="10" r="5" fill="none" stroke="#fff" stroke-opacity=".8" stroke-width="1.6"/><circle cx="10" cy="10" r="8" fill="none" stroke="#fff" stroke-opacity=".5" stroke-width="1.6"/></svg></span>School Intercom</div>
+    <span class="nav"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 11l9-7 9 7v9a1 1 0 0 1-1 1h-5v-6H9v6H4a1 1 0 0 1-1-1z"/></svg>Κεντρική</span>
+    <span class="nav"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></svg>Αίθουσες</span>
+    <span class="nav"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 10v4h4l7 5V5L7 10z"/><path d="M18 8a5 5 0 0 1 0 8"/></svg>Ανακοινώσεις</span>
+    <span class="nav"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 6h16M4 12h16M4 18h10"/></svg>Σενάρια</span>
+    <span class="nav"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>Καταγραφές</span>
+    <span class="nav" id="nav-sec"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3 5 6v5c0 4.5 3 8 7 10 4-2 7-5.5 7-10V6z"/><path d="m9 12 2 2 4-4"/></svg>Ασφάλεια</span>
+    <span class="nav" id="nav-set"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>Ρυθμίσεις</span>
+  </nav>
+<main class="main">
+<section class="view" id="primary" data-nav="sec"><div class="head"><h1>Ασφάλεια</h1><span class="status">Συνδεδεμένος (Κύριος)</span></div><div class="tabs"><span class="tab">Υπολογιστές</span><span class="tab on">Πιστοποιητικά</span></div><div class="card" style="width:820px">
+  <h2>Ταυτότητα Manager</h2>
+  <dl class="kv">
+    <dt>Όνομα</dt><dd>school-intercom-director</dd>
+    <dt>Αποτύπωμα SHA-256</dt><dd><div class="fp-row"><span class="mono fp">84:28:••:••:••:••:••:••:••:••:••:••:••:••:••:••<br>••:••:••:••:••:••:••:••:••:••:••:••:••:••:9D:33</span><span style="margin-left:auto;color:var(--text-muted);display:flex;align-items:center;height:32px"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="width:24px;height:24px"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12z"/><circle cx="12" cy="12" r="3"/></svg></span><span class="pill"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V6a2 2 0 0 1 2-2h9"/></svg>Αντιγραφή</span></div></dd>
+    <dt>Δημιουργήθηκε</dt><dd>21/11/2026 18:42</dd>
+    <dt>Λήξη</dt><dd>Χωρίς λήξη</dd>
+    <dt>Κλειδί</dt><dd>ECDSA P-256 · <span class="ok">Κρυπτογραφημένο (DPAPI)</span></dd>
+    <dt>Μητρώο</dt><dd>v17 · 26 υπολογιστές · <span class="ok">υπογραφή έγκυρη</span></dd>
+    <dt>Φάκελος</dt><dd><span class="ell">C:\Users\Γραμματεία\.school-intercom\tls</span></dd>
+  </dl></div><div class="card" style="width:820px">
+  <h2>Ρόλος Manager<span class="right">ΓΡΑΜΜΑΤΕΙΑ-PC</span></h2>
+  <dl class="kv"><dt>Ρόλος</dt><dd class="role-big">Κύριος</dd>
+    <dt>Εξυπηρέτηση</dt><dd class="ok">Ενεργή</dd>
+    <dt>Άλλος Manager</dt><dd class="muted">κανένας σε λειτουργία</dd></dl>
+  <div class="row" style="margin-top:16px;justify-content:flex-end"><button class="act"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 8h13l-3.5-3.5M20 16H7l3.5 3.5"/></svg>Αλλαγή σε Εφεδρικό…</button><button class="act danger"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="6" y="6" width="12" height="12" rx="2"/></svg>Διακοπή εξυπηρέτησης εδώ</button></div></div></section><section class="view" id="restored" data-nav="sec"><div class="head"><h1>Ασφάλεια</h1><span class="status off">Χωρίς εξυπηρέτηση (Εφεδρικός)</span></div><div class="bar info"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:20px;height:20px;flex:none"><circle cx="12" cy="12" r="9"/><path d="M12 11v5M12 8v.5"/></svg><div class="txt">Επαναφορά από backup: ο υπολογιστής είναι <b>Εφεδρικός</b> και δεν εξυπηρετεί.</div><button class="act">Να μείνει Εφεδρικός</button><button class="act primary">Να γίνει Κύριος…</button></div><div class="tabs"><span class="tab">Υπολογιστές</span><span class="tab on">Πιστοποιητικά</span></div><div class="card" style="width:820px">
+  <h2>Ταυτότητα Manager</h2>
+  <dl class="kv">
+    <dt>Όνομα</dt><dd>school-intercom-director</dd>
+    <dt>Αποτύπωμα SHA-256</dt><dd><div class="fp-row"><span class="mono fp">84:28:••:••:••:••:••:••:••:••:••:••:••:••:••:••<br>••:••:••:••:••:••:••:••:••:••:••:••:••:••:9D:33</span><span style="margin-left:auto;color:var(--text-muted);display:flex;align-items:center;height:32px"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="width:24px;height:24px"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12z"/><circle cx="12" cy="12" r="3"/></svg></span><span class="pill"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V6a2 2 0 0 1 2-2h9"/></svg>Αντιγραφή</span></div></dd>
+    <dt>Δημιουργήθηκε</dt><dd>21/11/2026 18:42</dd>
+    <dt>Λήξη</dt><dd>Χωρίς λήξη</dd>
+    <dt>Κλειδί</dt><dd>ECDSA P-256 · <span class="ok">Κρυπτογραφημένο (DPAPI)</span></dd>
+    <dt>Μητρώο</dt><dd>v15 · 25 υπολογιστές · <span class="ok">υπογραφή έγκυρη</span></dd>
+    <dt>Φάκελος</dt><dd><span class="ell">C:\Users\Γραμματεία\.school-intercom\tls</span></dd>
+  </dl></div><div class="card" style="width:820px">
+  <h2>Ρόλος Manager<span class="right">ΓΡΑΜΜΑΤΕΙΑ-PC</span></h2>
+  <dl class="kv"><dt>Ρόλος</dt><dd class="role-big">Εφεδρικός</dd>
+    <dt>Εξυπηρέτηση</dt><dd style="color:var(--live)">Σταματημένη</dd>
+    <dt>Άλλος Manager</dt><dd class="muted">κανένας σε λειτουργία</dd></dl>
+  <div class="row" style="margin-top:16px;justify-content:flex-end"><button class="act"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 8h13l-3.5-3.5M20 16H7l3.5 3.5"/></svg>Αλλαγή σε Κύριο…</button><button class="act primary"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M8 5.5v13l10.5-6.5z"/></svg>Έναρξη εξυπηρέτησης</button></div></div></section><section class="view" id="conflict" data-nav="sec"><div class="head"><h1>Ασφάλεια</h1><span class="status bad">Δύο Manager σε λειτουργία (Κύριος)</span></div><div class="bar alarm"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:20px;height:20px;flex:none"><path d="M12 3 2 20h20z"/><path d="M12 10v4M12 17v.5"/></svg><div class="txt">Εξυπηρετεί και ο υπολογιστής <b>ΓΡΑΜΜΑΤΕΙΑ-2</b> (192.168.1.35). Σταματήστε τον έναν.</div><button class="act danger"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="6" y="6" width="12" height="12" rx="2"/></svg>Διακοπή εξυπηρέτησης εδώ</button></div><div class="tabs"><span class="tab">Υπολογιστές</span><span class="tab on">Πιστοποιητικά</span></div><div class="card" style="width:820px">
+  <h2>Ταυτότητα Manager</h2>
+  <dl class="kv">
+    <dt>Όνομα</dt><dd>school-intercom-director</dd>
+    <dt>Αποτύπωμα SHA-256</dt><dd><div class="fp-row"><span class="mono fp">84:28:••:••:••:••:••:••:••:••:••:••:••:••:••:••<br>••:••:••:••:••:••:••:••:••:••:••:••:••:••:9D:33</span><span style="margin-left:auto;color:var(--text-muted);display:flex;align-items:center;height:32px"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="width:24px;height:24px"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12z"/><circle cx="12" cy="12" r="3"/></svg></span><span class="pill"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V6a2 2 0 0 1 2-2h9"/></svg>Αντιγραφή</span></div></dd>
+    <dt>Δημιουργήθηκε</dt><dd>21/11/2026 18:42</dd>
+    <dt>Λήξη</dt><dd>Χωρίς λήξη</dd>
+    <dt>Κλειδί</dt><dd>ECDSA P-256 · <span class="ok">Κρυπτογραφημένο (DPAPI)</span></dd>
+    <dt>Μητρώο</dt><dd>v17 · 26 υπολογιστές · <span class="ok">υπογραφή έγκυρη</span></dd>
+    <dt>Φάκελος</dt><dd><span class="ell">C:\Users\Γραμματεία\.school-intercom\tls</span></dd>
+  </dl></div><div class="card" style="width:820px">
+  <h2>Ρόλος Manager<span class="right">ΓΡΑΜΜΑΤΕΙΑ-PC</span></h2>
+  <dl class="kv"><dt>Ρόλος</dt><dd class="role-big">Κύριος</dd>
+    <dt>Εξυπηρέτηση</dt><dd class="ok">Ενεργή</dd>
+    <dt>Άλλος Manager</dt><dd class="err">ΓΡΑΜΜΑΤΕΙΑ-2 · 192.168.1.35 · εξυπηρετεί</dd></dl>
+  <div class="row" style="margin-top:16px;justify-content:flex-end"><button class="act"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 8h13l-3.5-3.5M20 16H7l3.5 3.5"/></svg>Αλλαγή σε Εφεδρικό…</button><button class="act danger"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="6" y="6" width="12" height="12" rx="2"/></svg>Διακοπή εξυπηρέτησης εδώ</button></div></div></section><section class="view" id="newer" data-nav="sec"><div class="head"><h1>Ασφάλεια</h1><span class="status off">Χωρίς εξυπηρέτηση (Εφεδρικός)</span></div><div class="bar alarm"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:20px;height:20px;flex:none"><path d="M12 3 2 20h20z"/><path d="M12 10v4M12 17v.5"/></svg><div class="txt">Το μητρώο χρειάζεται ενημέρωση: ο ΓΡΑΜΜΑΤΕΙΑ-PC έχει v17, εδώ v15.</div><button class="act"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 15v4a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-4"/><path d="M12 3v12M7.5 10.5 12 15l4.5-4.5"/></svg>Εισαγωγή μητρώου…</button></div><div class="tabs"><span class="tab">Υπολογιστές</span><span class="tab on">Πιστοποιητικά</span></div><div class="card" style="width:820px">
+  <h2>Ταυτότητα Manager</h2>
+  <dl class="kv">
+    <dt>Όνομα</dt><dd>school-intercom-director</dd>
+    <dt>Αποτύπωμα SHA-256</dt><dd><div class="fp-row"><span class="mono fp">84:28:••:••:••:••:••:••:••:••:••:••:••:••:••:••<br>••:••:••:••:••:••:••:••:••:••:••:••:••:••:9D:33</span><span style="margin-left:auto;color:var(--text-muted);display:flex;align-items:center;height:32px"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="width:24px;height:24px"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12z"/><circle cx="12" cy="12" r="3"/></svg></span><span class="pill"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V6a2 2 0 0 1 2-2h9"/></svg>Αντιγραφή</span></div></dd>
+    <dt>Δημιουργήθηκε</dt><dd>21/11/2026 18:42</dd>
+    <dt>Λήξη</dt><dd>Χωρίς λήξη</dd>
+    <dt>Κλειδί</dt><dd>ECDSA P-256 · <span class="ok">Κρυπτογραφημένο (DPAPI)</span></dd>
+    <dt>Μητρώο</dt><dd>v15 · 25 υπολογιστές · <span class="ok">υπογραφή έγκυρη</span></dd>
+    <dt>Φάκελος</dt><dd><span class="ell">C:\Users\Γραμματεία\.school-intercom\tls</span></dd>
+  </dl></div><div class="card" style="width:820px">
+  <h2>Ρόλος Manager<span class="right">ΓΡΑΜΜΑΤΕΙΑ-PC</span></h2>
+  <dl class="kv"><dt>Ρόλος</dt><dd class="role-big">Εφεδρικός</dd>
+    <dt>Εξυπηρέτηση</dt><dd style="color:var(--live)">Σταματημένη</dd>
+    <dt>Άλλος Manager</dt><dd>ΓΡΑΜΜΑΤΕΙΑ-PC · 192.168.1.20 · <span class="err">μητρώο v17, εδώ v15</span></dd></dl>
+  <div class="row" style="margin-top:16px;justify-content:flex-end"><button class="act"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 8h13l-3.5-3.5M20 16H7l3.5 3.5"/></svg>Αλλαγή σε Κύριο…</button><button class="act primary"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M8 5.5v13l10.5-6.5z"/></svg>Έναρξη εξυπηρέτησης</button></div></div></section><section class="view" id="pcs-backup" data-nav="sec"><div class="head"><h1>Ασφάλεια</h1><span class="status">Συνδεδεμένος (Εφεδρικός)</span></div><div class="tabs"><span class="tab on">Υπολογιστές</span><span class="tab">Πιστοποιητικά</span></div><div class="grid2"><div><div class="reg-head"><h2>Νέες εγγραφές</h2><span class="lock"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="11" width="14" height="9" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/></svg>Μόνο στον Κύριο</span></div><div class="card empty"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:18px;height:18px;vertical-align:-3px;margin-right:8px"><rect x="5" y="11" width="14" height="9" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/></svg>Κλειστές επειδή δεν είναι Κύριος</div></div>
+<div><div class="reg-head"><h2>Εγγεγραμμένοι υπολογιστές</h2><span class="muted small">11 υπολογιστές · 6 online</span><span class="lock" style="margin-left:auto"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="11" width="14" height="9" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/></svg>Αλλαγές μόνο στον Κύριο</span></div><div class="room-cards"><div class="card"><div class="room-row"><span class="dot on"></span><span>C2627-Γ1</span><span class="count">2 υπολογιστές</span></div><div class="pc"><span class="dot on"></span><span>Board1</span><span class="state">Online</span></div><div class="pc"><span class="dot"></span><span>PC</span><span class="state">πριν 2 ώρες</span></div></div><div class="card"><div class="room-row"><span class="dot on"></span><span>C2627-Γ2</span><span class="count">1 υπολογιστής</span></div><div class="pc"><span class="dot on"></span><span>Board 2</span><span class="state">Online</span></div></div><div class="card"><div class="room-row"><span class="dot on"></span><span>Γραφείο Διευθυντή</span><span class="count">1 υπολογιστής</span></div><div class="pc"><span class="dot on"></span><span>Διευθυντής-PC</span><span class="state">Online</span></div></div><div class="card"><div class="room-row"><span class="dot"></span><span>C2627-Δ1</span><span class="count">1 υπολογιστής</span></div><div class="pc"><span class="dot"></span><span>Board1</span><span class="state">πριν 3 ημέρες</span></div></div><div class="card"><div class="room-row"><span class="dot on"></span><span>Εργαστήριο Πληροφορικής</span><span class="count">3 υπολογιστές</span></div><div class="pc"><span class="dot on"></span><span>Board1</span><span class="state">Online</span></div><div class="pc"><span class="dot on"></span><span>PC-Καθηγητή</span><span class="state">Online</span></div><div class="pc"><span class="dot"></span><span>PC-01</span><span class="state">πριν 1 ώρα</span></div></div><div class="card"><div class="room-row"><span class="dot on"></span><span>Γραφείο Καθηγητών</span><span class="count">1 υπολογιστής</span></div><div class="pc"><span class="dot on"></span><span>PC</span><span class="state">Online</span></div></div></div></div></div></section><section class="view" id="maint" data-nav="set"><div class="head"><h1>Ρυθμίσεις</h1><span class="status">Συνδεδεμένος (Κύριος)</span></div><div class="tabs"><span class="tab on">Συντήρηση</span></div><div class="cards">
+ <div class="card" style="width:520px"><h2>Backup</h2><dl class="kv"><dt>Τελευταίο</dt><dd>22/11/2026 19:30 · πριν 3 ώρες</dd><dt>Αρχείο</dt><dd><span class="ell">sch-intercom-backup-20261122-1930.sicb</span></dd><dt>Από τότε</dt><dd class="err">2 αλλαγές μητρώου</dd></dl>
+  <div class="row" style="margin-top:18px;justify-content:flex-end"><button class="act primary"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="5" rx="1"/><path d="M5 9v10a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1V9"/><path d="M12 12v5M9.5 14.5 12 17l2.5-2.5"/></svg>Δημιουργία backup…</button></div></div>
+ <div class="card" style="width:520px"><h2>Επαναφορά</h2><dl class="kv"><dt>Τελευταία</dt><dd>—</dd><dt>Προηγούμενα αρχεία</dt><dd>—</dd></dl>
+  <div class="row" style="margin-top:18px;justify-content:flex-end"><button class="act"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 1 0 3-6.7L3 8"/><path d="M3 3v5h5"/><path d="M12 8v4l3 2"/></svg>Επαναφορά από backup…</button></div></div>
+ <div class="card" style="width:520px"><h2>Μητρώο υπολογιστών</h2><dl class="kv"><dt>Μητρώο</dt><dd>v17 · 26 υπολογιστές</dd><dt>Τελευταία</dt><dd>22/11/2026 19:30 · v15</dd><dt>Από τότε</dt><dd class="err">2 αλλαγές που δεν έχουν εξαχθεί</dd></dl>
+  <div class="row" style="margin-top:18px;justify-content:flex-end"><button class="act"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 15v4a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-4"/><path d="M12 3v12M7.5 10.5 12 15l4.5-4.5"/></svg>Εισαγωγή…</button><button class="act primary"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 15v4a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-4"/><path d="M12 15V3M7.5 7.5 12 3l4.5 4.5"/></svg>Εξαγωγή…</button></div></div>
+</div></section>
+</main>
+<div class="dim" id="dim"></div>
+
+<div class="dlg" id="dlg-import-newer" style="width:620px"><div class="dlg-title">Εισαγωγή μητρώου<span class="x">✕</span></div><div class="dlg-body">
+ <div class="field"><label>Αρχείο</label><div class="row"><div class="input" style="flex:1"><span class="ell">E:\sch-intercom-registry-v17-20261123-0910.sicr</span></div><span class="pill">Αλλαγή…</span></div></div>
+ <div class="sep"></div>
+ <dl class="kv" style="gap:9px 22px"><dt>Μητρώο</dt><dd>v17 · εδώ v15 · <span class="ok">νεότερο ✓</span></dd><dt>Υπογραφή</dt><dd class="ok">ίδιος Manager ✓</dd></dl>
+ <ul class="list"><li><span class="tag">Προστίθενται</span><span>C2627-Α3 · Board1</span></li><li><span class="tag">Ανακαλούνται</span><span>C2627-Δ1 · Board1</span></li><li><span class="tag">Αλλάζουν αίθουσα</span><span>C2627-Γ2 · Board 2 → C2627-Γ3</span></li></ul>
+</div><div class="dlg-foot"><button class="act">Άκυρο</button><button class="act primary">Εισαγωγή</button></div></div>
+
+<div class="dlg" id="dlg-import-conflict" style="width:660px"><div class="dlg-title">Εισαγωγή μητρώου<span class="x">✕</span></div><div class="dlg-body">
+ <div class="field"><label>Αρχείο</label><div class="row"><div class="input" style="flex:1"><span class="ell">E:\sch-intercom-registry-v16-20261123-0915.sicr</span></div><span class="pill">Αλλαγή…</span></div></div>
+ <div class="sep"></div>
+ <dl class="kv" style="gap:9px 22px"><dt>Μητρώο</dt><dd>v16 · εδώ v17 · <span class="err">έχουν αποκλίνει</span></dd><dt>Υπογραφή</dt><dd class="ok">ίδιος Manager ✓</dd></dl>
+ <ul class="list"><li><span class="tag">Προστίθενται</span><span>Γραφείο Καθηγητών · PC-2</span></li><li><span class="tag">Ανακαλούνται</span><span>C2627-Γ1 · PC</span></li><li><span class="tag">Διαφορές</span><span>C2627-Γ2 · Board 2: αίθουσα C2627-Γ3 εδώ, C2627-Γ2 στο αρχείο</span></li></ul>
+ <div class="field"><label>Σε διαφορές κρατείται</label><div class="row"><span class="tab on" style="padding:6px 16px">Αυτού του υπολογιστή</span><span class="tab" style="padding:6px 16px">Του αρχείου</span></div></div>
+ <div class="warnline">Οι ανακλήσεις και των δύο ισχύουν πάντα.</div>
+</div><div class="dlg-foot"><button class="act">Άκυρο</button><button class="act primary">Συγχώνευση</button></div></div>
+
+<div class="dlg" id="dlg-promote" style="width:580px"><div class="dlg-title">Αλλαγή σε Κύριο<span class="x">✕</span></div><div class="dlg-body">
+ <div>Αν και ο άλλος υπολογιστής μείνει Κύριος, τα μητρώα θα αποκλίνουν και θα χρειαστεί συγχώνευση.</div>
+ <div class="warnline">Ο ΓΡΑΜΜΑΤΕΙΑ-PC έχει νεότερο μητρώο (v17, εδώ v15). Εισαγάγετέ το πρώτα.</div>
+ <div class="check"><span class="box on"><svg viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="m5 12.5 4.5 4.5L19 7.5"/></svg></span><div>Έναρξη εξυπηρέτησης</div></div>
+</div><div class="dlg-foot"><button class="act">Άκυρο</button><button class="act primary">Να γίνει Κύριος</button></div></div>
+
+<div class="dlg" id="dlg-start-conflict" style="width:560px"><div class="dlg-title">Έναρξη εξυπηρέτησης<span class="x">✕</span></div><div class="dlg-body">
+ <div>Ο υπολογιστής <b>ΓΡΑΜΜΑΤΕΙΑ-PC</b> (192.168.1.20) εξυπηρετεί ήδη. Σταματήστε τον πρώτα.</div>
+ <div class="warnline">Με δύο Manager σε λειτουργία οι Clients δεν συνδέονται σε κανέναν.</div>
+</div><div class="dlg-foot"><button class="act">Άκυρο</button><button class="act danger">Έναρξη παρ' όλα αυτά</button></div></div>
+
+</div>
+<script>
+const v = location.hash.slice(1) || 'primary';
+const dlgPage = {"import-newer": "maint", "import-conflict": "maint", "promote": "restored", "start-conflict": "restored"};
+const page = dlgPage[v] || v;
+const sec = document.getElementById(page); sec.classList.add('on');
+document.getElementById(sec.dataset.nav === 'sec' ? 'nav-sec' : 'nav-set').classList.add('on');
+if (dlgPage[v]) { document.getElementById('dim').classList.add('on'); document.getElementById('dlg-' + v).classList.add('on'); }
+</script>
+</body>
+</html>

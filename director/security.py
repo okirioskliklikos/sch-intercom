@@ -11,7 +11,9 @@
 """
 from __future__ import annotations
 
+import html
 import json
+import socket
 import threading
 import time
 from collections.abc import Callable
@@ -22,6 +24,7 @@ from shared.client_registry import RegistryError, _atomic_write
 from shared.enrollment import (MAX_PENDING, REQUEST_TTL, EnrollmentError,
                                IncorrectCodeError)
 from shared.identity import ROOM_PATTERN
+from shared.ui import theme
 
 LAST_SEEN_VERSION = 1
 #: Χωρίς αλλαγή κατάστασης online/offline, αποθήκευση το πολύ μία φορά ανά λεπτό.
@@ -412,3 +415,187 @@ class SecurityModel:
             self.trust.revoke(client_id, self.broadcaster)
         except RegistryError as exc:
             raise ValueError(f"Η ανάκληση απέτυχε: {exc}") from exc
+
+
+# ------------------------------------------------------------ Κύριος / Εφεδρικός (4.2D2)
+
+ROLE_NAMES = {"primary": "Κύριος", "backup": "Εφεδρικός"}
+TEXT_SERVING_ON = "Ενεργή"
+TEXT_SERVING_OFF = "Σταματημένη"
+TEXT_NO_OTHER = "κανένας σε λειτουργία"
+TEXT_PRIMARY_ONLY = "Μόνο στον Κύριο"
+TEXT_CHANGES_PRIMARY_ONLY = "Αλλαγές μόνο στον Κύριο"
+TEXT_CLOSED_BACKUP = "Κλειστές επειδή δεν είναι Κύριος"
+TEXT_CLOSED_STOPPED = "Κλειστές όσο η εξυπηρέτηση είναι σταματημένη"
+# Σύντομη μορφή της προειδοποίησης του phase4-2d.md §4, όπως στο εγκεκριμένο mockup.
+TEXT_PROMOTE = ("Αν και ο άλλος υπολογιστής μείνει Κύριος, τα μητρώα θα αποκλίνουν "
+                "και θα χρειαστεί συγχώνευση.")
+TEXT_DEMOTE = ("Ο υπολογιστής γίνεται Εφεδρικός. Νέες εγγραφές και αλλαγές "
+               "υπολογιστών γίνονται μόνο στον Κύριο.")
+TEXT_TWO_MANAGERS = "Με δύο Manager σε λειτουργία οι Clients δεν συνδέονται σε κανέναν."
+
+
+@dataclass(frozen=True)
+class OtherManager:
+    """Άλλος Manager της ίδιας εγκατάστασης που στέλνει beacon (δηλαδή εξυπηρετεί)."""
+    host: str
+    ip: str
+    rv: int
+    inst: str
+
+
+@dataclass(frozen=True)
+class RoleStatus:
+    """Στιγμιότυπο για επάνω μπάρα, ειδοποιήσεις και κάρτα «Ρόλος Manager»."""
+    role: str                       # primary | backup
+    serving: bool                   # πραγματική εξυπηρέτηση (ServingController.active)
+    notice: str | None              # "restored_as_backup" ή None
+    others: tuple[OtherManager, ...]
+    registry_version: int | None
+    host: str
+
+    @property
+    def primary(self) -> bool:
+        return self.role == "primary"
+
+    @property
+    def role_text(self) -> str:
+        return ROLE_NAMES[self.role]
+
+    @property
+    def conflict(self) -> bool:
+        """Εξυπηρετούμε και εξυπηρετεί και άλλος (κόκκινη ένδειξη)."""
+        return self.serving and bool(self.others)
+
+    @property
+    def newer(self) -> tuple[OtherManager, ...]:
+        if self.registry_version is None:
+            return ()
+        return tuple(o for o in self.others if o.rv > self.registry_version)
+
+    @property
+    def restored(self) -> bool:
+        return self.notice == "restored_as_backup"
+
+    @property
+    def enrollment_closed(self) -> str | None:
+        """Γιατί οι νέες εγγραφές είναι κλειστές (None = ανοιχτές)."""
+        if not self.primary:
+            return TEXT_CLOSED_BACKUP
+        if not self.serving:
+            return TEXT_CLOSED_STOPPED
+        return None
+
+    def header(self) -> tuple[str, str]:
+        """(κείμενο, κατάσταση) επάνω δεξιά: up (πράσινο ●), conflict (κόκκινο ●),
+        stopped (γκρι ○)· απόφαση χρήστη 23/11/2026."""
+        role = self.role_text
+        if not self.serving:
+            return f"Χωρίς εξυπηρέτηση ({role})", "stopped"
+        if self.others:
+            return f"Δύο Manager σε λειτουργία ({role})", "conflict"
+        return f"Συνδεδεμένος ({role})", "up"
+
+    def serving_text(self) -> tuple[str, str]:
+        return (TEXT_SERVING_ON, "ok") if self.serving else (TEXT_SERVING_OFF, "err")
+
+    def others_html(self) -> tuple[str, str]:
+        """Τιμή «Άλλος Manager» (rich text) και τόνος: muted, err ή κανονικό."""
+        if not self.others:
+            return TEXT_NO_OTHER, "muted"
+        lines = []
+        for other in self.others:
+            line = f"{html.escape(other.host)} · {html.escape(other.ip)} · "
+            if self.registry_version is not None and other.rv > self.registry_version:
+                line += (f'<span style="color:{_LIVE}">μητρώο v{other.rv}, '
+                         f"εδώ v{self.registry_version}</span>")
+            else:
+                line += "εξυπηρετεί"
+            lines.append(line)
+        return "<br>".join(lines), "err" if self.serving else ""
+
+    # --- ειδοποιήσεις κάτω από τον τίτλο της σελίδας ----------------------------
+    def conflict_html(self) -> str:
+        names = ", ".join(f"<b>{html.escape(o.host)}</b> ({html.escape(o.ip)})"
+                          for o in self.others)
+        return f"Εξυπηρετεί και ο υπολογιστής {names}. Σταματήστε τον έναν."
+
+    def restored_html(self) -> str:
+        text = "Επαναφορά από backup: ο υπολογιστής είναι <b>Εφεδρικός</b>"
+        return text + ("." if self.serving else " και δεν εξυπηρετεί.")
+
+    def newer_html(self) -> str:
+        other = max(self.newer, key=lambda o: o.rv)
+        return (f"Το μητρώο χρειάζεται ενημέρωση: ο {html.escape(other.host)} έχει "
+                f"v{other.rv}, εδώ v{self.registry_version}.")
+
+    def newer_warning(self) -> str | None:
+        """Γραμμή στον διάλογο «Αλλαγή σε Κύριο» (phase4-2d.md §4)."""
+        if not self.newer:
+            return None
+        other = max(self.newer, key=lambda o: o.rv)
+        return (f"Ο {other.host} έχει νεότερο μητρώο (v{other.rv}, "
+                f"εδώ v{self.registry_version}). Εισαγάγετέ το πρώτα.")
+
+
+# Χρώμα του σφάλματος μέσα σε rich text (το theme δεν εξαρτάται από Qt).
+_LIVE = theme.LIVE
+
+
+def local_host() -> str:
+    """Όνομα υπολογιστή, όπως στέλνεται στο beacon (έως 63 χαρακτήρες)."""
+    name = "".join(ch for ch in socket.gethostname() if ord(ch) >= 32 and ord(ch) != 127)
+    return name[:63] or "—"
+
+
+class RoleModel:
+    """Ρόλος και εξυπηρέτηση για το GUI, πάνω στα αντικείμενα του 4.2D1.
+
+    ``controller``: `director.serving.ServingController` (έναρξη/διακοπή)
+    ``watcher``: `shared.discovery.BeaconWatcher` (άλλοι Managers)
+    ``registry_version``: τρέχουσα έκδοση του ζωντανού μητρώου
+    """
+
+    def __init__(self, state_path: Path, controller, watcher, *,
+                 registry_version: Callable[[], int | None] = lambda: None,
+                 host: str | None = None):
+        self.state_path = Path(state_path)
+        self.controller = controller
+        self.watcher = watcher
+        self.registry_version = registry_version
+        self.host = host or local_host()
+
+    def status(self) -> RoleStatus:
+        from director.manager_state import load
+        state = load(self.state_path)
+        others = tuple(OtherManager(item.info.host, item.ip, item.info.rv, item.info.inst)
+                       for item in (self.watcher.others() if self.watcher else []))
+        return RoleStatus(state.role, bool(self.controller and self.controller.active),
+                          state.notice, others, self.registry_version(), self.host)
+
+    # --- ενέργειες ----------------------------------------------------------
+    def promote(self) -> None:
+        """Αλλαγή σε Κύριο: σβήνει την ειδοποίηση επαναφοράς, ανοίγει την εγγραφή
+        αν εξυπηρετεί. Η εξυπηρέτηση δεν αλλάζει (phase4-2d.md §4)."""
+        from director.manager_state import change_role
+        change_role(self.state_path, "primary")
+        if self.controller is not None:
+            self.controller.role_changed()
+
+    def demote(self) -> None:
+        from director.manager_state import change_role
+        change_role(self.state_path, "backup")
+        if self.controller is not None:
+            self.controller.role_changed()
+
+    def acknowledge(self) -> None:
+        """«Να μείνει Εφεδρικός»: σβήνει μόνο την ειδοποίηση."""
+        from director.manager_state import acknowledge
+        acknowledge(self.state_path)
+
+    def start(self, force: bool = False) -> None:
+        """Σε σύγκρουση χωρίς force: `director.serving.ServingConflict`."""
+        self.controller.start(force=force)
+
+    def stop(self) -> None:
+        self.controller.stop()

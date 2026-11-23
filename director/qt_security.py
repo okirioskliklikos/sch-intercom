@@ -21,8 +21,9 @@ from PySide6.QtWidgets import (QApplication, QFrame, QGraphicsDropShadowEffect, 
 
 from director.qt_gui import (ElidedLabel, SplitHandle, StatusDot, _repolish,
                              load_layout_settings, px, save_layout_settings)
-from director.security import (CODE_LENGTH, ComputerView, Decision, RequestView,
-                               RoomView, SecurityModel, computers_text)
+from director.security import (CODE_LENGTH, TEXT_CHANGES_PRIMARY_ONLY, TEXT_PRIMARY_ONLY,
+                               ComputerView, Decision, RequestView, RoleStatus, RoomView,
+                               SecurityModel, computers_text)
 from shared.ui import icons, theme
 
 PAGE_TITLE = "Ασφάλεια"
@@ -45,6 +46,40 @@ def _section_head(title: str) -> tuple[QWidget, QLabel]:
     count = _label("", "sectionCount")
     row.addWidget(count)
     return head, count
+
+
+class _AllOrNothingLabel(ElidedLabel):
+    """Όλο το κείμενο ή τίποτα (ποτέ «Αλλ…»)."""
+
+    def _elide(self) -> None:
+        fits = self.fontMetrics().horizontalAdvance(self.full_text) <= self.contentsRect().width()
+        text = self.full_text if fits else ""
+        if text != self.text():
+            self.setText(text)
+
+
+def _lock_note(text: str, name: str = "lockNote") -> QWidget:
+    """Λουκέτο και γκρι κείμενο (Εφεδρικός: «Μόνο στον Κύριο» κ.λπ.)."""
+    note = QWidget()
+    row = QHBoxLayout(note)
+    row.setContentsMargins(0, 0, 0, 0)
+    row.setSpacing(px(6))
+    icon = QLabel()
+    # Στην κεφαλίδα μικρό, όπως το κείμενο· στην κενή κάρτα 18px (απόφαση χρήστη 23/11/2026).
+    size = px(theme.ICON) if name == "closedNote" else px(theme.LOCK_NOTE_ICON)
+    icon.setPixmap(icons.pixmap("lock", theme.TEXT_MUTED, size, stroke_width=2.0))
+    row.addWidget(icon, 0, Qt.AlignmentFlag.AlignVCenter)
+    if name == "lockNote":
+        # Στην κεφαλίδα δεν φαρδαίνει τη στήλη: αν δεν χωρά, μένει μόνο το λουκέτο
+        # (το κείμενο στο tooltip).
+        label = _AllOrNothingLabel(text)
+        label.setObjectName(name)
+        note.setToolTip(text)
+    else:
+        label = _label(text, name)
+    row.addWidget(label, 1 if name == "lockNote" else 0, Qt.AlignmentFlag.AlignVCenter)
+    note.label = label
+    return note
 
 
 def _menu_icon(name: str, color: str = theme.TEXT_MUTED):
@@ -308,8 +343,16 @@ class SecurityPage(QWidget):
                  confirm: Callable[[str, str, str], bool] | None = None,
                  warn: Callable[[str], None] | None = None,
                  layout_settings: Path | None = None,
-                 identity: Callable[[], object] | None = None, parent=None):
+                 identity: Callable[[], object] | None = None,
+                 role_card: QWidget | None = None, parent=None):
         super().__init__(parent)
+        # Κύριος/Εφεδρικός (set_role): στον Εφεδρικό κλειστές εγγραφές, χωρίς μενού ⋮.
+        self.role: RoleStatus | None = None
+        self.locked = False
+        self.closed_reason: str | None = None
+        self.role_card = role_card
+        #: Καλείται σε αλλαγή tab (το παράθυρο κρύβει τότε το κουμπί της κόκκινης μπάρας).
+        self.tab_changed: Callable[[], None] | None = None
         # Πλάτος «Νέες εγγραφές» από τη λαβή, σε px του mockup· None = αυτόματο.
         self._layout_settings = layout_settings
         # 0 στο αρχείο = επαναφορά στην προεπιλογή (διπλό κλικ).
@@ -385,7 +428,7 @@ class SecurityPage(QWidget):
         self.tab_pages.addWidget(self.scroll)
         if identity is not None:
             from director.qt_maintenance import CertificatesPanel
-            self.certificates = CertificatesPanel(identity)
+            self.certificates = CertificatesPanel(identity, extra=role_card)
             self.tab_pages.addWidget(self.certificates)
         layout.addWidget(self.tab_pages, 1)
 
@@ -398,6 +441,8 @@ class SecurityPage(QWidget):
             self.certificates.refresh()
         else:
             self.refresh()
+        if self.tab_changed is not None:
+            self.tab_changed()
 
     @property
     def current_tab(self) -> str:
@@ -408,6 +453,9 @@ class SecurityPage(QWidget):
         return max(0, self.width() - px(theme.SCROLLBAR) - px(theme.SCROLL_GAP) - px(6))
 
     def _left_minimum(self) -> int:
+        if self.closed_reason is not None:
+            # Κλειστές εγγραφές: μόνο η κάρτα με το λουκέτο, οι αίθουσες παίρνουν τον χώρο.
+            return self.requests_section.minimumSizeHint().width()
         return max(px(theme.LEFT_COLUMN_MIN), self.requests_section.minimumSizeHint().width())
 
     def _room_card_minimum(self) -> int:
@@ -553,7 +601,21 @@ class SecurityPage(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(px(theme.REQUEST_CARD_SPACING))
         head, self.request_count = _section_head("Νέες εγγραφές")
+        self.requests_lock = _lock_note(TEXT_PRIMARY_ONLY)
+        self.requests_lock.hide()
+        head.layout().insertWidget(1, self.requests_lock, 0, Qt.AlignmentFlag.AlignVCenter)
         layout.addWidget(head)
+        # Εφεδρικός (ή χωρίς εξυπηρέτηση): μία κάρτα με λουκέτο αντί για αιτήματα.
+        self.closed_card = QFrame()
+        self.closed_card.setObjectName("card")
+        closed = QHBoxLayout(self.closed_card)
+        closed.setContentsMargins(px(14), px(14), px(14), px(14))
+        self.closed_note = _lock_note("", "closedNote")
+        closed.addStretch(1)
+        closed.addWidget(self.closed_note)
+        closed.addStretch(1)
+        self.closed_card.hide()
+        layout.addWidget(self.closed_card)
         # Οι εγγραφές είναι πάντα ανοιχτές· κείμενο μόνο αν η θύρα δεν άνοιξε.
         self.port_notice = _label("", "result")
         self.port_notice.setWordWrap(True)
@@ -561,10 +623,11 @@ class SecurityPage(QWidget):
         layout.addWidget(self.port_notice)
         self.no_requests = _label(NO_REQUESTS, "muted")
         layout.addWidget(self.no_requests)
-        self.requests_layout = QVBoxLayout()
+        self.requests_box = QWidget()
+        self.requests_layout = QVBoxLayout(self.requests_box)
         self.requests_layout.setContentsMargins(0, 0, 0, 0)
         self.requests_layout.setSpacing(px(theme.REQUEST_CARD_SPACING))
-        layout.addLayout(self.requests_layout)
+        layout.addWidget(self.requests_box)
         layout.addStretch(1)
 
     def _build_computers_section(self) -> None:
@@ -573,6 +636,11 @@ class SecurityPage(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(px(theme.REQUEST_CARD_SPACING))
         self.computers_head, self.totals = _section_head("Εγγεγραμμένοι υπολογιστές")
+        self.computers_lock = _lock_note(TEXT_CHANGES_PRIMARY_ONLY)
+        self.computers_lock.hide()
+        # Τέρμα δεξιά, μετά το «N υπολογιστές · M online» (mockup 4.2D2).
+        self.computers_head.layout().addWidget(self.computers_lock, 0,
+                                               Qt.AlignmentFlag.AlignVCenter)
         layout.addWidget(self.computers_head)
         self.no_computers = _label(NO_COMPUTERS, "muted")
         layout.addWidget(self.no_computers)
@@ -686,14 +754,44 @@ class SecurityPage(QWidget):
     def _warn(self, text: str) -> None:
         QMessageBox.warning(self, PAGE_TITLE, text)
 
+    # --- Κύριος / Εφεδρικός -------------------------------------------------
+    def set_role(self, status: RoleStatus) -> None:
+        """Από το παράθυρο σε κάθε ανανέωση ρόλου (φθηνό αν δεν άλλαξε κάτι)."""
+        self.role = status
+        if self.role_card is not None:
+            self.role_card.update_status(status)
+        locked = not status.primary
+        closed = status.enrollment_closed
+        if (locked, closed) == (self.locked, self.closed_reason):
+            return
+        self.locked, self.closed_reason = locked, closed
+        self.requests_lock.setVisible(locked)
+        self.computers_lock.setVisible(locked)
+        self.closed_note.label.setText(closed or "")
+        self.closed_card.setVisible(closed is not None)
+        self.requests_box.setVisible(closed is None)
+        self.request_count.setVisible(closed is None)
+        if closed is not None:
+            self.no_requests.hide()
+            self.port_notice.hide()
+        self.side_by_side = None   # νέο ελάχιστο πλάτος αριστερά → ξανά διάταξη
+        self._apply_lock()
+        self.refresh()
+
+    def _apply_lock(self) -> None:
+        """Στον Εφεδρικό κανένα μενού ⋮ σε υπολογιστές και αίθουσες (απόφαση 23/11/2026)."""
+        for widget in [*self.computer_rows.values(), *self.room_headers.values()]:
+            widget.menu_button.setVisible(not self.locked)
+
     # --- ανανέωση ----------------------------------------------------------
     def refresh(self) -> None:
         if self.current_tab == TAB_CERTIFICATES:
             return  # η ταυτότητα διαβάζεται όταν ανοίγει το tab, όχι κάθε δευτερόλεπτο
         now = self.clock()
-        notice = self.model.port_notice()
-        self.port_notice.setText(notice or "")
-        self.port_notice.setVisible(bool(notice))
+        if self.closed_reason is None:
+            notice = self.model.port_notice()
+            self.port_notice.setText(notice or "")
+            self.port_notice.setVisible(bool(notice))
         self._refresh_requests(now)
         self._refresh_rooms(now)
         self._relayout()
@@ -724,7 +822,7 @@ class SecurityPage(QWidget):
                 row.deleteLater()
         for row in self.request_rows.values():
             row.set_meta(now)
-        self.no_requests.setVisible(not self.request_rows)
+        self.no_requests.setVisible(not self.request_rows and self.closed_reason is None)
 
     def _refresh_rooms(self, now: float) -> None:
         rooms = self.model.rooms()
@@ -742,6 +840,7 @@ class SecurityPage(QWidget):
                 self.room_headers[room.room] = card.header
                 self.computer_rows.update(card.rows)
             self._room_order = None
+            self._apply_lock()
         for room in rooms:
             self.room_headers[room.room].update_state(room, now)
             for computer in room.computers:
