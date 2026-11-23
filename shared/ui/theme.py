@@ -32,6 +32,8 @@ ONLINE = "#2e9e4f"
 CONNECTED = "#2e8b57"
 LIVE = "#c62828"
 LIVE_LIGHT = "#f6d5d5"
+LIVE_DARK = "#a51f1f"         # hover κόκκινου κουμπιού (Διακοπή εξυπηρέτησης)
+ALARM_TEXT = "#8e1c1c"        # κείμενο κόκκινης μπάρας ειδοποίησης
 APP_ICON = "#0e7490"
 
 #: Όνομα token όπως στο ui-style.md → τιμή.
@@ -50,6 +52,8 @@ TOKENS: dict[str, str] = {
     "connected": CONNECTED,
     "live": LIVE,
     "live_light": LIVE_LIGHT,
+    "live_dark": LIVE_DARK,
+    "alarm_text": ALARM_TEXT,
     "app_icon": APP_ICON,
 }
 
@@ -115,6 +119,8 @@ ROW_HEIGHT = 30
 ROOM_COLUMN_WIDTH = 200     # στήλη αιθουσών· το όνομα κόβεται με «…» στην κουκκίδα
 ROOM_DOT_GAP = 9
 SIDEBAR_WIDTH = 200
+NAV_PADDING_V = 6           # μενού: ~43px ανά στοιχείο στα 12pt (απόφαση χρήστη 23/11/2026)
+NAV_SPACING = 4
 LEFT_COLUMN_WIDTH = 290
 ANNOUNCE_MIN_WIDTH = 290    # ελάχιστο πλάτος κάρτας «Ανακοίνωση» όταν ανοίγουν στήλες αιθουσών
 ANNOUNCE_RING = 176
@@ -130,7 +136,9 @@ WAVE_PERIOD_MS = 2400
 WAVE_DELAY_MS = 800
 WAVE_FADE_MS = 300          # εμφάνιση/εξαφάνιση σταθερού δαχτυλιδιού
 WAVE_FRAME_MS = 33          # ~30 fps, αρκετό για ομαλή κίνηση
-ICON = 16
+ICON = 18                   # εικονίδια κουμπιών παντού (απόφαση χρήστη 23/11/2026)
+LOCK_NOTE_ICON = 14         # λουκέτο δίπλα σε τίτλο ενότητας (Εφεδρικός, 4.2D2)
+EYE_ICON = 24               # μάτι του αποτυπώματος, στο ύψος της «Αντιγραφή» (23/11/2026)
 BRAND_ICON = 22
 DOT = 8
 METER_BAR = 6
@@ -153,7 +161,7 @@ ROOM_CARD_MIN = 260         # ελάχιστο πλάτος κάρτας αίθ�
 SECTION_GAP = 16            # απόσταση από το διαχωριστικό ανάμεσα στις δύο ενότητες
 REQUEST_CARD_SPACING = 10   # απόσταση ανάμεσα στις κάρτες αιτημάτων
 # Πιστοποιητικά / Συντήρηση (ui-style.md §7–§8)
-IDENTITY_CARD_MAX = 670     # κάρτα «Ταυτότητα Manager»
+IDENTITY_CARD_MAX = 700     # κάρτες «Ταυτότητα Manager» και «Ρόλος Manager»
 MAINTENANCE_CARD = 420      # κάρτες «Backup» / «Επαναφορά» (δίπλα-δίπλα όταν χωρούν)
 DIALOG_WIDTH = 490          # διάλογοι backup/επαναφοράς
 FIELD_HEIGHT = 32           # πεδία κειμένου/κωδικού στους διαλόγους
@@ -187,7 +195,7 @@ QMainWindow, #page {{
 }}
 #navItem {{
     text-align: left;
-    padding: {px(7)}px {px(10)}px;
+    padding: {px(NAV_PADDING_V)}px {px(10)}px;
     border: 1px solid transparent;
     border-radius: {px(NAV_RADIUS)}px;
     background: transparent;
@@ -236,8 +244,38 @@ QMainWindow, #page {{
     color: {CONNECTED};
     font-weight: 600;
 }}
-#connection[state="down"] {{
+#connection[state="down"], #connection[state="conflict"] {{
     color: {LIVE};
+}}
+#connection[state="stopped"] {{
+    color: {TEXT_MUTED};
+    font-weight: 400;
+}}
+#infoBar, #alarmBar {{
+    border: 1px solid {PRIMARY};
+    border-radius: {px(CARD_RADIUS)}px;
+    background: {PRIMARY_LIGHT};
+}}
+#alarmBar {{
+    border-color: {LIVE};
+    background: {LIVE_LIGHT};
+}}
+#barText {{
+    color: {PRIMARY_DARK};
+    background: transparent;
+}}
+#alarmBar #barText {{
+    color: {ALARM_TEXT};
+}}
+#lockNote {{
+    color: {TEXT_MUTED};
+    font-size: {m.font_pt(FONT_SMALL)}pt;
+}}
+#closedNote {{
+    color: {TEXT_MUTED};
+}}
+#roleValue {{
+    font-weight: 600;
 }}
 #pill, #pillSmall {{
     background: {CARD_BG};
@@ -490,7 +528,7 @@ QScrollBar::add-page, QScrollBar::sub-page {{
     border: 2px solid {PRIMARY};
     padding: 0 {px(8) - 1}px;
 }}
-#primaryAction, #secondaryAction {{
+#primaryAction, #secondaryAction, #dangerAction {{
     border-radius: {px(NAV_RADIUS)}px;
     padding: 0 {px(14)}px;
     min-height: {px(FIELD_HEIGHT) - 2}px;
@@ -513,7 +551,17 @@ QScrollBar::add-page, QScrollBar::sub-page {{
 #secondaryAction:hover {{
     background: {WINDOW_BG};
 }}
-#primaryAction:disabled, #secondaryAction:disabled {{
+#dangerAction {{
+    background: {LIVE};
+    border: 1px solid {LIVE};
+    color: {WHITE};
+    font-weight: 600;
+}}
+#dangerAction:hover {{
+    background: {LIVE_DARK};
+    border-color: {LIVE_DARK};
+}}
+#primaryAction:disabled, #secondaryAction:disabled, #dangerAction:disabled {{
     background: {CARD_BG};
     border-color: {CARD_BORDER};
     color: {TEXT_MUTED};

@@ -23,8 +23,10 @@ from cryptography.hazmat.primitives.asymmetric import ec, rsa
 from cryptography.x509.oid import NameOID
 
 from director import backup
+from director import registry_sync
+from director.manager_state import load as load_state, path_for as state_path
 from director.security import ago_text
-from shared.client_registry import verify_document
+from shared.client_registry import digest, merge, verify_document
 from shared.manager_key import ManagerKeyError, is_protected, key_password
 
 PASSPHRASE_MIN = backup.PASSWORD_MIN
@@ -52,6 +54,11 @@ TEXT_RESTART_NOTE = ("Ο Manager σταματά, γίνεται η επαναφ�
 TEXT_ACCEPT_OLDER = "Συνέχεια με το παλαιότερο μητρώο"
 TEXT_REPLACE_IDENTITY = "Αντικατάσταση της ταυτότητας Manager"
 TEXT_PREVIOUS_HINT = "περιέχει το προηγούμενο ιδιωτικό κλειδί"
+TEXT_UNEXPORTED_NONE = "καμία αλλαγή ✓"
+TEXT_SAME_MANAGER = "ίδιος Manager ✓"
+TEXT_ALREADY_CURRENT = "Το μητρώο είναι ήδη ενημερωμένο."
+TEXT_REVOCATIONS_KEEP = "Οι ανακλήσεις και των δύο ισχύουν πάντα."
+REGISTRY_FILTER = "Μητρώο School Intercom (*.sicr)"
 RESTORE_STEPS = ("Διακοπή εξυπηρέτησης Clients", "Έλεγχος και εγκατάσταση αρχείων",
                  "Επανεκκίνηση Manager")
 
@@ -78,12 +85,17 @@ def fingerprint_lines(fingerprint: str) -> str:
     return ":".join(parts[:half]) + "\n" + ":".join(parts[half:])
 
 
-def fingerprint_short(fingerprint: str) -> str:
-    """Κρυμμένο αποτύπωμα (προεπιλογή): τα 4 πρώτα και τα 4 τελευταία bytes."""
+MASK = "\u2022\u2022"
+
+
+def fingerprint_masked(fingerprint: str) -> str:
+    """Κρυμμένο αποτύπωμα (προεπιλογή): όλο το μήκος σε δύο γραμμές, με φανερά μόνο τα
+    2 πρώτα και τα 2 τελευταία bytes· τα υπόλοιπα «••» (απόφαση χρήστη 23/11/2026)."""
     parts = fingerprint.split(":")
-    if len(parts) <= 8:
-        return fingerprint
-    return ":".join(parts[:4]) + " … " + ":".join(parts[-4:])
+    if len(parts) <= 4:
+        return fingerprint_lines(fingerprint)
+    shown = [p if i < 2 or i >= len(parts) - 2 else MASK for i, p in enumerate(parts)]
+    return fingerprint_lines(":".join(shown))
 
 
 def _plural(count: int, one: str, many: str) -> str:
@@ -222,6 +234,7 @@ class MaintenanceModel:
     def __init__(self, registry_file: Path, tls_cert: Path, tls_key: Path, *,
                  media_dir: Path | None = None,
                  registry_version: Callable[[], int | None] | None = None,
+                 importer: Callable[..., dict] | None = None,
                  clock: Callable[[], float] = time.time, kdf_n: int = backup.KDF_N):
         self.registry_file = Path(registry_file)
         self.tls_cert = Path(tls_cert)
@@ -229,6 +242,9 @@ class MaintenanceModel:
         self.data_dir = self.registry_file.parent
         self.media_dir = Path(media_dir) if media_dir else self.data_dir / "media"
         self._registry_version = registry_version
+        # Εισαγωγή μητρώου στον Manager που τρέχει (RegistryTrust.import_registry):
+        # ξαναφτιάχνει το mTLS context και αποσυνδέει όσους δεν είναι πια εγκεκριμένοι.
+        self.importer = importer
         self.clock = clock
         self.kdf_n = kdf_n  # χαμηλότερο μόνο στα tests
 
@@ -319,6 +335,141 @@ class MaintenanceModel:
                               replace_identity=request.replace_identity,
                               accept_older=request.accept_older,
                               restore_media=request.restore_media, fail_after=fail_after)
+
+
+    # --- μητρώο υπολογιστών (εξαγωγή/εισαγωγή, phase4-2d.md §6–§7) ----------
+    def primary(self) -> bool:
+        return load_state(state_path(self.registry_file)).role == "primary"
+
+    def registry_card(self) -> dict:
+        """{registry, last_export, unexported}: κείμενα της κάρτας «Μητρώο υπολογιστών».
+
+        Το «Από τότε» (μη εξαγμένες αλλαγές) υπάρχει μόνο στον Κύριο και μετρά από την
+        τελευταία εξαγωγή ή το τελευταίο backup (phase4-2d.md §6).
+        """
+        identity = self.identity()
+        export = self._read_json(registry_sync.LAST_EXPORT)
+        last = None
+        if export and "time" in export:
+            last = date_text(export["time"])
+            if isinstance(export.get("registry_version"), int):
+                last += f" · v{export['registry_version']}"
+        unexported = None
+        if self.primary():
+            try:
+                count = registry_sync.status(self.registry_file, self.tls_cert)["unexported"]
+            except (registry_sync.SyncError, OSError, ValueError):
+                count = None
+            unexported = (TEXT_UNEXPORTED_NONE, "ok") if count == 0 else (
+                ("ποτέ", "err") if count is None else
+                (_plural(count, "αλλαγή που δεν έχει εξαχθεί",
+                         "αλλαγές που δεν έχουν εξαχθεί"), "err"))
+        return {"registry": identity.registry_text(), "last_export": last,
+                "unexported": unexported}
+
+    def export_registry(self, out: Path) -> Path:
+        return registry_sync.export_registry(self.registry_file, self.tls_cert, Path(out))
+
+    def default_export_name(self) -> str:
+        version = self.registry_version() or 0
+        return (f"sch-intercom-registry-v{version}-"
+                + datetime.now().strftime("%Y%m%d-%H%M") + ".sicr")
+
+    def import_view(self, source: Path, *, prefer: str = "local") -> "ImportView":
+        """Έλεγχος και προεπισκόπηση πριν από την εισαγωγή. Σφάλματα: SyncError."""
+        source = Path(source)
+        document, local, kind, _ = registry_sync.examine(
+            self.registry_file, self.tls_cert, source, prefer=prefer, allow_merge=True)
+        incoming = document["registry"]
+        result = incoming
+        if kind == "conflict":
+            result, _report = merge(local, incoming, prefer=prefer)
+        return import_view(source, local, incoming, result, kind, prefer)
+
+    def apply_import(self, view: "ImportView") -> dict:
+        if self.importer is None:
+            raise registry_sync.SyncError("Η εισαγωγή χρειάζεται τον Manager σε λειτουργία.")
+        return self.importer(view.path, merge_conflict=view.relation == "conflict",
+                             prefer=view.prefer, expected_digest=view.expected_digest)
+
+
+@dataclass(frozen=True)
+class ImportView:
+    """Τι θα αλλάξει με την εισαγωγή (διάλογος «Εισαγωγή μητρώου»)."""
+    path: Path
+    relation: str                     # same | newer | conflict
+    prefer: str
+    expected_digest: str
+    version_text: str
+    version_tone: str | None
+    added: tuple[str, ...] = ()
+    revoked: tuple[str, ...] = ()
+    moved: tuple[str, ...] = ()
+    renamed: tuple[str, ...] = ()
+    keys: tuple[str, ...] = ()
+    differences: tuple[str, ...] = ()
+
+    @property
+    def changes(self) -> list[tuple[str, tuple[str, ...]]]:
+        """Γραμμές προεπισκόπησης με τη σειρά του mockup· μόνο όσες έχουν στοιχεία."""
+        rows = [("Προστίθενται", self.added), ("Ανακαλούνται", self.revoked),
+                ("Αλλάζουν αίθουσα", self.moved), ("Μετονομάζονται", self.renamed),
+                ("Αλλάζουν κλειδί", self.keys), ("Διαφορές", self.differences)]
+        return [(title, items) for title, items in rows if items]
+
+
+def _computer_label(entry: dict) -> str:
+    return f'{entry["room"]} · {entry.get("name") or entry["client_id"][:8]}'
+
+
+def import_view(path: Path, local: dict, incoming: dict, result: dict, kind: str,
+                prefer: str = "local") -> ImportView:
+    """Καθαρή συνάρτηση: σύγκριση τοπικού μητρώου με το αποτέλεσμα της εισαγωγής."""
+    old = {e["client_id"]: e for e in local["clients"]}
+    theirs = {e["client_id"]: e for e in incoming["clients"]}
+    here, there = local["registry_version"], incoming["registry_version"]
+    if kind == "same":
+        version = (f"v{there} · ίδιο με αυτόν τον υπολογιστή", "muted")
+    elif kind == "newer":
+        version = (f"v{there} · εδώ v{here} · νεότερο ✓", "ok")
+    else:
+        version = (f"v{there} · εδώ v{here} · έχουν αποκλίνει", "err")
+    added, revoked, moved, renamed, keys, differences = [], [], [], [], [], []
+    for entry in result["clients"]:
+        before = old.get(entry["client_id"])
+        if before is None:
+            if entry["status"] == "approved":
+                added.append(_computer_label(entry))
+            continue
+        if before["status"] == "approved" and entry["status"] != "approved":
+            revoked.append(_computer_label(before))
+            continue
+        if entry["status"] != "approved":
+            continue
+        if before["room"] != entry["room"]:
+            target = (entry["room"] if before.get("name") == entry.get("name")
+                      else _computer_label(entry))
+            moved.append(f"{_computer_label(before)} → {target}")
+        elif before.get("name") != entry.get("name"):
+            renamed.append(f"{_computer_label(before)} → {entry.get('name', '')}")
+        if before["status"] == "approved" and before["spki_sha256"] != entry["spki_sha256"]:
+            keys.append(_computer_label(entry))
+    if kind == "conflict":
+        for client_id, mine in old.items():
+            other = theirs.get(client_id)
+            if other is None:
+                continue
+            parts = []
+            if mine["room"] != other["room"]:
+                parts.append(f'αίθουσα {mine["room"]} εδώ, {other["room"]} στο αρχείο')
+            if mine.get("name") != other.get("name"):
+                parts.append(f'όνομα {mine.get("name", "")} εδώ, '
+                             f'{other.get("name", "")} στο αρχείο')
+            if parts:
+                differences.append(f"{_computer_label(mine)}: " + "; ".join(parts))
+    return ImportView(Path(path), kind, prefer, digest(local), *version,
+                      tuple(added), tuple(revoked), tuple(moved), tuple(renamed),
+                      tuple(keys), tuple(differences))
 
 
 def preview_rows(info: dict) -> list[tuple[str, str, str | None]]:

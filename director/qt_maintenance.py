@@ -20,6 +20,7 @@ from PySide6.QtWidgets import (QApplication, QCheckBox, QDialog, QFileDialog, QF
                                QPushButton, QScrollArea, QToolButton, QVBoxLayout, QWidget)
 
 from director import maintenance as m
+from director import registry_sync
 from director.backup import EXTENSION, BackupError
 from director.qt_gui import ElidedLabel, _repolish, load_layout_settings, px, save_layout_settings
 from shared.ui import icons, theme
@@ -35,6 +36,12 @@ DELETE_PREVIOUS = "Διαγραφή"
 COPY = "Αντιγραφή"
 COPIED = "Αντιγράφηκε ✓"
 BACKUP_FILTER = "Backup School Intercom (*.sicb)"
+REGISTRY_TITLE = "Μητρώο υπολογιστών"
+IMPORT = "Εισαγωγή…"
+EXPORT = "Εξαγωγή…"
+IMPORT_TITLE = "Εισαγωγή μητρώου"
+PREFER_LOCAL = "Αυτού του υπολογιστή"
+PREFER_FILE = "Του αρχείου"
 
 
 def _label(text: str = "", name: str | None = None, *, tone: str | None = None) -> QLabel:
@@ -129,7 +136,8 @@ def _scroll(body: QWidget) -> QScrollArea:
 class CertificatesPanel(QWidget):
     """Μία κάρτα «Ταυτότητα Manager» (απόφαση χρήστη 22/11/2026: μόνο η ταυτότητα)."""
 
-    def __init__(self, identity: Callable[[], m.ManagerIdentity], parent=None):
+    def __init__(self, identity: Callable[[], m.ManagerIdentity], *,
+                 extra: QWidget | None = None, parent=None):
         super().__init__(parent)
         self._identity = identity
         self.identity: m.ManagerIdentity | None = None
@@ -150,6 +158,9 @@ class CertificatesPanel(QWidget):
         mono = QFontDatabase.systemFont(QFontDatabase.SystemFont.FixedFont)
         mono.setPointSizeF(self.font().pointSizeF() * 0.96)
         self.fingerprint.setFont(mono)
+        # Πάντα ολόκληρο σε δύο γραμμές των 16 bytes (και κρυμμένο: ίδιο μήκος με «••»).
+        self.fingerprint.setMinimumWidth(
+            self.fingerprint.fontMetrics().horizontalAdvance("00:" * 15 + "00") + px(4))
         self.fingerprint.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         self.copy_button = QPushButton(COPY)
         self.copy_button.setObjectName("pill")
@@ -160,8 +171,9 @@ class CertificatesPanel(QWidget):
         self.reveal_button = QToolButton()
         self.reveal_button.setObjectName("rowMenu")
         self.reveal_button.setCheckable(True)
-        self.reveal_button.setIconSize(QSize(px(theme.ICON), px(theme.ICON)))
-        self.reveal_button.setFixedSize(px(26), px(26))
+        # Μάτι 24px, κάθετα στο κέντρο με την «Αντιγραφή» (απόφαση χρήστη 23/11/2026).
+        self.reveal_button.setIconSize(QSize(px(theme.EYE_ICON), px(theme.EYE_ICON)))
+        self.reveal_button.setFixedSize(px(theme.EYE_ICON + 8), px(theme.EYE_ICON + 8))
         self.reveal_button.setCursor(Qt.CursorShape.PointingHandCursor)
         self.reveal_button.toggled.connect(self._show_fingerprint)
         row.addWidget(self.fingerprint, 1)
@@ -178,7 +190,11 @@ class CertificatesPanel(QWidget):
         folder.setObjectName("kvValue")
         self.rows.add("folder", "Φάκελος", folder)
         layout.addLayout(self.rows)
+        outer.setSpacing(px(theme.CARD_SPACING))
         outer.addWidget(card)
+        # Κάρτα «Ρόλος Manager» κάτω από την ταυτότητα (4.2D2).
+        if extra is not None:
+            outer.addWidget(extra)
         outer.addStretch(1)
         page = QVBoxLayout(self)
         page.setContentsMargins(0, 0, 0, 0)
@@ -232,7 +248,7 @@ class CertificatesPanel(QWidget):
     def _show_fingerprint(self, shown: bool) -> None:
         """Μάτι: προεπιλογή κρυμμένο (σχόλιο 23/11/2026)· η Αντιγραφή δίνει πάντα όλο."""
         name = "eye-off" if shown else "eye"
-        self.reveal_button.setIcon(icons.icon(name, theme.TEXT_MUTED, size=px(theme.ICON)))
+        self.reveal_button.setIcon(icons.icon(name, theme.TEXT_MUTED, size=px(theme.EYE_ICON)))
         self.reveal_button.setToolTip("Απόκρυψη αποτυπώματος" if shown
                                       else "Εμφάνιση αποτυπώματος")
         self.reveal_button.setAccessibleName(self.reveal_button.toolTip())
@@ -241,7 +257,7 @@ class CertificatesPanel(QWidget):
             return
         fingerprint = self.identity.fingerprint
         self.fingerprint.setText(m.fingerprint_lines(fingerprint) if shown
-                                 else m.fingerprint_short(fingerprint))
+                                 else m.fingerprint_masked(fingerprint))
 
     def copy_fingerprint(self) -> None:
         if self.identity is None:
@@ -572,6 +588,175 @@ class RestoreDialog(_Dialog):
             self.accept()
 
 
+class ImportDialog(_Dialog):
+    """«Εισαγωγή μητρώου» (.sicr): έλεγχος, τι αλλάζει, και σε απόκλιση επιλογή για τις
+    διαφορές («Αυτού του υπολογιστή» / «Του αρχείου»)· εγκεκριμένο mockup 23/11/2026."""
+
+    def __init__(self, model: m.MaintenanceModel, folder: Path, *,
+                 choose_path: Callable[[QWidget, Path], Path | None] | None = None,
+                 parent=None):
+        super().__init__(IMPORT_TITLE, parent)
+        self.body.addStrut(px(theme.DIALOG_WIDTH + 60) - 2 * px(15))
+        self.model = model
+        self.folder = Path(folder)
+        self.choose_path = choose_path or self._choose_path
+        self.view: m.ImportView | None = None
+        self.result_info: dict | None = None
+        self.prefer = "local"
+        self.path = _line_edit()
+        self.path.setReadOnly(True)
+        change = _button("Αλλαγή…", "pill")
+        change.clicked.connect(self._change)
+        self.field("Αρχείο", self.path, change)
+        self.error = _label("", "warnText")
+        self.error.setWordWrap(True)
+        self.error.hide()
+        self.body.addWidget(self.error)
+
+        self.summary = QWidget()
+        summary = QVBoxLayout(self.summary)
+        summary.setContentsMargins(0, 0, 0, 0)
+        summary.setSpacing(px(11))
+        line = QFrame()
+        line.setObjectName("dialogSeparator")
+        line.setFixedHeight(1)
+        summary.addWidget(line)
+        self.rows = KeyValues()
+        version = QWidget()
+        pair = QHBoxLayout(version)
+        pair.setContentsMargins(0, 0, 0, 0)
+        pair.setSpacing(px(6))
+        self.version_text = _label("", "kvValue")
+        self.version_state = _label("", "kvValue")
+        pair.addWidget(self.version_text)
+        pair.addWidget(self.version_state)
+        pair.addStretch(1)
+        self.rows.add("registry", "Μητρώο", version)
+        self.rows.add("signature", "Υπογραφή")
+        summary.addLayout(self.rows)
+        # Ίδια στήλη ετικετών με τις γραμμές αλλαγών (ξεχωριστό grid που ξαναφτιάχνεται).
+        metrics = self.rows.labels["registry"].fontMetrics()
+        self.label_width = max(metrics.horizontalAdvance(text) for text in (
+            "Μητρώο", "Υπογραφή", "Προστίθενται", "Ανακαλούνται", "Αλλάζουν αίθουσα",
+            "Μετονομάζονται", "Αλλάζουν κλειδί", "Διαφορές")) + px(2)
+        self.rows.setColumnMinimumWidth(0, self.label_width)
+        self.changes_box = QWidget()
+        self.changes_layout = QVBoxLayout(self.changes_box)
+        self.changes_layout.setContentsMargins(0, 0, 0, 0)
+        summary.addWidget(self.changes_box)
+        self.current = _label(m.TEXT_ALREADY_CURRENT, "small")
+        summary.addWidget(self.current)
+
+        self.prefer_box = QWidget()
+        prefer = QVBoxLayout(self.prefer_box)
+        prefer.setContentsMargins(0, 0, 0, 0)
+        prefer.setSpacing(px(6))
+        prefer.addWidget(_label("Σε διαφορές κρατείται", "fieldLabel"))
+        toggle = QHBoxLayout()
+        toggle.setSpacing(px(6))
+        self.prefer_buttons: dict[str, QPushButton] = {}
+        for key, text in (("local", PREFER_LOCAL), ("incoming", PREFER_FILE)):
+            button = QPushButton(text)
+            button.setObjectName("tab")
+            button.setCheckable(True)
+            button.setCursor(Qt.CursorShape.PointingHandCursor)
+            button.clicked.connect(lambda _=False, k=key: self.set_prefer(k))
+            toggle.addWidget(button)
+            self.prefer_buttons[key] = button
+        toggle.addStretch(1)
+        prefer.addLayout(toggle)
+        note = _label(m.TEXT_REVOCATIONS_KEEP, "warnText")
+        note.setWordWrap(True)
+        prefer.addWidget(note)
+        summary.addWidget(self.prefer_box)
+        self.summary.hide()
+        self.body.addWidget(self.summary)
+        self.cancel, self.apply_button = self.footer("Εισαγωγή")
+        self.apply_button.clicked.connect(self.run)
+        self.set_prefer("local", load=False)
+        self._validate()
+
+    def _choose_path(self, parent: QWidget, current: Path) -> Path | None:
+        path, _ = QFileDialog.getOpenFileName(parent, IMPORT_TITLE, str(current),
+                                              m.REGISTRY_FILTER)
+        return Path(path) if path else None
+
+    def _change(self) -> None:
+        current = Path(self.path.text()) if self.path.text() else self.folder
+        chosen = self.choose_path(self, current)
+        if chosen is not None:
+            self.open(chosen)
+
+    def open(self, path: Path) -> None:
+        self.path.setText(str(path))
+        self.load()
+
+    def set_prefer(self, prefer: str, *, load: bool = True) -> None:
+        self.prefer = prefer
+        for key, button in self.prefer_buttons.items():
+            button.setChecked(key == prefer)
+        if load and self.view is not None:
+            self.load()
+
+    def load(self) -> None:
+        self.error.hide()
+        try:
+            view = self.model.import_view(Path(self.path.text()), prefer=self.prefer)
+        except (registry_sync.SyncError, OSError, ValueError, KeyError) as exc:
+            self.view = None
+            self.summary.hide()
+            self.error.setText(str(exc) if isinstance(exc, registry_sync.SyncError)
+                               else f"Σφάλμα: {exc}")
+            self.error.show()
+            self._validate()
+            self.adjustSize()
+            return
+        self.view = view
+        main, _sep, state = view.version_text.rpartition(" · ")
+        self.version_text.setText(main + " ·" if main else "")
+        self.version_text.setVisible(bool(main))
+        self.version_state.setText(state)
+        _repolish(self.version_state, tone=view.version_tone or "")
+        self.rows.set("signature", m.TEXT_SAME_MANAGER, "ok")
+        old = self.changes_box
+        self.changes_box = QWidget()
+        rows = KeyValues()
+        rows.setColumnMinimumWidth(0, self.label_width)
+        for title, items in view.changes:
+            value = _label("\n".join(items), "kvValue")
+            value.setWordWrap(True)
+            rows.add(title, title, value)
+        QVBoxLayout(self.changes_box).setContentsMargins(0, 0, 0, 0)
+        self.changes_box.layout().addLayout(rows)
+        self.summary.layout().replaceWidget(old, self.changes_box)
+        old.deleteLater()
+        self.changes_box.setVisible(bool(view.changes))
+        self.current.setVisible(view.relation == "same")
+        conflict = view.relation == "conflict"
+        self.prefer_box.setVisible(conflict)
+        self.apply_button.setText("Συγχώνευση" if conflict else "Εισαγωγή")
+        self.summary.show()
+        self._validate()
+        self.adjustSize()
+
+    def _validate(self) -> None:
+        self.apply_button.setEnabled(self.view is not None and self.view.relation != "same")
+
+    def run(self) -> None:
+        if self.view is None:
+            return
+        self.error.hide()
+        try:
+            with _Busy():
+                self.result_info = self.model.apply_import(self.view)
+        except (registry_sync.SyncError, OSError, ValueError) as exc:
+            self.error.setText(str(exc))
+            self.error.show()
+            self.adjustSize()
+            return
+        self.accept()
+
+
 class RestoreProgress(_Dialog):
     """Βήματα επαναφοράς: ✓ ολοκληρώθηκε, ● τρέχει, κενό = δεν ξεκίνησε."""
 
@@ -678,7 +863,8 @@ class SettingsPage(QWidget):
         self.grid.setSpacing(px(theme.CARD_SPACING))
         self.backup_card = self._build_backup_card()
         self.restore_card = self._build_restore_card()
-        for card in (self.backup_card, self.restore_card):
+        self.registry_card = self._build_registry_card()
+        for card in (self.backup_card, self.restore_card, self.registry_card):
             card.setFixedWidth(px(theme.MAINTENANCE_CARD))
         self._arrange(True)
         self.scroll = _scroll(body)
@@ -733,11 +919,33 @@ class SettingsPage(QWidget):
         layout.addLayout(row)
         return card
 
+    def _build_registry_card(self) -> QFrame:
+        """«Μητρώο υπολογιστών»: εξαγωγή/εισαγωγή .sicr ανάμεσα σε Κύριο και Εφεδρικό."""
+        card, layout = _card(REGISTRY_TITLE)
+        self.registry_rows = KeyValues()
+        self.registry_rows.add("registry", "Μητρώο")
+        self.registry_rows.add("last", "Τελευταία")
+        self.registry_rows.add("unexported", "Από τότε")
+        layout.addLayout(self.registry_rows)
+        layout.addSpacing(px(4))
+        layout.addStretch(1)
+        row = QHBoxLayout()
+        row.setSpacing(px(8))
+        self.import_button = _button(IMPORT, "secondaryAction", "import")
+        self.import_button.clicked.connect(self.open_import)
+        self.export_button = _button(EXPORT, "primaryAction", "export", theme.WHITE)
+        self.export_button.clicked.connect(self.export_registry)
+        row.addStretch(1)
+        row.addWidget(self.import_button)
+        row.addWidget(self.export_button)
+        layout.addLayout(row)
+        return card
+
     def _arrange(self, side_by_side: bool) -> None:
         if side_by_side == self.side_by_side:
             return
         self.side_by_side = side_by_side
-        for card in (self.backup_card, self.restore_card):
+        for card in (self.backup_card, self.restore_card, self.registry_card):
             self.grid.removeWidget(card)
         # Δίπλα-δίπλα: ίδιο ύψος, κοινή κάτω ευθεία (σχόλιο 23/11/2026).
         align = Qt.AlignmentFlag.AlignLeft if side_by_side \
@@ -745,12 +953,14 @@ class SettingsPage(QWidget):
         self.grid.addWidget(self.backup_card, 0, 0, align)
         self.grid.addWidget(self.restore_card, 0 if side_by_side else 1,
                             1 if side_by_side else 0, align)
+        top = Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft
+        self.grid.addWidget(self.registry_card, 1 if side_by_side else 2, 0, top)
         for column in range(3):
             self.grid.setColumnStretch(column, 0)
-        for row in range(3):
+        for row in range(4):
             self.grid.setRowStretch(row, 0)
         self.grid.setColumnStretch(2 if side_by_side else 1, 1)
-        self.grid.setRowStretch(1 if side_by_side else 2, 1)
+        self.grid.setRowStretch(2 if side_by_side else 3, 1)
 
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)
@@ -787,6 +997,20 @@ class SettingsPage(QWidget):
             _set_elided(self.previous_name, "—")
         self.previous_hint.setVisible(bool(previous))
         self.delete_button.setVisible(bool(previous))
+        self._refresh_registry()
+
+    def _refresh_registry(self) -> None:
+        try:
+            info = self.model.registry_card()
+        except (OSError, ValueError) as exc:
+            self.registry_rows.set("registry", f"Σφάλμα: {exc}", "err")
+            return
+        self.registry_rows.set("registry", info["registry"])
+        self.registry_rows.set("last", info["last_export"] or "—")
+        unexported = info["unexported"]
+        self.registry_rows.set_visible("unexported", unexported is not None)
+        if unexported is not None:
+            self.registry_rows.set("unexported", *unexported)
 
     # --- φάκελος backup ----------------------------------------------------
     def _folder(self) -> Path:
@@ -836,6 +1060,45 @@ class SettingsPage(QWidget):
         if request is not None and self.start_restore is not None:
             self._remember_folder(request.path)
             self.start_restore(request)
+
+    def open_import(self, path: Path | None = None) -> None:
+        dialog = ImportDialog(self.model, self._folder(), choose_path=self.choose_open,
+                              parent=self)
+        self.last_dialog = dialog
+        if path is not None:
+            dialog.open(Path(path))
+        if self._show(dialog) == QDialog.DialogCode.Accepted and dialog.view is not None:
+            self._remember_folder(dialog.view.path)
+            self.refresh()
+            info = dialog.result_info or {}
+            version = info.get("registry", {}).get("registry_version")
+            text = "Το μητρώο ενημερώθηκε" + (f" (v{version})." if version else ".")
+            self.inform(IMPORT_TITLE, text)
+
+    def export_registry(self) -> None:
+        current = self._folder() / self.model.default_export_name()
+        if self.choose_save is not None:
+            chosen = self.choose_save(self, current)
+        else:
+            path, _ = QFileDialog.getSaveFileName(self, "Εξαγωγή μητρώου", str(current),
+                                                  m.REGISTRY_FILTER)
+            chosen = Path(path) if path else None
+        if chosen is None:
+            return
+        chosen = Path(chosen)
+        if chosen.suffix.lower() != ".sicr":
+            chosen = chosen.with_name(chosen.name + ".sicr")
+        try:
+            out = self.model.export_registry(chosen)
+        except FileExistsError:
+            self.inform("Εξαγωγή μητρώου", f"Υπάρχει ήδη αρχείο με αυτό το όνομα: {chosen}")
+            return
+        except (registry_sync.SyncError, OSError, ValueError) as exc:
+            self.inform("Εξαγωγή μητρώου", f"Η εξαγωγή απέτυχε: {exc}")
+            return
+        self._remember_folder(out)
+        self.refresh()
+        self.inform("Εξαγωγή μητρώου", f"Μητρώο: {out}")
 
     def delete_previous(self) -> None:
         folders = self.model.previous_folders()

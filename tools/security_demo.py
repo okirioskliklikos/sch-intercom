@@ -12,6 +12,10 @@
 
 Οι κουκκίδες online/offline είναι σταθερές· έγκριση, απόρριψη, αλλαγή αίθουσας,
 μετονομασία και ανάκληση δουλεύουν κανονικά στο προσωρινό μητρώο.
+
+Κύριος/Εφεδρικός (4.2D2): --role primary | restored | conflict | newer | backup | stopped.
+Ο «άλλος Manager» είναι ψεύτικος (κανένα δίκτυο)· αλλαγή ρόλου και Έναρξη/Διακοπή
+δουλεύουν πάνω στο προσωρινό manager-state.json.
 """
 from __future__ import annotations
 
@@ -42,6 +46,9 @@ ROOMS = {
 REQUESTS = [("C2627-Ζ1", "Board1"), ("Αίθουσα Μουσικής", "Laptop")]
 # Κατάσταση με τη σειρά: online, «πριν …» (δευτερόλεπτα), ή None = δεν συνδέθηκε ποτέ.
 STATES = [True, 600, True, 7200, True, 3 * 86400, True, 30, None, True, 2400]
+ROLE_SCENARIOS = ("primary", "restored", "conflict", "newer", "backup", "stopped")
+DEMO_HOST = "ΓΡΑΜΜΑΤΕΙΑ-PC"
+OTHER_HOST, OTHER_IP = "ΓΡΑΜΜΑΤΕΙΑ-2", "192.168.1.35"
 
 
 class DemoBroadcaster:
@@ -67,6 +74,49 @@ class DemoBroadcaster:
 
     def disconnect_client(self, client_id):
         self.status.pop(client_id, None)
+
+
+class DemoWatcher:
+    """Ψεύτικος BeaconWatcher: οι «άλλοι Managers» ορίζονται από το σενάριο."""
+    started_at = None
+
+    def __init__(self):
+        self.seen = []
+
+    def others(self):
+        return list(self.seen)
+
+    def add(self, host: str, ip: str, rv: int) -> None:
+        from shared.discovery import BeaconInfo, SeenManager
+        import time
+        info = BeaconInfo(str(uuid.uuid4()), 50555, "demo", str(uuid.uuid4()), rv, host)
+        self.seen.append(SeenManager(info, ip, time.monotonic()))
+
+
+def build_role(root: Path, scenario: str, registry_version):
+    """RoleModel με τον πραγματικό ServingController, χωρίς δίκτυο."""
+    from director import manager_state
+    from director.security import RoleModel
+    from director.serving import ServingController
+    state = manager_state.path_for(root / "clients-registry.json")
+    watcher = DemoWatcher()
+    version = registry_version()
+    if scenario == "restored":
+        manager_state.restored(state)
+    else:
+        manager_state.save(state, manager_state.ManagerState(
+            role="backup" if scenario in ("newer", "backup") else "primary",
+            serving=scenario not in ("newer", "stopped")))
+    if scenario == "conflict":
+        watcher.add(OTHER_HOST, OTHER_IP, version)
+    elif scenario == "newer":
+        watcher.add(OTHER_HOST, OTHER_IP, version + 2)
+    controller = ServingController(state, watcher, start_network=lambda _role: None,
+                                   stop_network=lambda: None, check_seconds=0,
+                                   report=lambda _m: None)
+    controller.startup() if scenario != "conflict" else controller.start(force=True)
+    return RoleModel(state, controller, watcher, registry_version=registry_version,
+                     host=DEMO_HOST)
 
 
 def fake_stream(_gate, *, stop, ready_callback, level_callback, **_kwargs):
@@ -135,6 +185,9 @@ def build(root: Path, log=print):
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--width", type=int, default=None, help="πλάτος παραθύρου")
+    parser.add_argument("--role", choices=ROLE_SCENARIOS, default="primary",
+                        help="σενάριο Κύριου/Εφεδρικού")
+    parser.add_argument("--tab", choices=("computers", "certificates"), default="computers")
     parser.add_argument("--screenshot", type=Path, default=None,
                         help="μόνο στιγμιότυπο (offscreen) και έξοδος")
     args = parser.parse_args()
@@ -149,13 +202,22 @@ def main() -> None:
     with tempfile.TemporaryDirectory(prefix="sch-intercom-demo-") as temp:
         print(f"Προσωρινός φάκελος: {temp} (σβήνεται στο κλείσιμο)")
         broadcaster, model, enrollment = build(Path(temp))
+        role = build_role(Path(temp), args.role, lambda: model.trust.registry.version)
         try:
+            from director.maintenance import MaintenanceModel
+            root = Path(temp)
+            maintenance = MaintenanceModel(root / "clients-registry.json", root / "director.crt",
+                                           root / "director.key",
+                                           registry_version=lambda: model.trust.registry.version)
             window = DirectorWindow(broadcaster, DirectorMicrophone(fake_stream, broadcaster),
-                                    security=model)
+                                    security=model, maintenance=maintenance, role=role,
+                                    layout_settings=root / "director-gui.json")
             if args.width:
                 window.resize(args.width, 900)
             window.show()
             window.show_page("security")
+            if args.tab == "certificates":
+                window.security_page.show_tab("Πιστοποιητικά")
             if args.screenshot:
                 for _ in range(5):
                     app.processEvents()
