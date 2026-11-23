@@ -26,7 +26,12 @@ from director.broadcast import AudioBroadcaster, MAX_CLIENTS
 from director.gui import (MODE_ALL, MODE_ROOMS, DirectorMicrophone, choose_targets,
                           meter_fraction, room_grid_shape,
                           room_states)
-from shared.discovery import announce, director_id
+from shared.discovery import BeaconWatcher, director_id
+from director.manager_state import (PROMOTE_WARNING, acknowledge, change_role,
+                                    load as load_manager_state,
+                                    path_for as manager_state_path)
+from director.serving import ServingConflict, ServingController, SocketServingService
+import uuid
 from shared.ui import icons, theme
 
 WINDOW_TITLE = "School Intercom — Διεύθυνση"
@@ -1369,29 +1374,19 @@ class GuiRuntime:
         self.threads: list[threading.Thread] = []
         self.server: socket.socket | None = None
         self.window: DirectorWindow | None = None
+        self.controller = None
+        self.watcher = None
+        self.network = None
+        self._warned_conflicts: set[str] = set()
+        self._dialogs = []
 
     def start(self) -> DirectorWindow:
         from director.security import SecurityModel, track_last_seen
+        from shared.discovery import DISCOVERY_PORT
         args = self.args
         identifier = director_id(args.director_id_file)
-        server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        try:
-            server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            server.bind((args.host, args.port))
-            server.listen(MAX_CLIENTS)
-        except BaseException:
-            server.close()
-            raise
-        self.server = server
-        for name, target, kwargs in [
-            ("discovery", announce, {"args": (self.stop, identifier, args.port),
-                                     "kwargs": {"udp_port": args.discovery_port}}),
-            ("accept", self.accept_clients, {"args": (server, self.broadcaster, self.stop)}),
-        ]:
-            thread = threading.Thread(target=target, daemon=True,
-                                      name=f"director-gui-{name}", **kwargs)
-            thread.start()
-            self.threads.append(thread)
+        inst = str(uuid.uuid4())
+        registry = self.trust.registry if self.trust is not None else None
         security = None
         if self.last_seen is not None:
             self.last_seen_thread = threading.Thread(
@@ -1399,26 +1394,124 @@ class GuiRuntime:
                 daemon=True, name="director-gui-last-seen")
             self.last_seen_thread.start()
             if self.enrollment is not None and self.trust is not None:
-                self.enrollment.open()
                 security = SecurityModel(self.enrollment, self.trust, self.broadcaster,
                                          self.last_seen)
-        core = list(self.threads)
+        if registry is not None:
+            self.watcher = BeaconWatcher(
+                registry.snapshot()["school_id"], inst,
+                port=getattr(args, "watch_port", None) or args.discovery_port)
+            self.network = SocketServingService(
+                args, identifier=identifier, inst=inst, registry=registry,
+                accept_clients=self.accept_clients, broadcaster=self.broadcaster,
+                enrollment=self.enrollment)
+            self.controller = ServingController(
+                manager_state_path(args.registry_file), self.watcher,
+                start_network=self.network.start, stop_network=self.network.stop,
+                change_enrollment=self.network.change_enrollment,
+                check_seconds=getattr(args, "start_check_seconds", 3.0))
+            self.watcher.start()
+            self.controller.startup()
+            self.server = self.network.server
+            self.threads = self.network.threads
+
         maintenance = None
         tls_cert, tls_key = getattr(args, "tls_cert", None), getattr(args, "tls_key", None)
-        if self.trust is not None and tls_cert is not None and tls_key is not None:
+        if registry is not None and tls_cert is not None and tls_key is not None:
             from director.maintenance import MaintenanceModel
-            registry = self.trust.registry
             maintenance = MaintenanceModel(args.registry_file, tls_cert, tls_key,
                                            registry_version=lambda: registry.version)
         options = {"stop_serving": self.stop_serving, "restart": self.request_restart,
                    **self.maintenance_options}
         self.window = DirectorWindow(
             self.broadcaster, self.microphone,
-            server_up=lambda: all(thread.is_alive() for thread in core),
+            server_up=lambda: self.controller.active if self.controller is not None else False,
             security=security, security_options=self.security_options,
             layout_settings=self.layout_settings,
             maintenance=maintenance, maintenance_options=options)
+        if self.controller is not None:
+            self._monitor_timer = QTimer(self.window)
+            self._monitor_timer.timeout.connect(self._monitor_managers)
+            self._monitor_timer.start(500)
+            state = load_manager_state(manager_state_path(args.registry_file))
+            if state.notice == "restored_as_backup":
+                QTimer.singleShot(0, self._offer_restored)
+            elif state.serving and not self.controller.active:
+                QTimer.singleShot(0, self._offer_force_start)
         return self.window
+
+    def _offer_force_start(self):
+        if self.window is None or self.controller is None:
+            return
+        other = self.watcher.others() if self.watcher is not None else []
+        if not other:
+            return
+        candidate = other[0]
+        box = QMessageBox(self.window)
+        box.setIcon(QMessageBox.Icon.Warning)
+        box.setWindowTitle("Άλλος Manager σε λειτουργία")
+        box.setText(f"Ο υπολογιστής {candidate.info.host} εξυπηρετεί ήδη. "
+                    "Σταματήστε τον πρώτα.")
+        force = box.addButton("Έναρξη παρ' όλα αυτά", QMessageBox.ButtonRole.AcceptRole)
+        box.addButton("Άκυρο", QMessageBox.ButtonRole.RejectRole)
+        box.exec()
+        if box.clickedButton() is force:
+            confirmation = QMessageBox.question(
+                self.window, "Επιβεβαίωση επικίνδυνης έναρξης",
+                "Δύο Managers θα εξυπηρετούν την ίδια εγκατάσταση. Να συνεχίσω;",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+            if confirmation == QMessageBox.StandardButton.Yes:
+                self.controller.start(force=True)
+                self.server = self.network.server
+
+    def _offer_restored(self):
+        if self.window is None or self.controller is None:
+            return
+        dialog = QMessageBox(self.window)
+        dialog.setIcon(QMessageBox.Icon.Information)
+        dialog.setWindowTitle("Επαναφορά Manager")
+        dialog.setText(
+            "Ο υπολογιστής επαναφέρθηκε από backup και είναι Εφεδρικός, "
+            "χωρίς εξυπηρέτηση. Αν αντικαθιστά τον Κύριο, κάντε τον Κύριο "
+            "και ξεκινήστε την εξυπηρέτηση. Πρώτα βεβαιωθείτε ότι ο "
+            "άλλος υπολογιστής έχει σταματήσει.")
+        promote = dialog.addButton("Να γίνει Κύριος και να ξεκινήσει",
+                                   QMessageBox.ButtonRole.AcceptRole)
+        dialog.addButton("Να μείνει Εφεδρικός", QMessageBox.ButtonRole.RejectRole)
+        dialog.exec()
+        state_path = manager_state_path(self.args.registry_file)
+        if dialog.clickedButton() is promote:
+            approval = QMessageBox.question(
+                self.window, "Αλλαγή σε Κύριο", PROMOTE_WARNING,
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+            if approval == QMessageBox.StandardButton.Yes:
+                change_role(state_path, "primary")
+                try:
+                    self.controller.start()
+                except ServingConflict:
+                    self._offer_force_start()
+                self.server = self.network.server
+        else:
+            acknowledge(state_path)
+
+    def _monitor_managers(self):
+        if self.watcher is None or self.controller is None or self.window is None:
+            return
+        others = self.controller.poll_conflicts()
+        present = {other.info.inst for other in others}
+        for other in others:
+            if not self.controller.active or other.info.inst in self._warned_conflicts:
+                continue
+            self._warned_conflicts.add(other.info.inst)
+            warning = QMessageBox(self.window)
+            warning.setIcon(QMessageBox.Icon.Warning)
+            warning.setWindowTitle("ΠΡΟΣΟΧΗ: Δεύτερος Manager")
+            warning.setText(f"Εξυπηρετεί και ο υπολογιστής {other.info.host} "
+                            f"({other.ip}). Σταματήστε τον έναν.")
+            warning.setModal(False)
+            warning.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+            warning.show()
+            self._dialogs.append(warning)
+        self._warned_conflicts.intersection_update(present)
 
     def stop_serving(self) -> None:
         """Σταματά Clients, εγγραφή και ανακάλυψη και αφήνει το manager.lock.
@@ -1443,6 +1536,10 @@ class GuiRuntime:
         self._stopped = True
         # Πρώτα STOP στους Clients, μετά κλείσιμο sockets και worker threads.
         self.microphone.shutdown()
+        if self.controller is not None:
+            self.controller.shutdown()
+        if self.watcher is not None:
+            self.watcher.close()
         if self.enrollment is not None:
             self.enrollment.stop()
         self.stop.set()
