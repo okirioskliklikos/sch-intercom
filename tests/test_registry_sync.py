@@ -167,6 +167,38 @@ class RegistrySyncTests(unittest.TestCase):
             "status", "--registry-file", str(self.b_file),
             "--tls-cert", str(self.cert)]), 2)
 
+    def test_live_trust_import_rotates_allowlist_and_disconnects(self):
+        """Ο ενεργός RegistryTrust δέχεται νέο πιστοποιητικό χωρίς επανεκκίνηση,
+        και το αφαιρεί αμέσως από το TLSContext μετά από εισαγόμενη ανάκληση.
+        """
+        cid, cert = self.approve(self.ra, "approved")
+        trust = RegistryTrust(self.rb, self.cert, self.key)
+
+        class FakeBroadcaster:
+            def __init__(self):
+                self.disconnected, self.updated = [], []
+
+            def disconnect_client(self, client_id):
+                self.disconnected.append(client_id)
+
+            def update_client_info(self, client_id, room, name):
+                self.updated.append((client_id, room, name))
+
+        broadcaster = FakeBroadcaster()
+        self.assertEqual(trust.context().cert_store_stats()["x509"], 0)
+        source = self.export_a(self.root / "new-client.sicr")
+        result = trust.import_registry(source, broadcaster)
+        self.assertEqual(result["relation"], "newer")
+        self.assertEqual(trust.context().cert_store_stats()["x509"], 1)
+        self.assertEqual(broadcaster.updated[0][0], cid)
+
+        self.ra.revoke(cid)
+        revoked = self.export_a(self.root / "revoked-client.sicr")
+        result = trust.import_registry(revoked, broadcaster)
+        self.assertTrue(result["changed"])
+        self.assertEqual(trust.context().cert_store_stats()["x509"], 0)
+        self.assertIn(cid, broadcaster.disconnected)
+
     def test_role_guard(self):
         cid, cert = self.device("one")
         trust = RegistryTrust(self.ra, self.cert, self.key)
