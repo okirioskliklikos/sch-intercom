@@ -106,3 +106,81 @@ class ServingController:
     def shutdown(self) -> None:
         """Πλήρης έξοδος Manager, χωρίς αλλαγή της αποθηκευμένης προτίμησης."""
         self.stop(persist=False)
+
+
+class SocketServingService:
+    """Ανοιγοκλείνει κοινές TCP/UDP/registration θύρες για CLI και GUI."""
+
+    def __init__(self, args, *, identifier: str, inst: str, registry,
+                 accept_clients, broadcaster, enrollment):
+        import socket
+        from director.broadcast import MAX_CLIENTS
+        self.args, self.identifier, self.inst = args, identifier, inst
+        self.registry, self.accept_clients = registry, accept_clients
+        self.broadcaster, self.enrollment = broadcaster, enrollment
+        self.server = None
+        self.stop_event = None
+        self.threads: list[threading.Thread] = []
+
+    def start(self, role: str) -> None:
+        import socket
+        from director.broadcast import MAX_CLIENTS
+        from shared.discovery import announce
+        args = self.args
+        server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        try:
+            server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            server.bind((args.host, args.port))
+            server.listen(MAX_CLIENTS)
+            stopped = threading.Event()
+            school = self.registry.snapshot()["school_id"]
+            beacon_kwargs = {
+                "udp_port": args.discovery_port, "school": school,
+                "inst": self.inst, "registry_version": lambda: self.registry.version,
+                "extra_ports": tuple([args.extra_beacon_port])
+                if getattr(args, "extra_beacon_port", None) else (),
+            }
+            beacon = threading.Thread(
+                target=announce, args=(stopped, self.identifier, args.port),
+                kwargs=beacon_kwargs, daemon=True, name="manager-discovery")
+            listener = threading.Thread(
+                target=self.accept_clients, args=(server, self.broadcaster, stopped),
+                daemon=True, name="manager-accept")
+            self.server, self.stop_event = server, stopped
+            self.threads = [beacon, listener]
+            for worker in self.threads:
+                worker.start()
+            if role == "primary" and self.enrollment is not None:
+                self.enrollment.open()
+        except BaseException:
+            if self.stop_event is not None:
+                self.stop_event.set()
+            server.close()
+            self.server = None
+            self.stop_event = None
+            raise
+
+    def change_enrollment(self, enabled: bool) -> None:
+        if self.enrollment is None:
+            return
+        if enabled:
+            self.enrollment.open()
+        else:
+            self.enrollment.stop()
+
+    def stop(self) -> None:
+        if self.enrollment is not None:
+            self.enrollment.stop()
+        if self.stop_event is not None:
+            self.stop_event.set()
+        if self.server is not None:
+            self.server.close()
+        # Δεν κλείνουμε τον AudioBroadcaster: μπορεί να ξαναρχίσει να εξυπηρετεί.
+        for client_id, _room, active, _age in self.broadcaster.status_snapshot():
+            if active:
+                self.broadcaster.disconnect_client(client_id)
+        for worker in self.threads:
+            worker.join(timeout=1.0)
+        self.server = None
+        self.stop_event = None
+        self.threads = []
