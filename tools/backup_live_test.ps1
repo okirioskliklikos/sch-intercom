@@ -1,4 +1,4 @@
-# Αυτόματη πραγματική δοκιμή 4.2C (docs/phase4-2c-backup.md §11), Manager σε Windows.
+﻿# Αυτόματη πραγματική δοκιμή 4.2C (docs/phase4-2c-backup.md §11), Manager σε Windows.
 # Πρώτα τα unit tests του backup, μετά 18 βήματα με πραγματικό Manager, Client και ήχο
 # (χρειάζεται μικρόφωνο και ηχεία). Μόνο προσωρινοί φάκελοι, loopback, θύρες 51555/51556/51559.
 # Εκτέλεση: powershell -ExecutionPolicy Bypass -File tools\backup_live_test.ps1

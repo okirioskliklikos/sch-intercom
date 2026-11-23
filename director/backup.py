@@ -1,6 +1,6 @@
 """School Intercom 4.2C — encrypted portable Manager backups.
 
-The .sib file contains only ciphertext after an authenticated public header.
+The .sicb file contains only ciphertext after an authenticated public header.
 No key material or passphrase is printed, and no plaintext staging is placed
 outside the Manager's protected data directory.
 """
@@ -36,6 +36,8 @@ from shared.manager_key import (PASS_SUFFIX, password_path as key_password_path,
                                 plaintext_pem as plaintext_key_pem, protect as protect_key)
 
 MAGIC = b"SIBK"
+#: Επέκταση αρχείων backup (απόφαση χρήστη 23/11/2026· το .sib το χρησιμοποιεί το Sibelius).
+EXTENSION = ".sicb"
 FORMAT = 1
 MAX_FILE = 16 * 1024 * 1024
 MAX_HEADER = 4096
@@ -58,6 +60,8 @@ FILES = {
     "gui_settings": "director-gui.json",
 }
 JSON_SECTIONS = {"enrollment_pending", "last_seen", "gui_settings"}
+LAST_BACKUP = "last-backup.json"
+LAST_RESTORE = "last-restore.json"
 SECTION_NAMES = frozenset({"tls_identity", "client_registry", *FILES, "media_manifest"})
 
 
@@ -91,10 +95,13 @@ def _json(data: bytes) -> dict:
     return value
 
 
+PASSWORD_MIN = 8   # Michail 23/11/2026: 8 αντί για 12
+
+
 def _password(value: str, *, strict: bool = True) -> bytes:
     value = unicodedata.normalize("NFC", value)
-    if strict and len(value) < 12:
-        raise BackupError("Ο κωδικός χρειάζεται τουλάχιστον 12 χαρακτήρες.")
+    if strict and len(value) < PASSWORD_MIN:
+        raise BackupError(f"Ο κωδικός χρειάζεται τουλάχιστον {PASSWORD_MIN} χαρακτήρες.")
     return value.encode("utf-8")
 
 
@@ -288,7 +295,7 @@ def create(out: Path, password: str, *, registry_file: Path, tls_cert: Path,
         raise BackupError("Το backup υπερβαίνει τα 16 MiB.")
     out = Path(out)
     if out.is_dir() or not out.suffix:
-        out = out / ("sch-intercom-backup-" + datetime.now().strftime("%Y%m%d-%H%M") + ".sib")
+        out = out / ("sch-intercom-backup-" + datetime.now().strftime("%Y%m%d-%H%M") + EXTENSION)
     if out.exists() or out.with_name(out.name + ".tmp").exists():
         raise BackupError("Το backup υπάρχει ήδη· δεν αντικαθίσταται.")
     warnings = []
@@ -315,7 +322,7 @@ def create(out: Path, password: str, *, registry_file: Path, tls_cert: Path,
                 if hashlib.sha256(destination.read_bytes()).hexdigest() != entry["sha256"]:
                     raise BackupError("Αποτυχία επαλήθευσης αντιγράφου MP3.")
     from shared.client_registry import _atomic_write
-    last = registry_file.parent / "last-backup.json"
+    last = registry_file.parent / LAST_BACKUP
     _atomic_write(last, canonical({"time": created, "file_name": out.name,
                                    "registry_version": manifest["registry_version"],
                                    "registry_hash": manifest["registry_hash"]}))
@@ -364,24 +371,30 @@ def _read_backup(path: Path, password: str | None = None) -> tuple[dict, dict | 
         raise BackupError("Μη έγκυρο περιεχόμενο backup.") from exc
 
 
+def _summary(manifest: dict, sections: dict, warnings: list[str]) -> dict:
+    registry = _json(_un64(sections["client_registry"]["files"]["clients-registry.json"]))["registry"]
+    pending = 0
+    if "enrollment_pending" in sections:
+        pending = len(_json(_un64(sections["enrollment_pending"]["files"][
+            FILES["enrollment_pending"]])).get("requests", []))
+    return {"created_at": manifest["created_at"],
+            "source_computer": manifest["source_computer"],
+            "registry_version": manifest["registry_version"],
+            "clients": len(registry["clients"]),
+            "approved": sum(1 for c in registry["clients"] if c.get("status") == "approved"),
+            "pending": pending,
+            "tls_fingerprint": manifest["tls_fingerprint"],
+            "sections": sorted(sections),
+            "mp3": len(sections.get("media_manifest", {}).get("files", [])),
+            "warnings": warnings}
+
+
 def inspect(path: Path, password: str | None = None) -> dict:
     header, contents = _read_backup(Path(path), password)
     if contents is None:
         return {"header": header}
     manifest, sections, warnings = _validate_contents(contents)
-    registry = _json(_un64(sections["client_registry"]["files"]["clients-registry.json"]))["registry"]
-    return {
-        "header": header,
-        "summary": {"created_at": manifest["created_at"],
-                    "source_computer": manifest["source_computer"],
-                    "registry_version": manifest["registry_version"],
-                    "clients": len(registry["clients"]),
-                    "pending": len(_json(_un64(sections["enrollment_pending"]["files"][FILES["enrollment_pending"]])).get("requests", []))
-                    if "enrollment_pending" in sections else 0,
-                    "tls_fingerprint": manifest["tls_fingerprint"],
-                    "sections": sorted(sections),
-                    "mp3": len(sections.get("media_manifest", {}).get("files", [])),
-                    "warnings": warnings}}
+    return {"header": header, "summary": _summary(manifest, sections, warnings)}
 
 
 @contextmanager
@@ -507,26 +520,14 @@ def restore(path: Path, password: str, *, registry_file: Path, tls_cert: Path,
         _, data = _read_backup(Path(path), password)
         manifest, sections, warnings = _validate_contents(data)
         locations = _paths(registry_file, tls_cert, tls_key)
-        backup_cert = _un64(sections["tls_identity"]["files"]["cert.pem"])
-        identity_matches = True
-        if tls_cert.exists():
-            existing_fp = x509.load_pem_x509_certificate(tls_cert.read_bytes()).fingerprint(
-                hashes.SHA256()).hex(":").upper()
-            identity_matches = existing_fp == manifest["tls_fingerprint"]
-            if not identity_matches and not replace_identity:
-                raise BackupError(
-                    "Αυτός ο υπολογιστής έχει άλλη ταυτότητα Manager. Χρειάζεται --replace-identity.", 5)
-        # A deliberate identity replacement is not a registry-history merge:
-        # two different installations cannot share ancestry.
-        if registry_file.exists() and identity_matches:
-            current_doc = _json(registry_file.read_bytes())
-            current = verify_document(current_doc, tls_cert.read_bytes())
-            from_backup = _json(_un64(sections["client_registry"]["files"]["clients-registry.json"]))["registry"]
-            if (digest(from_backup) in current["history"]
-                    or (digest(from_backup) != digest(current)
-                        and digest(current) not in from_backup["history"])):
-                if not accept_older:
-                    raise BackupError("Παλαιότερο ή ασύμβατο μητρώο· χρειάζεται --accept-older.", 5)
+        identity, relation, _local = compare_with_local(manifest, sections,
+                                                        registry_file=registry_file,
+                                                        tls_cert=tls_cert)
+        if identity == "different" and not replace_identity:
+            raise BackupError(
+                "Αυτός ο υπολογιστής έχει άλλη ταυτότητα Manager. Χρειάζεται --replace-identity.", 5)
+        if relation in ("older", "conflict") and not accept_older:
+            raise BackupError("Παλαιότερο ή ασύμβατο μητρώο· χρειάζεται --accept-older.", 5)
         suffix = datetime.now().strftime("%Y%m%d-%H%M%S") + "-" + uuid.uuid4().hex[:8]
         staging = base / (".restore-staging-" + suffix)
         previous_dir = base / ("pre-restore-" + suffix)
@@ -618,10 +619,67 @@ def restore(path: Path, password: str, *, registry_file: Path, tls_cert: Path,
         # Η αναφορά MP3 βγαίνει ΜΕΤΑ το --restore-media, ώστε να δείχνει την τελική κατάσταση.
         diff = _media_diff(sections.get("media_manifest"), media_dir)
         diff["copied"] = copied
+        from shared.client_registry import _atomic_write
+        # Για την καρτέλα «Συντήρηση»: πότε και από ποιο αρχείο έγινε η τελευταία επαναφορά.
+        _atomic_write(base / LAST_RESTORE, canonical({
+            "time": _now(), "file_name": Path(path).name,
+            "registry_version": manifest["registry_version"],
+            "previous": previous_dir.name if previous_dir.exists() else None}))
         return {"registry_version": manifest["registry_version"],
                 "tls_fingerprint": manifest["tls_fingerprint"],
                 "previous": str(previous_dir) if previous_dir.exists() else None,
                 "media": diff, "warnings": warnings}
+
+
+def compare_with_local(manifest: dict, sections: dict, *, registry_file: Path,
+                       tls_cert: Path) -> tuple[str, str, int | None]:
+    """Σύγκριση backup με ό,τι υπάρχει ήδη σε αυτόν τον υπολογιστή (4.2C §6.2 βήμα 4).
+
+    Επιστρέφει (ταυτότητα, μητρώο, τοπική έκδοση μητρώου):
+    ταυτότητα ``none`` (κενός υπολογιστής), ``same`` ή ``different``·
+    μητρώο ``none``, ``same``, ``newer`` (το backup είναι νεότερο), ``older`` ή ``conflict``.
+    """
+    identity, relation, local_version = "none", "none", None
+    if tls_cert.exists():
+        existing_fp = x509.load_pem_x509_certificate(tls_cert.read_bytes()).fingerprint(
+            hashes.SHA256()).hex(":").upper()
+        identity = "same" if existing_fp == manifest["tls_fingerprint"] else "different"
+    # A deliberate identity replacement is not a registry-history merge:
+    # two different installations cannot share ancestry.
+    if registry_file.exists() and identity == "same":
+        current = verify_document(_json(registry_file.read_bytes()), tls_cert.read_bytes())
+        local_version = current["registry_version"]
+        from_backup = _json(_un64(
+            sections["client_registry"]["files"]["clients-registry.json"]))["registry"]
+        if digest(from_backup) == digest(current):
+            relation = "same"
+        elif digest(from_backup) in current["history"]:
+            relation = "older"
+        elif digest(current) in from_backup["history"]:
+            relation = "newer"
+        else:
+            relation = "conflict"
+    return identity, relation, local_version
+
+
+def preview(path: Path, password: str, *, registry_file: Path, tls_cert: Path,
+            media_dir: Path) -> dict:
+    """Ό,τι δείχνει ο διάλογος επαναφοράς πριν από την επιβεβαίωση. Δεν γράφει τίποτα.
+
+    Ίδιοι έλεγχοι με το ``restore`` (αποκρυπτογράφηση, ακεραιότητα, υπογραφή μητρώου),
+    χωρίς κλείδωμα: τρέχει και με ενεργό Manager. Ποτέ κλειδιά ή πιστοποιητικά.
+    """
+    path = Path(path)
+    _, data = _read_backup(path, password)
+    manifest, sections, warnings = _validate_contents(data)
+    summary = _summary(manifest, sections, warnings)
+    identity, relation, local_version = compare_with_local(
+        manifest, sections, registry_file=registry_file, tls_cert=tls_cert)
+    media = _media_diff(sections.get("media_manifest"), media_dir)
+    copy_dir = path.with_name(path.stem + "-media")
+    return {**summary, "identity": identity, "relation": relation,
+            "local_registry_version": local_version, "media": media,
+            "media_copy_available": copy_dir.is_dir() and bool(media["missing"])}
 
 
 def _passphrase(command: str, env: str | None) -> str:

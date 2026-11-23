@@ -45,7 +45,7 @@ class BackupTests(unittest.TestCase):
         self.media = self.old / "media"
         self.media.mkdir()
         (self.media / "test.mp3").write_bytes(b"fake sample bytes - not real student data")
-        self.backup = self.root / "snapshot.sib"
+        self.backup = self.root / "snapshot.sicb"
 
     def make(self, **extra):
         return create(self.backup, PASSWORD, registry_file=self.registry,
@@ -179,7 +179,7 @@ class BackupTests(unittest.TestCase):
         name = "ΔοκιμαστικόςΚωδικός2026!"
         self.make()
         data = self.backup.read_bytes()
-        backup2 = self.root / "snapshot2.sib"
+        backup2 = self.root / "snapshot2.sicb"
         create(backup2, name, registry_file=self.registry, tls_cert=self.cert,
                tls_key=self.key, media_dir=self.media, kdf_n=N)
         self.assertNotEqual(data, backup2.read_bytes())
@@ -244,7 +244,7 @@ class BackupTests(unittest.TestCase):
         (self.old / "director-gui.json").write_text('{"width":999}', encoding="utf-8")
         (self.old / "clients-last-seen.json").write_text('{"version":2}', encoding="utf-8")
         (self.old / "enrollment-pending.json").write_text('{"requests":[1]}', encoding="utf-8")
-        second = self.root / "second.sib"
+        second = self.root / "second.sicb"
         create(second, PASSWORD, registry_file=self.registry, tls_cert=self.cert,
                tls_key=self.key, media_dir=self.media, kdf_n=N)
         return second

@@ -7,14 +7,17 @@
 import argparse
 from contextlib import ExitStack
 from functools import partial
+import os
 import ssl
+import subprocess
+import sys
 from pathlib import Path
 import queue
 import socket
 import threading
 import time
 
-from director.backup import BackupError, ensure_no_interrupted_restore, manager_lock
+from director.backup import BackupError, ensure_no_interrupted_restore, manager_lock, rollback
 from director.broadcast import AudioBroadcaster, MAX_CLIENTS
 from shared.manager_key import ManagerKeyError, migrate as migrate_manager_key, password_path
 from director.security import LastSeenStore, last_seen_path, track_last_seen
@@ -427,14 +430,24 @@ def main() -> None:
     args = parser.parse_args()
     data_dir = args.registry_file.parent
     runtime = ExitStack()
+    # Χωριστά, ώστε το GUI να αφήσει το κλείδωμα πριν από επαναφορά (Ρυθμίσεις → Συντήρηση).
+    lock = ExitStack()
+    runtime.callback(lock.close)
+    restart = False
     try:
         if not (args.approve_client_cert or args.revoke_client or args.list_clients):
             # Ο Manager κρατά το κλείδωμα σε ΟΛΗ τη λειτουργία του (CLI και --gui), ώστε
             # το «python -m director.backup restore» να αρνείται όσο τρέχει (4.2C §6.2).
             # Οι σύντομες offline εντολές (approve/revoke/list) δεν το κρατούν, γιατί
             # τρέχουν και δίπλα σε ενεργό Manager· ελέγχουν μόνο το journal.
-            runtime.enter_context(manager_lock(data_dir))
-            ensure_no_interrupted_restore(data_dir)
+            lock.enter_context(manager_lock(data_dir))
+            try:
+                ensure_no_interrupted_restore(data_dir)
+            except BackupError:
+                # Με --gui: ερώτηση στο παράθυρο αντί για εντολή στο τερματικό.
+                if not args.gui or not _ask_gui_rollback():
+                    raise
+                rollback(data_dir)
             # 4.2C2: παλιό ακρυπτογράφητο κλειδί → κρυπτογράφηση στη θέση του (ίδιο αποτύπωμα).
             if migrate_manager_key(args.tls_key):
                 print("Το ιδιωτικό κλειδί TLS του Manager κρυπτογραφήθηκε στον δίσκο "
@@ -481,8 +494,10 @@ def main() -> None:
         last_seen = LastSeenStore(last_seen_path(args.registry_file))
         if args.gui:
             from director.gui import run_gui
-            run_gui(args, accept_clients=secure_accept, stream_microphone=stream_microphone,
-                    enrollment=enrollment, trust=trust, last_seen=last_seen)
+            restart = bool(run_gui(args, accept_clients=secure_accept,
+                                   stream_microphone=stream_microphone,
+                                   enrollment=enrollment, trust=trust, last_seen=last_seen,
+                                   release_lock=lock.close))
             return
 
         broadcaster = AudioBroadcaster(max_clients=MAX_CLIENTS, on_event=lambda s: print(s, flush=True))
@@ -535,6 +550,31 @@ def main() -> None:
         parser.exit(2, str(exc) + "\n")
     finally:
         runtime.close()
+        if restart:  # μετά το runtime.close(): όλα τα sockets και το κλείδωμα είναι ελεύθερα
+            restart_manager()
+
+
+def _ask_gui_rollback() -> bool:
+    try:
+        from director.qt_maintenance import ask_rollback
+    except ImportError:
+        return False
+    return ask_rollback()
+
+
+def restart_command() -> list[str]:
+    """Η ίδια εντολή με την οποία ξεκίνησε ο Manager (π.χ. python -m director.main --gui …)."""
+    return [sys.executable, *sys.orig_argv[1:]]
+
+
+def restart_manager() -> None:
+    """Νέα εκκίνηση μετά από επαναφορά από το GUI· το κλείδωμα έχει ήδη αφεθεί."""
+    print("Επανεκκίνηση Manager μετά την επαναφορά…", flush=True)
+    command = restart_command()
+    if os.name == "nt":
+        subprocess.Popen(command)  # ίδια κονσόλα· η τρέχουσα διεργασία τελειώνει αμέσως
+        return
+    os.execv(command[0], command)
 
 
 if __name__ == "__main__":

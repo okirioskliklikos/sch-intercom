@@ -152,6 +152,12 @@ LEFT_COLUMN_MAX = 440
 ROOM_CARD_MIN = 260         # ελάχιστο πλάτος κάρτας αίθουσας· όσες χωρούν ανά γραμμή
 SECTION_GAP = 16            # απόσταση από το διαχωριστικό ανάμεσα στις δύο ενότητες
 REQUEST_CARD_SPACING = 10   # απόσταση ανάμεσα στις κάρτες αιτημάτων
+# Πιστοποιητικά / Συντήρηση (ui-style.md §7–§8)
+IDENTITY_CARD_MAX = 670     # κάρτα «Ταυτότητα Manager»
+MAINTENANCE_CARD = 420      # κάρτες «Backup» / «Επαναφορά» (δίπλα-δίπλα όταν χωρούν)
+DIALOG_WIDTH = 490          # διάλογοι backup/επαναφοράς
+FIELD_HEIGHT = 32           # πεδία κειμένου/κωδικού στους διαλόγους
+KV_GAP = 18                 # απόσταση ετικέτας–τιμής
 
 
 def stylesheet(metrics: Metrics | None = None) -> str:
@@ -453,7 +459,73 @@ QScrollBar::add-page, QScrollBar::sub-page {{
     width: 0;
     image: none;
 }}
-QScrollArea, #roomGrid, #securityBody {{
+#kvLabel {{
+    color: {TEXT_MUTED};
+}}
+#kvValue[tone="ok"], #fieldStatus[tone="ok"] {{
+    color: {CONNECTED};
+}}
+#kvValue[tone="err"], #fieldStatus[tone="err"], #warnText {{
+    color: {LIVE};
+}}
+#kvValue[tone="muted"], #fieldStatus {{
+    color: {TEXT_MUTED};
+}}
+#fingerprint {{
+    font-size: {m.font_pt(0.96)}pt;
+}}
+#fieldLabel {{
+    color: {TEXT_MUTED};
+    font-size: {m.font_pt(FONT_SMALL)}pt;
+}}
+#field {{
+    background: {CARD_BG};
+    border: 1px solid {CONTROL_BORDER};
+    border-radius: {px(NAV_RADIUS)}px;
+    padding: 0 {px(8)}px;
+    min-height: {px(FIELD_HEIGHT) - 2}px;
+    max-height: {px(FIELD_HEIGHT) - 2}px;
+}}
+#field:focus {{
+    border: 2px solid {PRIMARY};
+    padding: 0 {px(8) - 1}px;
+}}
+#primaryAction, #secondaryAction {{
+    border-radius: {px(NAV_RADIUS)}px;
+    padding: 0 {px(14)}px;
+    min-height: {px(FIELD_HEIGHT) - 2}px;
+    max-height: {px(FIELD_HEIGHT) - 2}px;
+}}
+#primaryAction {{
+    background: {PRIMARY};
+    border: 1px solid {PRIMARY};
+    color: {WHITE};
+    font-weight: 600;
+}}
+#primaryAction:hover {{
+    background: {PRIMARY_DARK};
+    border-color: {PRIMARY_DARK};
+}}
+#secondaryAction {{
+    background: {CARD_BG};
+    border: 1px solid {CONTROL_BORDER};
+}}
+#secondaryAction:hover {{
+    background: {WINDOW_BG};
+}}
+#primaryAction:disabled, #secondaryAction:disabled {{
+    background: {CARD_BG};
+    border-color: {CARD_BORDER};
+    color: {TEXT_MUTED};
+}}
+#dialogSeparator {{
+    background: {CARD_BORDER};
+    border: none;
+}}
+QDialog#maintenanceDialog {{
+    background: {WINDOW_BG};
+}}
+QScrollArea, #roomGrid, #securityBody, #maintenanceBody {{
     background: transparent;
     border: none;
 }}

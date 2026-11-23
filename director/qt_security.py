@@ -3,8 +3,8 @@
 Μόνο εμφάνιση και σύνδεση σημάτων· η λογική είναι στο `director/security.py`.
 Tab «Υπολογιστές» (απόφαση χρήστη 22/11/2026): αριστερά «Νέες εγγραφές», μία
 κάρτα ανά αίτημα σε μία στήλη· ήπιο διαχωριστικό· δεξιά «Εγγεγραμμένοι υπολογιστές»,
-μία κάρτα ανά αίθουσα, όσες χωρούν ανά γραμμή. Το tab «Πιστοποιητικά» φαίνεται
-ανενεργό μέχρι να σχεδιαστεί.
+μία κάρτα ανά αίθουσα, όσες χωρούν ανά γραμμή. Το tab «Πιστοποιητικά» δείχνει την
+ταυτότητα του Manager (`director/qt_maintenance.py`, ui-style.md §7).
 """
 from __future__ import annotations
 
@@ -17,7 +17,7 @@ from PySide6.QtGui import QAction, QColor, QFontDatabase, QPalette, QRegularExpr
 from PySide6.QtWidgets import (QApplication, QFrame, QGraphicsDropShadowEffect, QProxyStyle, QStyle, QGridLayout, QHBoxLayout, QInputDialog, QLabel,
                                QLineEdit, QMenu,
                                QMessageBox, QPushButton, QScrollArea, QSizePolicy,
-                               QToolButton, QVBoxLayout, QWidget)
+                               QStackedWidget, QToolButton, QVBoxLayout, QWidget)
 
 from director.qt_gui import (ElidedLabel, SplitHandle, StatusDot, _repolish,
                              load_layout_settings, px, save_layout_settings)
@@ -307,7 +307,8 @@ class SecurityPage(QWidget):
                  ask_text: Callable[[str, str, str], str | None] | None = None,
                  confirm: Callable[[str, str, str], bool] | None = None,
                  warn: Callable[[str], None] | None = None,
-                 layout_settings: Path | None = None, parent=None):
+                 layout_settings: Path | None = None,
+                 identity: Callable[[], object] | None = None, parent=None):
         super().__init__(parent)
         # Πλάτος «Νέες εγγραφές» από τη λαβή, σε px του mockup· None = αυτόματο.
         self._layout_settings = layout_settings
@@ -341,9 +342,15 @@ class SecurityPage(QWidget):
             tabs.addWidget(tab)
         tabs.addStretch(1)
         self.tab_computers.setChecked(True)
-        self.tab_computers.clicked.connect(lambda: self.tab_computers.setChecked(True))
-        self.tab_certificates.setEnabled(False)
-        self.tab_certificates.setToolTip("Σχεδιάζεται σε επόμενο βήμα")
+        self.tab_computers.clicked.connect(lambda: self.show_tab(TAB_COMPUTERS))
+        self.tab_certificates.clicked.connect(lambda: self.show_tab(TAB_CERTIFICATES))
+        self.certificates = None
+        if identity is None:
+            self.tab_certificates.setEnabled(False)
+            self.tab_certificates.setToolTip("Δεν είναι διαθέσιμο")
+        for tab in (self.tab_computers, self.tab_certificates):
+            if tab.isEnabled():
+                tab.setCursor(Qt.CursorShape.PointingHandCursor)
         layout.addLayout(tabs)
 
         body = QWidget()
@@ -373,7 +380,28 @@ class SecurityPage(QWidget):
         self.scroll.setWidget(body)
         self.scroll.verticalScrollBar().valueChanged.connect(
             lambda _v: self.split_handle.update())
-        layout.addWidget(self.scroll, 1)
+        # Tab «Πιστοποιητικά»: μόνο η ταυτότητα του Manager (ui-style.md §7).
+        self.tab_pages = QStackedWidget()
+        self.tab_pages.addWidget(self.scroll)
+        if identity is not None:
+            from director.qt_maintenance import CertificatesPanel
+            self.certificates = CertificatesPanel(identity)
+            self.tab_pages.addWidget(self.certificates)
+        layout.addWidget(self.tab_pages, 1)
+
+    def show_tab(self, name: str) -> None:
+        certificates = name == TAB_CERTIFICATES and self.certificates is not None
+        self.tab_computers.setChecked(not certificates)
+        self.tab_certificates.setChecked(certificates)
+        self.tab_pages.setCurrentIndex(1 if certificates else 0)
+        if certificates:
+            self.certificates.refresh()
+        else:
+            self.refresh()
+
+    @property
+    def current_tab(self) -> str:
+        return TAB_CERTIFICATES if self.tab_pages.currentIndex() == 1 else TAB_COMPUTERS
 
     # --- διάταξη ------------------------------------------------------------
     def _available_width(self) -> int:
@@ -487,7 +515,8 @@ class SecurityPage(QWidget):
         # (ίδιο πρόβλημα με την Κεντρική: αλλαγή θέσεων grid κατά το resize).
         if not self._relayout_pending:
             self._relayout_pending = True
-            QTimer.singleShot(0, self._run_relayout)
+            # Με το self ως context: ακυρώνεται αν η σελίδα καταστραφεί πριν τρέξει.
+            QTimer.singleShot(0, self, self._run_relayout)
 
     def _run_relayout(self) -> None:
         self._relayout_pending = False
@@ -659,6 +688,8 @@ class SecurityPage(QWidget):
 
     # --- ανανέωση ----------------------------------------------------------
     def refresh(self) -> None:
+        if self.current_tab == TAB_CERTIFICATES:
+            return  # η ταυτότητα διαβάζεται όταν ανοίγει το tab, όχι κάθε δευτερόλεπτο
         now = self.clock()
         notice = self.model.port_notice()
         self.port_notice.setText(notice or "")
