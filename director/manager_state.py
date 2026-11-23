@@ -138,9 +138,9 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "status":
             print(describe(load(state_path)))
             return 0
+        if args.command == "primary":
+            print(PROMOTE_WARNING)
         if not args.yes:
-            if args.command == "primary":
-                print(PROMOTE_WARNING)
             if input("Πληκτρολογήστε ΝΑΙ για επιβεβαίωση: ").strip() != "ΝΑΙ":
                 return 5
         with manager_lock(state_path.parent):
