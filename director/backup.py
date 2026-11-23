@@ -30,7 +30,7 @@ from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.primitives.kdf.scrypt import Scrypt
 
-from shared.client_registry import canonical, digest, verify_document
+from shared.client_registry import canonical, digest, relation as registry_relation, verify_document
 from shared.device_identity import _write_secret
 from shared.manager_key import (PASS_SUFFIX, password_path as key_password_path,
                                 plaintext_pem as plaintext_key_pem, protect as protect_key)
@@ -570,6 +570,21 @@ def restore(path: Path, password: str, *, registry_file: Path, tls_cert: Path,
                         moves.append({"target": str(target.resolve()), "stage": None,
                                       "previous": str((previous_dir / name / filename).resolve()),
                                       "had_previous": target.exists()})
+            # 4.2D1: τοπικός ρόλος ΔΕΝ μεταφέρεται στο backup. Με κάθε restore,
+            # ο νέος υπολογιστής γίνεται Εφεδρικός χωρίς εξυπηρέτηση.
+            # Συμμετέχει στο ίδιο journal, ώστε το rollback να επαναφέρει την
+            # προηγούμενη κατάσταση ή την απουσία manager-state.json.
+            from director.manager_state import ManagerState, STATE_FILE, save as save_manager_state
+            state_target = base / STATE_FILE
+            state_stage = staging / "manager_state" / STATE_FILE
+            save_manager_state(state_stage, ManagerState(
+                role="backup", serving=False, notice="restored_as_backup"))
+            moves.append({
+                "target": str(state_target.resolve()),
+                "stage": str(state_stage.resolve()),
+                "previous": str((previous_dir / "manager_state" / STATE_FILE).resolve()),
+                "had_previous": state_target.exists(),
+            })
             journal = {"staging": str(staging.resolve()), "moves": moves}
             # Ατομικά: είτε υπάρχει πλήρες journal είτε κανένα (πριν από κάθε μετακίνηση).
             journal_tmp = base / "restore-journal.json.tmp"
@@ -651,14 +666,7 @@ def compare_with_local(manifest: dict, sections: dict, *, registry_file: Path,
         local_version = current["registry_version"]
         from_backup = _json(_un64(
             sections["client_registry"]["files"]["clients-registry.json"]))["registry"]
-        if digest(from_backup) == digest(current):
-            relation = "same"
-        elif digest(from_backup) in current["history"]:
-            relation = "older"
-        elif digest(current) in from_backup["history"]:
-            relation = "newer"
-        else:
-            relation = "conflict"
+        relation = registry_relation(current, from_backup)
     return identity, relation, local_version
 
 
