@@ -113,8 +113,16 @@ def merge(local: dict, incoming: dict, prefer: str = "local") -> tuple[dict, dic
             if left["room"] != right["room"] or left.get("name") != right.get("name"):
                 decisions.append({"client_id": client_id, "decision":
                                   "metadata conflict: preferred " + prefer})
-            entry["status"] = max((left["status"], right["status"]),
-                                  key=lambda status: severity[status])
+            if left_key != right_key:
+                if "blocked" in (left["status"], right["status"]):
+                    entry["status"] = "blocked"
+                else:
+                    # Μία παλιά ανακλημένη ταυτότητα δεν ανακαλεί αυτόματα
+                    # το ΝΕΟ, μη απαγορευμένο κλειδί του ίδιου Client.
+                    entry["status"] = chosen["status"]
+            else:
+                entry["status"] = max((left["status"], right["status"]),
+                                      key=lambda status: severity[status])
             previous = list(dict.fromkeys([
                 *left.get("previous_spki", []),
                 *right.get("previous_spki", []),
