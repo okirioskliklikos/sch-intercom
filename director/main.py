@@ -434,6 +434,13 @@ def command_loop(broadcaster: AudioBroadcaster, stop: threading.Event,
                     print("Για επιβεβαίωση: role backup confirm", flush=True)
                 elif len(values) == 2 and values[1] == "confirm" and values[0] in (
                         "primary", "backup"):
+                    if values[0] == "primary":
+                        print(PROMOTE_WARNING, flush=True)
+                        if watcher is not None and trust is not None:
+                            for other in watcher.newer(trust.registry.version):
+                                print(f"Ο υπολογιστής {other.info.host} έχει νεότερο "
+                                      f"μητρώο (v{other.info.rv}). Εισαγάγετέ το πρώτα.",
+                                      flush=True)
                     new_state = change_role(state_path, values[0])
                     if controller is not None:
                         controller.role_changed()
