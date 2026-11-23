@@ -307,12 +307,21 @@ class LiveTest:
         window.show_page("home")
         self.gui.pump()
         visible = window.conflict_stop.isVisible()
+        self.gui.answers = ["reject"]
+        window.conflict_stop.click()
+        self.gui.pump()
+        from director.qt_role import StopDialog
+        asked = isinstance(self.gui.dialogs[-1], StopDialog) and check_port(self.b.port)
+        if asked:
+            self.gui.screenshot("07b-diakopi", self.gui.dialogs[-1])
+        self.gui.answers = ["accept"]
         window.conflict_stop.click()
         self.gui.pump()
         stopped = not check_port(self.b.port)
-        return (visible and stopped and not window.conflict_bar.isVisible()
+        return (visible and asked and stopped and not window.conflict_bar.isVisible()
                 and self.gui.state().get("serving") is False), (
-                    f"κουμπί στην Κεντρική {visible}, θύρα B κλειστή {stopped}")
+                    f"κουμπί στην Κεντρική {visible}, επιβεβαίωση (Άκυρο κράτησε) {asked}, "
+                    f"θύρα B κλειστή {stopped}")
 
     def s12_promote_and_serve(self):
         from director.qt_role import PromoteDialog
@@ -413,7 +422,7 @@ class LiveTest:
             ("Έναρξη στον B με ενεργό A: διάλογος σύγκρουσης, Άκυρο", self.s09_start_refused),
             ("«Έναρξη παρ' όλα αυτά»: κόκκινη μπάρα και προειδοποίηση στον A",
              self.s10_force_conflict),
-            ("«Διακοπή εξυπηρέτησης εδώ» από την κόκκινη ειδοποίηση", self.s11_stop_from_bar),
+            ("«Διακοπή εξυπηρέτησης εδώ» από την κόκκινη ειδοποίηση, με επιβεβαίωση", self.s11_stop_from_bar),
             ("A σταματά, B «Αλλαγή σε Κύριο» με έναρξη: θύρες ανοιχτές", self.s12_promote_and_serve),
             ("Client 1 συνδέεται στον B, Client 2 εγκρίνεται από το GUI", self.s13_clients_on_b),
             ("Εξαγωγή από «Μητρώο υπολογιστών»: «καμία αλλαγή ✓»", self.s14_export_from_settings),

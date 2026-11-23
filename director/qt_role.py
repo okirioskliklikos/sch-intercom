@@ -33,6 +33,9 @@ STAY_BACKUP = "Να μείνει Εφεδρικός"
 MAKE_PRIMARY = "Να γίνει Κύριος…"
 IMPORT_REGISTRY = "Εισαγωγή μητρώου…"
 FORCE_START = "Έναρξη παρ' όλα αυτά"
+TEXT_STOP = ("Οι Clients αποσυνδέονται από αυτόν τον υπολογιστή και δεν συνδέονται ξανά "
+             "εδώ μέχρι την «Έναρξη εξυπηρέτησης».")
+TEXT_STOP_ALONE = "Κανένας άλλος Manager δεν εξυπηρετεί: οι ανακοινώσεις σταματούν."
 
 
 def _restyle(widget: QWidget) -> None:
@@ -78,6 +81,28 @@ class DemoteDialog(_Dialog):
         super().__init__("Αλλαγή σε Εφεδρικό", parent)
         self.body.addWidget(_text(TEXT_DEMOTE))
         self.cancel, self.accept_button = self.footer("Να γίνει Εφεδρικός")
+        self.accept_button.clicked.connect(self.accept)
+
+
+class StopDialog(_Dialog):
+    """Επιβεβαίωση πριν από «Διακοπή εξυπηρέτησης εδώ» (απόφαση χρήστη 23/11/2026).
+    Προεπιλογή «Άκυρο», κόκκινο κουμπί με το ίδιο κείμενο."""
+
+    def __init__(self, status: RoleStatus, parent=None):
+        super().__init__("Διακοπή εξυπηρέτησης", parent)
+        self.body.addWidget(_text(TEXT_STOP))
+        if status.others:
+            names = ", ".join(f"<b>{html.escape(o.host)}</b> ({html.escape(o.ip)})"
+                              for o in status.others)
+            self.body.addWidget(_text(f"Συνεχίζει να εξυπηρετεί ο υπολογιστής {names}.",
+                                      rich=True))
+        else:
+            self.body.addWidget(_text(TEXT_STOP_ALONE, name="warnText"))
+        self.cancel, self.accept_button = self.footer(STOP_HERE)
+        self.accept_button.setObjectName("dangerAction")
+        _restyle(self.accept_button)
+        self.cancel.setDefault(True)
+        self.cancel.setFocus()
         self.accept_button.clicked.connect(self.accept)
 
 
@@ -194,6 +219,8 @@ class RoleActions:
         self._done()
 
     def stop(self) -> None:
+        if not self._show(StopDialog(self.model.status(), self.parent)):
+            return
         try:
             self.model.stop()
         except OSError as exc:

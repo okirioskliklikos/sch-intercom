@@ -21,7 +21,7 @@ from director.security import (TEXT_CLOSED_BACKUP, TEXT_CLOSED_STOPPED, TEXT_NO_
 from shared import enrollment as enrollment_module
 
 try:
-    from PySide6.QtWidgets import QApplication
+    from PySide6.QtWidgets import QApplication, QLabel
     from director.gui import DirectorMicrophone
     from director.qt_gui import DirectorWindow, create_application, release_window
     from director import qt_maintenance, qt_role
@@ -269,6 +269,14 @@ class WindowTests(unittest.TestCase):
         self.assertEqual(card.serve_button.text(), "Διακοπή εξυπηρέτησης εδώ")
         self.assertEqual(card.serve_button.objectName(), "dangerAction")
         window.security_page.show_tab("Υπολογιστές")
+        window.conflict_stop.click()             # Άκυρο: τίποτα δεν αλλάζει
+        self.settle()
+        self.assertIsInstance(self.dialogs[-1], qt_role.StopDialog)
+        self.assertEqual(self.dialogs[-1].accept_button.objectName(), "dangerAction")
+        self.assertIn("ΓΡΑΜΜΑΤΕΙΑ-2", " ".join(
+            w.text() for w in self.dialogs[-1].findChildren(QLabel)))
+        self.assertTrue(self.state().serving)
+        self.answer = ["accept"]
         window.conflict_stop.click()
         self.settle()
         self.assertFalse(self.state().serving)
@@ -317,6 +325,20 @@ class WindowTests(unittest.TestCase):
         self.assertFalse(page.closed_card.isVisible())
         self.assertTrue(page.requests_box.isVisible())
         self.assertTrue(all(button.isVisible() for button in menus))
+
+    def test_card_stop_asks_first(self):
+        window = self.window("primary")
+        window.show_page("security")
+        window.security_page.show_tab("Πιστοποιητικά")
+        card = window.security_page.role_card
+        card.serve_button.click()            # Άκυρο
+        self.assertIsInstance(self.dialogs[-1], qt_role.StopDialog)
+        self.assertTrue(self.state().serving)
+        self.answer = ["accept"]
+        card.serve_button.click()
+        self.settle()
+        self.assertFalse(self.state().serving)
+        self.assertEqual(card.serve_button.text(), "Έναρξη εξυπηρέτησης")
 
     def test_demote_dialog(self):
         window = self.window("primary")
