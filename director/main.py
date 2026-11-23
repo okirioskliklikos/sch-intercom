@@ -540,6 +540,11 @@ def main() -> None:
     # Μόνο για τα αυτόματα scripts πραγματικής δοκιμής (όριο αιτημάτων χωρίς 50 εγγραφές).
     parser.add_argument("--max-pending-requests", type=int, default=None,
                         help=argparse.SUPPRESS)
+    parser.add_argument("--watch-port", type=int, default=None, help=argparse.SUPPRESS)
+    parser.add_argument("--extra-beacon-port", type=int, default=None,
+                        help=argparse.SUPPRESS)
+    parser.add_argument("--start-check-seconds", type=float, default=3.0,
+                        help=argparse.SUPPRESS)
     parser.add_argument("--registry-file", type=Path,
                         default=Path.home() / ".school-intercom" / "clients-registry.json",
                         help="Υπογεγραμμένο μητρώο Clients")
@@ -595,13 +600,17 @@ def main() -> None:
                 if len(names) != 1:
                     raise RegistryError("Certificate identity does not match UUID")
                 client_id = names[0].value
+                require_primary(load_manager_state(manager_state_path(args.registry_file)))
                 registry.approve(client_id, args.approve_room, pem)
                 print(f"Εγκρίθηκε Client {client_id} (v{registry.version})", flush=True)
                 return
             if args.revoke_client:
+                require_primary(load_manager_state(manager_state_path(args.registry_file)))
                 registry.revoke(args.revoke_client)
                 print(f"Ανακλήθηκε Client {args.revoke_client} (v{registry.version})", flush=True)
                 return
+        except RoleError as exc:
+            parser.exit(6, f"Σφάλμα ρόλου Manager: {exc}\n")
         except (RegistryError, ValueError, OSError) as exc:
             parser.exit(2, f"Σφάλμα μητρώου Clients: {exc}\n")
         if args.list_clients:
@@ -631,32 +640,50 @@ def main() -> None:
         stop = threading.Event()
         stats = DirectorStats()
         identifier = director_id(args.director_id_file)
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as server:
-            server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            server.bind((args.host, args.port))
-            server.listen(MAX_CLIENTS)
-            print(f"Director ακούει στο {args.host}:{args.port} — έως {MAX_CLIENTS} Clients", flush=True)
-            beacon = threading.Thread(target=announce,
-                                      args=(stop, identifier, args.port),
-                                      kwargs={"udp_port": args.discovery_port},
-                                      daemon=True, name="director-discovery")
-            beacon.start()
-            receiver = threading.Thread(target=secure_accept, args=(server, broadcaster, stop),
-                                        daemon=True, name="accept-clients")
-            receiver.start()
-            enrollment.open()
-            commands = threading.Thread(target=command_loop, args=(broadcaster, stop, stats),
-                                        kwargs={"revoke": lambda client_id: trust.revoke(client_id, broadcaster),
-                                                "enrollment": enrollment, "trust": trust},
-                                        daemon=True, name="director-commands")
+        # Ο BeaconWatcher τρέχει ακόμη και όταν η εξυπηρέτηση είναι σταματημένη.
+        instance_id = str(uuid.uuid4())
+        school_id = registry.snapshot()["school_id"]
+        watcher = BeaconWatcher(school_id, instance_id,
+                                port=args.watch_port or args.discovery_port)
+        network = SocketServingService(
+            args, identifier=identifier, inst=instance_id,
+            registry=registry, accept_clients=secure_accept,
+            broadcaster=broadcaster, enrollment=enrollment)
+        controller = ServingController(
+            manager_state_path(args.registry_file), watcher,
+            start_network=network.start, stop_network=network.stop,
+            change_enrollment=network.change_enrollment,
+            check_seconds=args.start_check_seconds)
+        watcher.start()
+        try:
+            controller.startup()
+            print(describe(load_manager_state(manager_state_path(args.registry_file))),
+                  flush=True)
+            commands = threading.Thread(
+                target=command_loop, args=(broadcaster, stop, stats),
+                kwargs={"revoke": lambda cid: trust.revoke(cid, broadcaster),
+                        "enrollment": enrollment, "trust": trust,
+                        "controller": controller, "watcher": watcher,
+                        "state_path": manager_state_path(args.registry_file),
+                        "registry_file": args.registry_file, "tls_cert": args.tls_cert},
+                daemon=True, name="director-commands")
             commands.start()
-            reporter = threading.Thread(target=periodic_stats,
-                                        args=(stats, broadcaster, stop),
-                                        daemon=True, name="director-stats")
+            reporter = threading.Thread(
+                target=periodic_stats, args=(stats, broadcaster, stop),
+                daemon=True, name="director-stats")
             reporter.start()
-            seen = threading.Thread(target=track_last_seen, args=(last_seen, broadcaster, stop),
-                                    daemon=True, name="director-last-seen")
+            seen = threading.Thread(
+                target=track_last_seen, args=(last_seen, broadcaster, stop),
+                daemon=True, name="director-last-seen")
             seen.start()
+
+            def monitor_other_managers():
+                while not stop.wait(0.5):
+                    controller.poll_conflicts()
+            monitoring = threading.Thread(
+                target=monitor_other_managers,
+                daemon=True, name="director-collision-monitor")
+            monitoring.start()
             try:
                 stream_microphone(broadcaster, device=args.device, latency=args.latency,
                                   stop=stop, stats=stats)
@@ -664,12 +691,15 @@ def main() -> None:
                 print("\nΟ Director τερματίστηκε.", flush=True)
             finally:
                 stop.set()
-                enrollment.stop()
-                receiver.join(timeout=1)
-                beacon.join(timeout=1)
+                controller.shutdown()
+                watcher.close()
                 reporter.join(timeout=1)
+                monitoring.join(timeout=1)
                 seen.join(timeout=2)
                 broadcaster.close()
+        finally:
+            controller.shutdown()
+            watcher.close()
 
     except BackupError as exc:
         parser.exit(exc.status, str(exc) + "\n")
