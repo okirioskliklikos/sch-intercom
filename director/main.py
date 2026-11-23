@@ -47,7 +47,7 @@ class RoleAwareEnrollmentServer(EnrollmentServer):
 
     def decide(self, request_id: str, code: str | None = None, *,
                approve: bool = False) -> dict:
-        if approve and self.pending_file is not None:
+        if self.pending_file is not None:
             require_primary(load_manager_state(
                 manager_state_path(self.pending_file)))
         return super().decide(request_id, code, approve=approve)
