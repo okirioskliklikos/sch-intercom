@@ -42,6 +42,17 @@ MAX_PENDING_BLOCKS = 5
 STATS_INTERVAL_SECONDS = 5
 
 
+class RoleAwareEnrollmentServer(EnrollmentServer):
+    """Ελέγχει ρόλο ΠΡΙΝ αφαιρεθεί το εκκρεμές αίτημα από το decide."""
+
+    def decide(self, request_id: str, code: str | None = None, *,
+               approve: bool = False) -> dict:
+        if approve and self.pending_file is not None:
+            require_primary(load_manager_state(
+                manager_state_path(self.pending_file)))
+        return super().decide(request_id, code, approve=approve)
+
+
 class DirectorStats:
     """Thread-safe μετρητές και προαιρετική περιοδική εμφάνιση."""
 
@@ -622,7 +633,7 @@ def main() -> None:
                                 registry=registry, context_provider=trust.context)
         # Η θύρα εγγραφής είναι πάντα ανοιχτή (απόφαση χρήστη 22/11/2026): ανοίγει με το
         # CLI παρακάτω ή με το GuiRuntime.start στο --gui.
-        enrollment = EnrollmentServer(args.tls_cert, args.tls_key, trust,
+        enrollment = RoleAwareEnrollmentServer(args.tls_cert, args.tls_key, trust,
                                       host=args.host, port=args.enrollment_port,
                                       max_pending=args.max_pending_requests,
                                       pending_file=args.registry_file.with_name(
