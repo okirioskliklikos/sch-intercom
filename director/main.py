@@ -16,12 +16,20 @@ import queue
 import socket
 import threading
 import time
+import uuid
 
 from director.backup import BackupError, ensure_no_interrupted_restore, manager_lock, rollback
 from director.broadcast import AudioBroadcaster, MAX_CLIENTS
 from shared.manager_key import ManagerKeyError, migrate as migrate_manager_key, password_path
 from director.security import LastSeenStore, last_seen_path, track_last_seen
-from shared.client_registry import RegistryError, SignedClientRegistry
+from shared.client_registry import RegistryError, SignedClientRegistry, digest
+from director.manager_state import (RoleError, PROMOTE_WARNING, acknowledge,
+                                    change_role, describe, load as load_manager_state,
+                                    path_for as manager_state_path, require_primary)
+from director.serving import ServingConflict, ServingController, SocketServingService
+from director.registry_sync import (apply_from_file, examine, export_registry,
+                                    status as registry_export_status, _display as show_registry_preview)
+from shared.discovery import BeaconWatcher
 from shared.enrollment import (EnrollmentError, EnrollmentServer, ENROLL_PORT,
                                IncorrectCodeError)
 from shared.discovery import announce, director_id, DISCOVERY_PORT
@@ -79,7 +87,7 @@ def periodic_stats(stats: DirectorStats, broadcaster: AudioBroadcaster,
 def show_help() -> str:
     return """Διαθέσιμες εντολές:
   help, ?       Εμφάνιση διαθέσιμων εντολών
-  status        Online/Offline Clients, αίθουσες και τελευταίο heartbeat
+  status        Ρόλος/εξυπηρέτηση/μητρώο και Online/Offline Clients
   stats         Εμφάνιση στατιστικών μία φορά
   stats on      Στατιστικά κάθε 5 δευτερόλεπτα
   stats off     Διακοπή περιοδικών στατιστικών (προεπιλογή)
@@ -94,6 +102,12 @@ def show_help() -> str:
   deny <ID>      Απόρριψη αιτήματος εγγραφής
   set-room <UUID> <αίθουσα>  Αλλαγή αίθουσας χωρίς νέο κλειδί
   set-name <UUID> <όνομα>    Αλλαγή ονόματος χωρίς νέο κλειδί
+  serve on [force] / serve off      Έναρξη/διακοπή εξυπηρέτησης
+  role primary confirm / role backup confirm  Αλλαγή ρόλου
+  notice ok       Επιβεβαίωση ειδοποίησης μετά από restore
+  registry export <φάκελος ή αρχείο>   Εξαγωγή υπογεγραμμένου μητρώου
+  registry import <αρχείο> [confirm]  Εισαγωγή νεότερου μητρώου
+  registry import <αρχείο> merge [prefer-incoming] confirm  Συγχώνευση
   quit          Τερματισμός Director"""
 
 
@@ -224,6 +238,7 @@ class RegistryTrust:
         self._certfile = certfile
         self._keyfile = keyfile
         self._context = registry.tls_server_context(certfile, keyfile)
+        self._manager_state_path = manager_state_path(registry.path)
 
     def context(self) -> ssl.SSLContext:
         with self.registry.lock:
@@ -233,21 +248,50 @@ class RegistryTrust:
                 name: str = "") -> None:
         """Έγκριση (και νέου κλειδιού μετά από ανάκληση) με άμεσο νέο mTLS context."""
         with self.registry.lock:
+            require_primary(load_manager_state(self._manager_state_path))
             self.registry.approve(client_id, room, cert_pem, name=name)
             self._context = self.registry.tls_server_context(self._certfile, self._keyfile)
 
     def update_info(self, client_id: str, broadcaster: AudioBroadcaster, *,
                     room: str | None = None, name: str | None = None) -> dict:
         with self.registry.lock:
+            require_primary(load_manager_state(self._manager_state_path))
             info = self.registry.update_client_info(client_id, room=room, name=name)
             broadcaster.update_client_info(client_id, info["room"], info["name"])
             return info
 
     def revoke(self, client_id: str, broadcaster: AudioBroadcaster) -> None:
         with self.registry.lock:
+            require_primary(load_manager_state(self._manager_state_path))
             self.registry.revoke(client_id)
             broadcaster.disconnect_client(client_id)
             self._context = self.registry.tls_server_context(self._certfile, self._keyfile)
+
+
+    def import_registry(self, source: Path, broadcaster: AudioBroadcaster,
+                        *, merge_conflict: bool = False,
+                        prefer: str = "local",
+                        expected_digest: str | None = None) -> dict:
+        """Εφαρμογή/αντικατάσταση TLSContext και ζωντανών συνδέσεων ατομικά."""
+        with self.registry.lock:
+            old = {e["client_id"]: e for e in self.registry.snapshot()["clients"]}
+            result = apply_from_file(
+                self.registry, source, merge_conflict=merge_conflict,
+                prefer=prefer, expected_digest=expected_digest)
+            if not result["changed"]:
+                return result
+            new = {e["client_id"]: e for e in result["registry"]["clients"]}
+            self._context = self.registry.tls_server_context(self._certfile, self._keyfile)
+            for client_id, previous in old.items():
+                current = new.get(client_id)
+                if (current is None or current["status"] != "approved" or
+                        current["spki_sha256"] != previous["spki_sha256"]):
+                    broadcaster.disconnect_client(client_id)
+            for client_id, current in new.items():
+                if current["status"] == "approved":
+                    broadcaster.update_client_info(
+                        client_id, current["room"], current.get("name", ""))
+            return result
 
 
 def accept_clients(server: socket.socket, broadcaster: AudioBroadcaster,
@@ -300,7 +344,9 @@ def accept_clients(server: socket.socket, broadcaster: AudioBroadcaster,
 
 def command_loop(broadcaster: AudioBroadcaster, stop: threading.Event,
                  stats: DirectorStats, *, revoke=None,
-                 enrollment: EnrollmentServer | None = None, trust=None) -> None:
+                 enrollment: EnrollmentServer | None = None, trust=None,
+                 controller=None, watcher=None, state_path=None,
+                 registry_file=None, tls_cert=None) -> None:
     """Προσωρινός έλεγχος παραληπτών από το τερματικό του Director."""
     print("Πληκτρολογήστε help για τις διαθέσιμες εντολές.", flush=True)
     while not stop.is_set():
@@ -327,12 +373,93 @@ def command_loop(broadcaster: AudioBroadcaster, stop: threading.Event,
                 print("Τερματισμός Director...", flush=True)
                 return
             elif command == "status" and not values:
+                if state_path is not None:
+                    local_state = load_manager_state(state_path)
+                    print(describe(local_state), flush=True)
+                    if controller is not None:
+                        print("[Manager] Πραγματική εξυπηρέτηση: " +
+                              ("ενεργή" if controller.active else "σταματημένη"), flush=True)
+                    if trust is not None:
+                        snapshot = trust.registry.snapshot()
+                        print(f'[Manager] Μητρώο v{snapshot["registry_version"]}', flush=True)
+                        if local_state.role == "primary" and tls_cert is not None:
+                            info = registry_export_status(registry_file, tls_cert)
+                            print("[Manager] Αλλαγές που δεν έχουν εξαχθεί: " +
+                                  ("ποτέ" if info["unexported"] is None else
+                                   str(info["unexported"])), flush=True)
+                    if watcher is not None:
+                        for other in watcher.others():
+                            print(f'[Manager] Άλλος Manager: {other.info.host} '
+                                  f'({other.ip}), μητρώο v{other.info.rv}', flush=True)
+                            if trust is not None and other.info.rv > trust.registry.version:
+                                print(f'[Manager] Το αντίγραφο χρειάζεται ενημέρωση: '
+                                      f'ο υπολογιστής {other.info.host} έχει μητρώο '
+                                      f'v{other.info.rv}, εδώ v{trust.registry.version}.', flush=True)
                 clients = broadcaster.status_snapshot()
                 online = sum(1 for _, _, active, _ in clients if active)
                 print(f"Clients online: {online} | offline: {len(clients) - online}", flush=True)
                 for client_id, room, active, age in clients:
                     state = "Online" if active else "Offline"
                     print(f"  {client_id} | {room} | {state} | τελευταίο heartbeat πριν {age:.1f}s", flush=True)
+            elif command == "serve" and controller is not None:
+                if values in (["on"], ["on", "force"]):
+                    controller.start(force=values == ["on", "force"])
+                    print("[Manager] Εξυπηρέτηση: ενεργή", flush=True)
+                elif values == ["off"]:
+                    controller.stop()
+                    print("[Manager] Εξυπηρέτηση: σταματημένη", flush=True)
+                else:
+                    print("Χρήση: serve on [force] ή serve off", flush=True)
+            elif command == "role" and state_path is not None and values:
+                if values == ["primary"]:
+                    print(PROMOTE_WARNING, flush=True)
+                    if watcher is not None and trust is not None:
+                        for other in watcher.newer(trust.registry.version):
+                            print(f"Ο υπολογιστής {other.info.host} έχει νεότερο "
+                                  f"μητρώο (v{other.info.rv}). Εισαγάγετέ το πρώτα.",
+                                  flush=True)
+                    print("Για επιβεβαίωση: role primary confirm", flush=True)
+                elif values == ["backup"]:
+                    print("Για επιβεβαίωση: role backup confirm", flush=True)
+                elif len(values) == 2 and values[1] == "confirm" and values[0] in (
+                        "primary", "backup"):
+                    new_state = change_role(state_path, values[0])
+                    if controller is not None:
+                        controller.role_changed()
+                    print(describe(new_state), flush=True)
+                else:
+                    print("Χρήση: role primary|backup confirm", flush=True)
+            elif command == "notice" and values == ["ok"] and state_path is not None:
+                print(describe(acknowledge(state_path)), flush=True)
+            elif command == "registry" and values and trust is not None:
+                action = values[0]
+                if action == "export" and len(values) >= 2:
+                    destination = " ".join(values[1:])
+                    result = export_registry(registry_file, tls_cert, Path(destination))
+                    print(f"[Manager] Εξαγωγή: {result}", flush=True)
+                elif action == "import" and len(values) >= 2:
+                    source = Path(values[1])
+                    merge_conflict = "merge" in values[2:]
+                    prefer = "incoming" if "prefer-incoming" in values[2:] else "local"
+                    approved = "confirm" in values[2:]
+                    if any(item not in ("merge", "prefer-incoming", "confirm")
+                           for item in values[2:]):
+                        raise ValueError("Άγνωστη επιλογή εισαγωγής")
+                    document, local, relation_kind, view = examine(
+                        registry_file, tls_cert, source,
+                        allow_merge=merge_conflict, prefer=prefer)
+                    show_registry_preview(view)
+                    if relation_kind == "same":
+                        print("Το μητρώο είναι ήδη ενημερωμένο.", flush=True)
+                    elif not approved:
+                        print("Προσθέστε confirm για εφαρμογή.", flush=True)
+                    else:
+                        result = trust.import_registry(
+                            source, broadcaster, merge_conflict=merge_conflict,
+                            prefer=prefer, expected_digest=digest(local))
+                        print(f'[Manager] Εισαγωγή: {result["relation"]}', flush=True)
+                else:
+                    print("Χρήση: registry export|import <αρχείο>", flush=True)
             elif command == "revoke" and len(values) == 1 and revoke is not None:
                 revoke(values[0])
                 print(f"Ανακλήθηκε ο Client {values[0]}", flush=True)
