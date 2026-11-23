@@ -39,6 +39,21 @@ def digest(data: dict) -> str:
     return hashlib.sha256(canonical(data)).hexdigest()
 
 
+def relation(local: dict, incoming: dict) -> str:
+    """Σχέση υπογεγραμμένων μητρώων με βάση το ιστορικό digests.
+
+    Τα ορίσματα είναι τα εσωτερικά registry dictionaries, όχι τα envelopes.
+    """
+    local_hash, incoming_hash = digest(local), digest(incoming)
+    if local_hash == incoming_hash:
+        return "same"
+    if local_hash in incoming["history"]:
+        return "newer"
+    if incoming_hash in local["history"]:
+        return "older"
+    return "conflict"
+
+
 def public_key_fingerprint(cert_pem: bytes) -> str:
     certificate = x509.load_pem_x509_certificate(cert_pem)
     public_key = certificate.public_key().public_bytes(
