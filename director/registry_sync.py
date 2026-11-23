@@ -148,17 +148,6 @@ def examine(registry_file: Path, tls_cert: Path, source: Path, *,
                                            merged=merged, decisions=decisions)
 
 
-def import_registry(registry: SignedClientRegistry, source: Path, *,
-                    merge_conflict: bool = False, prefer: str = "local",
-                    expected_digest: str | None = None) -> dict:
-    """Εφαρμογή με recheck, χρησιμοποιείται από offline CLI και RegistryTrust."""
-    _, document, incoming = _read(source, registry.path.parent / "unused")
-    # Το πιστοποιητικό φορτώνεται από το ίδιο το SignedClientRegistry.
-    return _import_verified(registry, document, incoming,
-                            merge_conflict=merge_conflict,
-                            prefer=prefer, expected_digest=expected_digest)
-
-
 def _import_verified(registry: SignedClientRegistry, document: dict,
                      incoming: dict, *, merge_conflict: bool,
                      prefer: str, expected_digest: str | None) -> dict:
@@ -179,8 +168,7 @@ def _import_verified(registry: SignedClientRegistry, document: dict,
     merged = None
     if kind == "conflict":
         merged, report = merge(local, incoming, prefer=prefer)
-        merged["_merge_prefer"] = prefer
-    actual = registry.apply_import(document, old_digest, merged=merged)
+    actual = registry.apply_import(document, old_digest, merged=merged, prefer=prefer)
     if report is not None:
         record = {"time": _now(), "local_version": local["registry_version"],
                   "incoming_version": incoming["registry_version"],
