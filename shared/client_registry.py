@@ -304,7 +304,7 @@ class SignedClientRegistry:
         self._document = document
 
     def apply_import(self, document: dict, expected_digest: str, *,
-                     merged: dict | None = None) -> dict:
+                     merged: dict | None = None, prefer: str = "local") -> dict:
         """Εφαρμογή υπό κλείδωμα, χωρίς race ανάμεσα σε preview και commit."""
         with self.lock:
             self._refresh_from_disk()
@@ -323,8 +323,7 @@ class SignedClientRegistry:
                 if relation(current, incoming) != "conflict":
                     raise RegistryError("Registry relation changed before merge")
                 # Recalculate from current data, rather than trusting a stale preview.
-                preferred = merged.get("_merge_prefer", "local")
-                candidate, _ = merge(current, incoming, prefer=preferred)
+                candidate, _ = merge(current, incoming, prefer=prefer)
                 self._commit_import(candidate)
             return self.snapshot()
 
