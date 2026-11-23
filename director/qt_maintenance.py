@@ -189,16 +189,19 @@ class CertificatesPanel(QWidget):
         self._copied_timer.timeout.connect(lambda: self.copy_button.setText(COPY))
 
     def _pair(self, key: str) -> QWidget:
-        """Κείμενο αριστερά, κατάσταση σε ok/err χρώμα τέρμα δεξιά (σχόλιο 23/11/2026)."""
+        """«κείμενο · κατάσταση», η κατάσταση σε ok/err χρώμα, όλα αριστερά (σχόλιο 23/11/2026)."""
         widget = QWidget()
         row = QHBoxLayout(widget)
         row.setContentsMargins(0, 0, 0, 0)
         row.setSpacing(px(6))
         main = _label("", "kvValue")
         state = _label("", "kvValue")
+        dot = _label("·", "kvValue")
         row.addWidget(main)
-        row.addStretch(1)
+        row.addWidget(dot)
         row.addWidget(state)
+        row.addStretch(1)
+        setattr(self, f"{key}_dot", dot)
         setattr(self, f"{key}_text", main)
         setattr(self, f"{key}_state", state)
         return widget
@@ -215,13 +218,14 @@ class CertificatesPanel(QWidget):
         self.rows.set("created", m.date_text(identity.created))
         self.rows.set("expires", identity.expires_text())
         self.key_text.setText(identity.algorithm)
-        self.key_state.setText("● " + identity.key_text())
+        self.key_state.setText(identity.key_text())
         _repolish(self.key_state, tone="ok" if identity.key_ok else "err")
         self.registry_text.setText(identity.registry_text())
         self.registry_state.setText(m.TEXT_SIGNATURE_OK if identity.signature_ok
                                     else m.TEXT_SIGNATURE_BAD)
-        self.registry_state.setVisible(identity.registry_version is not None
-                                       or not identity.signature_ok)
+        shown = identity.registry_version is not None or not identity.signature_ok
+        self.registry_state.setVisible(shown)
+        self.registry_dot.setVisible(shown)
         _repolish(self.registry_state, tone="ok" if identity.signature_ok else "err")
         self.rows.set("folder", str(identity.folder))
 
@@ -695,8 +699,8 @@ class SettingsPage(QWidget):
         row = QHBoxLayout()
         self.create_button = _button(CREATE_BACKUP, "primaryAction", "backup", theme.WHITE)
         self.create_button.clicked.connect(self.open_backup)
+        row.addStretch(1)   # κουμπιά τέρμα δεξιά (σχόλιο 23/11/2026)
         row.addWidget(self.create_button)
-        row.addStretch(1)
         layout.addLayout(row)
         return card
 
@@ -723,9 +727,9 @@ class SettingsPage(QWidget):
         self.restore_button.clicked.connect(self.open_restore)
         self.delete_button = _remove_button(DELETE_PREVIOUS)
         self.delete_button.clicked.connect(self.delete_previous)
-        row.addWidget(self.restore_button)
-        row.addWidget(self.delete_button)
         row.addStretch(1)
+        row.addWidget(self.delete_button)   # αριστερά, για να μη μετακινείται η Επαναφορά
+        row.addWidget(self.restore_button)
         layout.addLayout(row)
         return card
 

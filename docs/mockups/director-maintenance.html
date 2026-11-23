@@ -38,7 +38,6 @@ body { background: var(--window-bg); color: var(--text); font: 400 16px/1.35 var
 .kv dd { margin:0; min-width:0; }
 .eyebtn { margin-left:auto; width:26px; height:26px; display:inline-flex; align-items:center; justify-content:center; color:var(--text-muted); border-radius:6px; }
 .eyebtn svg { width:16px; height:16px; }
-.kv dd.split { display:flex; justify-content:space-between; gap:12px; }
 .mono { font-family: var(--mono); font-size: 15px; letter-spacing: .01em; line-height:1.5; }
 .ok { color: var(--connected); }
 .err { color: var(--live); }
@@ -56,7 +55,7 @@ body { background: var(--window-bg); color: var(--text); font: 400 16px/1.35 var
 .fp-row { display:flex; gap:12px; align-items:center; }
 .cards { display:flex; gap:14px; align-items:stretch; flex-wrap:wrap; }
 .cards .card { display:flex; flex-direction:column; }
-.cards .card > .row:last-child { margin-top:auto !important; padding-top:18px; }
+.cards .card > .row:last-child { margin-top:auto !important; padding-top:18px; justify-content:flex-end; }
 .pill.same { width:96px; justify-content:center; padding:0; }
 .view { display:none; }
 .view.on { display:flex; flex-direction:column; gap:14px; }
@@ -116,8 +115,8 @@ body { background: var(--window-bg); color: var(--text); font: 400 16px/1.35 var
             <span class="pill"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V6a2 2 0 0 1 2-2h9"/></svg>Αντιγραφή</span></div></dd>
           <dt>Δημιουργήθηκε</dt><dd>21/11/2026 18:42</dd>
           <dt>Λήξη</dt><dd>Χωρίς λήξη</dd>
-          <dt>Κλειδί</dt><dd class="split">ECDSA P-256<span class="ok">● Κρυπτογραφημένο (DPAPI)</span></dd>
-          <dt>Μητρώο</dt><dd class="split">v15 · 11 υπολογιστές<span class="ok">υπογραφή έγκυρη ✓</span></dd>
+          <dt>Κλειδί</dt><dd>ECDSA P-256 · <span class="ok">Κρυπτογραφημένο (DPAPI)</span></dd>
+          <dt>Μητρώο</dt><dd>v15 · 11 υπολογιστές · <span class="ok">υπογραφή έγκυρη</span></dd>
           <dt>Φάκελος</dt><dd><span class="ell" title="C:\Users\Γραμματεία\.school-intercom\tls">C:\Users\Γραμματεία\.school-intercom\tls</span></dd>
         </dl>
       </div>
@@ -136,7 +135,7 @@ body { background: var(--window-bg); color: var(--text); font: 400 16px/1.35 var
             <dt>Από τότε</dt><dd class="err">3 αλλαγές μητρώου</dd>
           </dl>
           <div class="row" style="margin-top:18px">
-            <button class="act primary"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4v11M7.5 10.5 12 15l4.5-4.5M5 20h14"/></svg>Δημιουργία backup…</button>
+            <button class="act primary"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8zM14 3v5h5M12 11v6M9.5 14.5 12 17l2.5-2.5"/></svg>Δημιουργία backup…</button>
           </div>
         </div>
         <div class="card" style="width: 520px;">
@@ -146,7 +145,7 @@ body { background: var(--window-bg); color: var(--text); font: 400 16px/1.35 var
             <dt>Προηγούμενα αρχεία</dt><dd class="muted">—</dd>
           </dl>
           <div class="row" style="margin-top:18px">
-            <button class="act"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20V9M7.5 13.5 12 9l4.5 4.5M5 4h14"/></svg>Επαναφορά από backup…</button>
+            <button class="act"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8zM14 3v5h5M12 17v-6M9.5 13.5 12 11l2.5 2.5"/></svg>Επαναφορά από backup…</button>
           </div>
         </div>
       </div>
@@ -165,7 +164,7 @@ body { background: var(--window-bg); color: var(--text); font: 400 16px/1.35 var
             <dt>Από τότε</dt><dd class="ok">καμία αλλαγή ✓</dd>
           </dl>
           <div class="row" style="margin-top:18px">
-            <button class="act primary"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4v11M7.5 10.5 12 15l4.5-4.5M5 20h14"/></svg>Δημιουργία backup…</button>
+            <button class="act primary"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8zM14 3v5h5M12 11v6M9.5 14.5 12 17l2.5-2.5"/></svg>Δημιουργία backup…</button>
           </div>
         </div>
         <div class="card" style="width: 520px;">
@@ -175,8 +174,8 @@ body { background: var(--window-bg); color: var(--text); font: 400 16px/1.35 var
             <dt>Προηγούμενα αρχεία</dt><dd><span class="err">pre-restore-20261122-2241</span><br><span class="muted small">περιέχει το προηγούμενο ιδιωτικό κλειδί</span></dd>
           </dl>
           <div class="row" style="margin-top:18px">
-            <button class="act"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20V9M7.5 13.5 12 9l4.5 4.5M5 4h14"/></svg>Επαναφορά από backup…</button>
             <button class="act remove"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round"><path d="M5 6.5h14M10 6.5V4.5h4v2M7 6.5v11.5a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2V6.5M10.5 10v6.5M13.5 10v6.5"/></svg>Διαγραφή</button>
+            <button class="act"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8zM14 3v5h5M12 17v-6M9.5 13.5 12 11l2.5 2.5"/></svg>Επαναφορά από backup…</button>
           </div>
         </div>
       </div>
