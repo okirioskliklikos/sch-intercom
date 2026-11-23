@@ -86,6 +86,26 @@ class Machine:
         self.director.wait_for("Director ακούει", timeout=20)
         return self.director
 
+    def state(self) -> dict:
+        """manager-state.json (4.2D1), ή {} αν δεν υπάρχει."""
+        path = self.dir / "manager-state.json"
+        return json.loads(path.read_text(encoding="utf-8")) if path.is_file() else {}
+
+    def promote(self) -> bool:
+        """4.2D1: μετά από restore ο υπολογιστής είναι Εφεδρικός χωρίς εξυπηρέτηση.
+
+        Ο χρήστης τον κάνει Κύριο και ξεκινά την εξυπηρέτηση· εδώ με το offline CLI.
+        """
+        codes = []
+        for command in ("primary", "serve-on"):
+            done = subprocess.run(
+                [sys.executable, "-m", "director.manager_state", command,
+                 "--registry-file", str(self.registry), "--yes"],
+                cwd=ROOT, env=child_env(), capture_output=True, timeout=60)
+            codes.append(done.returncode)
+        state = self.state()
+        return codes == [0, 0] and state.get("role") == "primary" and state.get("serving") is True
+
     def running(self) -> bool:
         return self.director is not None and self.director.proc.poll() is None
 
@@ -319,7 +339,13 @@ class LiveTest:
                 encoding="utf-8"),
             "τελευταία σύνδεση": last_seen.is_file() and (self.a.client_id or "?") in
             last_seen.read_text(encoding="utf-8"),
+            # 4.2D1: μετά από restore Εφεδρικός, χωρίς εξυπηρέτηση, με ειδοποίηση.
+            "Εφεδρικός μετά το restore": self.new.state().get("role") == "backup"
+            and self.new.state().get("serving") is False
+            and self.new.state().get("notice") == "restored_as_backup",
         }
+        # Όπως ο χρήστης που αντικαθιστά τον Κύριο: γίνεται Κύριος με εξυπηρέτηση.
+        checks["γίνεται Κύριος"] = self.new.promote()
         detail = ", ".join(f"{k} {v}" for k, v in checks.items())
         if not checks["τελευταία σύνδεση"]:
             detail += f" | clients-last-seen.json: {last_seen.read_text(encoding='utf-8')[:300] if last_seen.is_file() else 'λείπει'}"
@@ -414,7 +440,7 @@ class LiveTest:
             ("Διακοπή Manager pc-old", self.s09_stop_old),
             ("restore στον pc-new, αναφορά MP3 που λείπουν", self.s10_restore),
             ("restore --restore-media: MP3 με σωστό hash", self.s11_restore_media),
-            ("Ίδια ταυτότητα, μητρώο, αίτημα, τελευταία σύνδεση", self.s12_same_state),
+            ("Ίδια ταυτότητα, μητρώο, αίτημα, τελευταία σύνδεση· Εφεδρικός → Κύριος", self.s12_same_state),
             ("Client A συνδέεται χωρίς νέα εγγραφή και λαμβάνει ήχο", self.s13_reconnect_and_audio),
             ("Ο ανακλημένος Client B απορρίπτεται", self.s14_revoked_rejected),
             ("Το εκκρεμές αίτημα C εγκρίνεται στον pc-new", self.s15_approve_pending),

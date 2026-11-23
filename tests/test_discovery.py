@@ -53,7 +53,7 @@ class DiscoveryTests(unittest.TestCase):
         import json
         from shared.discovery import MAGIC
         value = json.loads(packet[len(MAGIC):])
-        for bad in ({"rv": True}, {"rv": 0}, {"host": "bad\\nname"},
+        for bad in ({"rv": True}, {"rv": 0}, {"host": "bad\nname"}, {"host": "tab\there"},
                     {"port": "50555"}, {"school": "other"}, {"unknown": 1}):
             copy = dict(value)
             copy.update(bad)

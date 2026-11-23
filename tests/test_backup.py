@@ -95,15 +95,44 @@ class BackupTests(unittest.TestCase):
         target = self.new / "manager-state.json"
         save(target, ManagerState(role="primary", serving=False))
         before = target.read_bytes()
+        # Διακοπή ακριβώς μετά την ΤΕΛΕΥΤΑΙΑ μετακίνηση (το manager-state.json).
+        # Ο αριθμός μετακινήσεων μετριέται, ώστε το test να μη σπάει όταν
+        # προστίθενται ενότητες στο backup.
         with self.assertRaises(KeyboardInterrupt):
-            self.transfer(fail_after=17)
+            self.transfer(fail_after=self.count_moves(with_state=True))
         self.assertTrue(rollback(self.new))
         self.assertEqual(target.read_bytes(), before)
         target.unlink()
         with self.assertRaises(KeyboardInterrupt):
-            self.transfer(fail_after=9)
+            self.transfer(fail_after=self.count_moves(with_state=False))
         self.assertTrue(rollback(self.new))
         self.assertFalse(target.exists())
+
+    def count_moves(self, *, with_state: bool) -> int:
+        """Μετακινήσεις ενός πλήρους restore σε κενό φάκελο (± υπάρχον manager-state)."""
+        import shutil
+        import director.backup as backup_module
+        from director.manager_state import ManagerState, save
+        scratch = self.root / "count-moves"
+        shutil.rmtree(scratch, ignore_errors=True)
+        scratch.mkdir()
+        if with_state:
+            save(scratch / "manager-state.json", ManagerState(role="primary", serving=False))
+        calls = []
+        real = backup_module._replace_with_retry
+
+        def counting(source, target):
+            calls.append(Path(target).name)
+            return real(source, target)
+
+        with patch.object(backup_module, "_replace_with_retry", counting):
+            restore(self.backup, PASSWORD, registry_file=scratch / "clients-registry.json",
+                    tls_cert=scratch / "tls" / "director-tls.crt",
+                    tls_key=scratch / "tls" / "director-tls.key", media_dir=scratch / "media")
+        shutil.rmtree(scratch)
+        # Μία κλήση είναι η ατομική εγγραφή του journal, πριν από τις μετακινήσεις.
+        self.assertEqual(calls.count("restore-journal.json"), 1)
+        return len(calls) - 1
 
     def test_wrong_password_leaves_destination_untouched(self):
         self.make()

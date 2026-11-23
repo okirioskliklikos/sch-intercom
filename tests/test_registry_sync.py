@@ -6,6 +6,7 @@ from pathlib import Path
 import shutil
 import tempfile
 import unittest
+from unittest import mock
 import uuid
 
 from director.main import RegistryTrust
@@ -160,6 +161,20 @@ class RegistrySyncTests(unittest.TestCase):
                 "import", str(source), "--registry-file", str(self.b_file),
                 "--tls-cert", str(self.cert), "--tls-key", str(self.key),
                 "--yes"]), 4)
+
+    def test_offline_import_reports_running_manager_before_reading_file(self):
+        # Βήμα 20: ίδιο ή παλαιότερο αρχείο με Manager σε λειτουργία → 4, όχι 0/5.
+        from director.backup import manager_lock
+        same = self.root / "same.sicr"
+        same.write_bytes(self.b_file.read_bytes())
+        with manager_lock(self.b):
+            for source, extra in ((same, ["--yes"]), (same, [])):
+                with self.subTest(extra=extra), \
+                        mock.patch("builtins.input", side_effect=AssertionError("prompt")):
+                    self.assertEqual(sync_main([
+                        "import", str(source), "--registry-file", str(self.b_file),
+                        "--tls-cert", str(self.cert), "--tls-key", str(self.key),
+                        *extra]), 4)
 
     def test_restore_journal_denies_operations(self):
         (self.b / "restore-journal.json").write_text("{}", encoding="utf-8")

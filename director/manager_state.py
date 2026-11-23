@@ -138,13 +138,14 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "status":
             print(describe(load(state_path)))
             return 0
-        if args.command == "primary":
-            print(PROMOTE_WARNING)
-        if not args.yes:
-            if input("Πληκτρολογήστε ΝΑΙ για επιβεβαίωση: ").strip() != "ΝΑΙ":
-                return 5
+        # Πρώτα το κλείδωμα: με Manager σε λειτουργία κωδικός 4 χωρίς ερώτηση ΝΑΙ.
         with manager_lock(state_path.parent):
             ensure_no_interrupted_restore(state_path.parent)
+            if args.command == "primary":
+                print(PROMOTE_WARNING)
+            if not args.yes:
+                if input("Πληκτρολογήστε ΝΑΙ για επιβεβαίωση: ").strip() != "ΝΑΙ":
+                    return 5
             if args.command in ("primary", "backup"):
                 state = change_role(state_path, args.command)
             elif args.command in ("serve-on", "serve-off"):

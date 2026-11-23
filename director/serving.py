@@ -88,14 +88,19 @@ class ServingController:
     def poll_conflicts(self) -> list:
         """Ειδοποιεί μία φορά ανά εμφάνιση, ποτέ αυτόματη διακοπή."""
         others = self._other()
-        present = {item.info.inst for item in others}
-        if self.active:
+        with self._lock:
+            if not self.active:
+                # Όσο δεν εξυπηρετούμε δεν υπάρχει σύγκρουση: μόλις ξεκινήσουμε
+                # (π.χ. με «παρ' όλα αυτά»), ο ήδη ενεργός Manager πρέπει να αναφερθεί.
+                self._previous_conflicts = set()
+                return others
+            present = {item.info.inst for item in others}
             for item in others:
                 if item.info.inst not in self._previous_conflicts:
                     self.report("ΠΡΟΣΟΧΗ: εξυπηρετεί και ο υπολογιστής "
                                 f"{item.info.host} ({item.ip}). "
                                 "Σταματήστε τον έναν.")
-        self._previous_conflicts = present
+            self._previous_conflicts = present
         return others
 
     def startup(self) -> bool:

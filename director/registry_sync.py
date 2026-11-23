@@ -253,17 +253,19 @@ def main(argv: list[str] | None = None) -> int:
             print("Εξαγωγή:", export_registry(args.registry_file, args.tls_cert, args.out))
             return 0
 
-        document, local, kind, report = examine(
-            args.registry_file, args.tls_cert, args.file,
-            prefer=args.prefer, allow_merge=args.merge)
-        _display(report)
-        if kind == "same":
-            print("Το μητρώο είναι ήδη ενημερωμένο.")
-            return 0
-        if not args.yes and input("Για εφαρμογή πληκτρολογήστε ΝΑΙ: ").strip() != "ΝΑΙ":
-            return 5
+        # Πρώτα το κλείδωμα (4.2D §8.2): με Manager σε λειτουργία πάντα κωδικός 4,
+        # ανεξάρτητα από το τι περιέχει το αρχείο (ίδιο, παλαιότερο, σύγκρουση).
         with manager_lock(base):
             ensure_no_interrupted_restore(base)
+            document, local, kind, report = examine(
+                args.registry_file, args.tls_cert, args.file,
+                prefer=args.prefer, allow_merge=args.merge)
+            _display(report)
+            if kind == "same":
+                print("Το μητρώο είναι ήδη ενημερωμένο.")
+                return 0
+            if not args.yes and input("Για εφαρμογή πληκτρολογήστε ΝΑΙ: ").strip() != "ΝΑΙ":
+                return 5
             registry = SignedClientRegistry(args.registry_file, args.tls_cert, args.tls_key)
             result = _import_verified(
                 registry, document, verify_document(document, registry._cert_pem),
