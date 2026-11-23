@@ -62,9 +62,14 @@ class ServingController:
                             "εξυπηρετεί ήδη άλλος Manager.")
             role = load(self.state_path).role
             self.start_network(role)
+            try:
+                if persist:
+                    change_serving(self.state_path, True)
+            except BaseException:
+                self.stop_network()
+                self.active = False
+                raise
             self.active = True
-            if persist:
-                change_serving(self.state_path, True)
             return True
 
     def stop(self, *, persist: bool = True) -> None:
