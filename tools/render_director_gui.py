@@ -51,7 +51,8 @@ def main() -> None:
     parser.add_argument("--base-pt", type=float, default=None,
                         help="βάση γραμματοσειράς σε pt (προεπιλογή: του συστήματος, ελάχιστο 12)")
     args = parser.parse_args()
-    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    from shared.ui.offscreen import use_offscreen
+    use_offscreen()  # offscreen· στα Windows και γραμματοσειρές του συστήματος
     os.environ["QT_SCALE_FACTOR"] = str(args.scale)
 
     from PySide6.QtCore import QEventLoop, QTimer

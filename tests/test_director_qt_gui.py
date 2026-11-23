@@ -6,7 +6,8 @@ import os
 import unittest
 from unittest import TestCase
 
-os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+from shared.ui.offscreen import use_offscreen
+use_offscreen()  # offscreen· στα Windows και γραμματοσειρές του συστήματος
 
 try:
     from PySide6.QtCore import Qt
@@ -55,6 +56,20 @@ class DirectorWindowTests(TestCase):
 
     STATUS = [("id-1", "Γ1", True, 0.1), ("id-2", "Γ2", False, 8.0),
               ("id-3", "Α1", True, 0.2), ("id-4", "Α1", False, 9.0)]
+
+    def test_offscreen_has_real_fonts_for_greek(self):
+        # Χωρίς γραμματοσειρές (π.χ. offscreen στα Windows χωρίς QT_QPA_FONTDIR) όλοι
+        # οι έλεγχοι διάταξης αποτυγχάνουν ακατανόητα· εδώ αποτυγχάνει ένα, με εξήγηση.
+        from PySide6.QtGui import QFontDatabase, QFontMetrics
+        self.assertTrue(QFontDatabase.families(),
+                        "Το Qt δεν βρήκε γραμματοσειρές (offscreen)· βλ. shared/ui/offscreen.py")
+        font = QFont(self.app.font())
+        font.setPointSizeF(current_metrics().font_pt(theme.FONT_ROOM))
+        width = QFontMetrics(font).horizontalAdvance("Αίθουσα Εικαστικών")
+        # Linux ≈ 174px, πραγματικό παράθυρο Windows (Segoe UI) ≈ 141px· χωρίς
+        # γραμματοσειρές στα Windows offscreen 324px. Η στήλη αιθουσών είναι px(200).
+        self.assertLess(width, current_metrics().px(200),
+                        f"Ελληνικό κείμενο {width}px: λείπουν γραμματοσειρές στο offscreen Qt")
 
     def test_idle_layout_and_safe_state(self):
         window = self.make(self.STATUS)

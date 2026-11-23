@@ -14,7 +14,8 @@ import unittest
 import uuid
 from unittest import mock
 
-os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+from shared.ui.offscreen import use_offscreen
+use_offscreen()  # offscreen· στα Windows και γραμματοσειρές του συστήματος
 
 from director.main import RegistryTrust
 from director.security import (LAST_SEEN_SAVE_SECONDS, TEXT_APPROVED, TEXT_DENIED,
