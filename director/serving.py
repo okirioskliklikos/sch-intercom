@@ -147,6 +147,8 @@ class SocketServingService:
                 target=self.accept_clients, args=(server, self.broadcaster, stopped),
                 daemon=True, name="manager-accept")
             self.server, self.stop_event = server, stopped
+            print(f"Director ακούει στο {args.host}:{args.port} — έως "
+                  f"{MAX_CLIENTS} Clients", flush=True)
             self.threads = [beacon, listener]
             for worker in self.threads:
                 worker.start()
