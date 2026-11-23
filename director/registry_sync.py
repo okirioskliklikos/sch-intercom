@@ -51,7 +51,7 @@ def status(registry_file: Path, tls_cert: Path) -> dict:
     current = registry["registry_version"]
     base = Path(registry_file).parent
     versions = []
-    for name in (LAST_EXPORT, "last-backup.json"):
+    for name in (LAST_EXPORT, "last-backup.json", "last-restore.json"):
         try:
             record = json.loads((base / name).read_text(encoding="utf-8"))
             if type(record["registry_version"]) is int and record["registry_version"] >= 1:
