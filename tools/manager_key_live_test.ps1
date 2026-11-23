@@ -1,4 +1,4 @@
-# Αυτόματη πραγματική δοκιμή 4.2C2 (κλειδί TLS του Manager με DPAPI), Manager σε Windows.
+﻿# Αυτόματη πραγματική δοκιμή 4.2C2 (κλειδί TLS του Manager με DPAPI), Manager σε Windows.
 # Πρώτα τα unit tests, μετά 8 βήματα με πραγματικό Manager και Client.
 # Μόνο προσωρινοί φάκελοι, loopback, θύρες 51555/51556/51559.
 # Εκτέλεση: powershell -ExecutionPolicy Bypass -File tools\manager_key_live_test.ps1
