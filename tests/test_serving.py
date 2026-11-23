@@ -90,6 +90,23 @@ class ServingTests(unittest.TestCase):
         self.ctrl.poll_conflicts()
         self.assertEqual(sum("ΠΡΟΣΟΧΗ" in line for line in self.lines), 2)
 
+    def test_forced_start_warns_about_manager_seen_while_stopped(self):
+        # Ο δεύτερος Manager είδε τον πρώτο ΠΡΙΝ ξεκινήσει· μετά το «παρ' όλα αυτά»
+        # πρέπει να βγάλει κι αυτός την προειδοποίηση (βήμα 8 της πραγματικής δοκιμής).
+        self.watcher.found = [self.another()]
+        self.ctrl.poll_conflicts()
+        self.ctrl.poll_conflicts()
+        self.assertFalse(any("εξυπηρετεί και" in line for line in self.lines))
+        self.ctrl.start(force=True)
+        self.ctrl.poll_conflicts()
+        self.ctrl.poll_conflicts()
+        self.assertEqual(sum("εξυπηρετεί και" in line for line in self.lines), 1)
+        self.ctrl.stop()
+        self.ctrl.poll_conflicts()
+        self.ctrl.start(force=True)
+        self.ctrl.poll_conflicts()
+        self.assertEqual(sum("εξυπηρετεί και" in line for line in self.lines), 2)
+
     def test_shutdown_does_not_change_persistent_choice(self):
         self.ctrl.start()
         self.ctrl.shutdown()

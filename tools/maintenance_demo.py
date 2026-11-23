@@ -57,7 +57,8 @@ def main() -> None:
                         help="φάκελος για στιγμιότυπα (offscreen) και έξοδος")
     args = parser.parse_args()
     if args.screenshots:
-        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        from shared.ui.offscreen import use_offscreen
+        use_offscreen()  # offscreen· στα Windows και γραμματοσειρές του συστήματος
 
     from director.gui import DirectorMicrophone
     from director.qt_gui import DirectorWindow, create_application, release_window

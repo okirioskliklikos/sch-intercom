@@ -64,7 +64,9 @@ class TestMachine(BaseMachine):
             "--extra-beacon-port", str(self.extra),
             "--start-check-seconds", "3"],
             label=f"Manager {self.dir.name}")
-        if self.director.wait_for("[Manager] Ρόλος:", timeout=30) is None:
+        # Η γραμμή «Εξυπηρέτηση» τυπώνεται μετά τη «Ρόλος»· αναμονή για αυτήν,
+        # ώστε τα seen() που ακολουθούν να βλέπουν και τις δύο.
+        if self.director.wait_for("[Manager] Εξυπηρέτηση:", timeout=30) is None:
             raise RuntimeError(f"Δεν εκκίνησε ο {self.dir.name}")
         return self.director
 
@@ -243,7 +245,7 @@ class LiveTest:
         marker = self.b.director.mark()
         code = self.two.use(self.b).enroll(self.b.cert)
         approved = self.approve(self.b, self.two, code, marker)
-        state = json.loads((self.b.dir / "manager-state.json").read_text())
+        state = json.loads((self.b.dir / "manager-state.json").read_text(encoding="utf-8"))
         return promoted and opened and approved and state.get("notice") is None
 
     def s11(self):
@@ -290,11 +292,11 @@ class LiveTest:
         return expected and denied and self.b.registry.read_bytes() == before
 
     def s16(self):
-        before = json.loads(self.b.registry.read_text())["registry_version"]
+        before = json.loads(self.b.registry.read_text(encoding="utf-8"))["registry"]["registry_version"]
         imported = self.b.command(
             f"registry import {self.a_conflict} merge confirm",
             "[Manager] Εισαγωγή: conflict")
-        reg = json.loads(self.b.registry.read_text())["registry"]
+        reg = json.loads(self.b.registry.read_text(encoding="utf-8"))["registry"]
         entries = {entry["client_id"]: entry for entry in reg["clients"]}
         c1 = entries[self.one.client_id]["status"] == "revoked"
         c2 = entries[self.two.client_id]["room"] == "C2627-Γ2"

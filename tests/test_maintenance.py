@@ -15,7 +15,8 @@ import unittest
 import uuid
 from unittest import mock
 
-os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+from shared.ui.offscreen import use_offscreen
+use_offscreen()  # offscreen· στα Windows και γραμματοσειρές του συστήματος
 
 from director import backup, maintenance as m
 from director.backup import BackupError, BackupLocked, manager_lock

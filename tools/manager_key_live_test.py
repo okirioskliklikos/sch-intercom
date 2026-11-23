@@ -146,12 +146,15 @@ class KeyTest:
         return ok, f"create rc {rc1}, restore rc {rc2}, νέος κωδικός, χωρίς ξεκλείδωτο κλειδί"
 
     def s7_new_computer_connects(self):
+        # 4.2D1: μετά από restore Εφεδρικός χωρίς εξυπηρέτηση· ο χρήστης τον κάνει Κύριο.
+        promoted = self.new.promote()
         self.new.start()
         if not self.new.running():
             return False, "ο Manager του pc-new δεν ξεκίνησε"
         joined, enrolled = self.connect(self.new)
         self.new.stop()
-        return joined and not enrolled, f"σύνδεση {joined}, νέα εγγραφή {enrolled}"
+        return (promoted and joined and not enrolled,
+                f"έγινε Κύριος {promoted}, σύνδεση {joined}, νέα εγγραφή {enrolled}")
 
     def s8_offline_cli(self):
         done = subprocess.run([sys.executable, "-m", "director.main", *self.new.paths(),

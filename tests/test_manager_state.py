@@ -85,6 +85,14 @@ class ManagerStateTests(unittest.TestCase):
             self.assertEqual(main(["primary", "--registry-file", str(self.registry),
                                    "--yes"]), 4)
 
+    def test_offline_lock_checked_before_confirmation_prompt(self):
+        from unittest import mock
+        from director.backup import manager_lock
+        with manager_lock(self.path.parent), \
+                mock.patch("builtins.input", side_effect=AssertionError("prompt")):
+            self.assertEqual(main(["primary", "--registry-file", str(self.registry)]), 4)
+        self.assertFalse(self.path.exists())
+
     def test_restore_journal_denies_write(self):
         (self.path.parent / "restore-journal.json").write_text("{}", encoding="utf-8")
         self.assertEqual(main(["backup", "--registry-file", str(self.registry),

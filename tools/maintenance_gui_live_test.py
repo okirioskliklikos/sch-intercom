@@ -340,6 +340,12 @@ class LiveTest:
     def s11_restart_reconnect(self):
         from director.main import restart_command
         command = restart_command()
+        # 4.2D1: μετά από restore ο υπολογιστής είναι Εφεδρικός χωρίς εξυπηρέτηση·
+        # ο χρήστης τον κάνει Κύριο (εδώ με το offline CLI) πριν από τη σύνδεση.
+        state = self.pc.state()
+        backup_role = (state.get("role"), state.get("serving"), state.get("notice")) == (
+            "backup", False, "restored_as_backup")
+        promoted = self.pc.promote()
         director = self.pc.start()
         mark = director.mark()
         self.a.start(self.pc.cert)
@@ -347,7 +353,9 @@ class LiveTest:
         enrolled_again = director.seen("Νέο αίτημα", since=mark)
         self.a.stop()
         self.pc.stop()
-        return (joined is not None and not enrolled_again and command[0] == sys.executable,
+        return (backup_role and promoted and joined is not None and not enrolled_again
+                and command[0] == sys.executable,
+                f"Εφεδρικός μετά το restore {backup_role}, έγινε Κύριος {promoted}, "
                 f"σύνδεση χωρίς νέα εγγραφή {joined is not None and not enrolled_again}")
 
     def s12_settings_after_restore(self):
@@ -391,7 +399,7 @@ class LiveTest:
             ("Σύνοψη, συναίνεση παλαιότερου μητρώου, επαναφορά", self.s08_preview_and_restore),
             ("Η εξυπηρέτηση σταμάτησε και το κλείδωμα αφέθηκε", self.s09_stopped_serving),
             ("Τα αρχεία επανήλθαν (μητρώο, MP3, pre-restore)", self.s10_restored_files),
-            ("Επανεκκίνηση: ο Client συνδέεται χωρίς νέα εγγραφή", self.s11_restart_reconnect),
+            ("Επανεκκίνηση: Εφεδρικός → Κύριος, ο Client συνδέεται χωρίς νέα εγγραφή", self.s11_restart_reconnect),
             ("Συντήρηση μετά: τελευταία επαναφορά, προηγούμενα αρχεία", self.s12_settings_after_restore),
             ("Διαγραφή προηγούμενων μόνο μετά από επιβεβαίωση", self.s13_delete_previous),
             ("Κανένας κωδικός ή κλειδί στα κείμενα του GUI", self.s14_no_secrets),
