@@ -172,8 +172,17 @@ class ManagerKillTests(unittest.TestCase):
                         pass
                 holder.kill()             # SIGKILL / TerminateProcess, όχι κανονικό κλείσιμο
                 holder.wait(10)
-                with manager_lock(Path(folder)):
-                    pass                  # ο νέος Manager ξεκινά
+                # Τα Windows ελευθερώνουν τα κλειδώματα αρχείων λίγο *μετά* τον
+                # τερματισμό (ασύγχρονα)· το Linux αμέσως. Αρκούν λίγα δευτερόλεπτα.
+                deadline = time.monotonic() + 5
+                while True:
+                    try:
+                        with manager_lock(Path(folder)):
+                            break         # ο νέος Manager ξεκινά
+                    except BackupLocked:
+                        if time.monotonic() > deadline:
+                            raise
+                        time.sleep(0.1)
             finally:
                 if holder.poll() is None:
                     holder.kill()

@@ -538,7 +538,16 @@ class LiveTest:
 
     def s07(self):
         started = time.monotonic()
-        self.m.start()                    # χωρίς παρέμβαση: lock ελεύθερο, εξυπηρέτηση ενεργή
+        # Τα Windows ελευθερώνουν το manager.lock λίγο μετά το kill (ασύγχρονα).
+        while True:
+            try:
+                with manager_lock(self.m.dir):
+                    break
+            except BackupLocked:
+                if time.monotonic() - started > 5:
+                    return False, "το manager.lock δεν ελευθερώθηκε σε 5 s"
+                time.sleep(0.1)
+        self.m.start()                    # χωρίς παρέμβαση: εξυπηρέτηση ενεργή
         mark = 0
         joined = [self.joined(board, mark, 20) for board in self.boards]
         rejoin = round(time.monotonic() - started, 1)
