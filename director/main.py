@@ -185,26 +185,43 @@ def stream_microphone(broadcaster: AudioBroadcaster, *, device: int | None = Non
                 stats.update(frames_sent, dropped)
 
 
+#: 4.4: μελωδία για τον έλεγχο με το αυτί (C5 E5 G5 C6 G5 E5, 300 ms η νότα): κλικ και
+#: κενά ακούγονται πιο εύκολα σε αλλαγές νότας παρά σε σταθερό τόνο.
+MELODY_HZ = (523.25, 659.25, 783.99, 1046.5, 783.99, 659.25)
+MELODY_NOTE_BLOCKS = 15
+
+
 def stream_test_tone(broadcaster: AudioBroadcaster, *, stop: threading.Event | None = None,
-                     stats: DirectorStats | None = None) -> None:
+                     stats: DirectorStats | None = None, melody: bool = False,
+                     report=None) -> None:
     """Μόνο για αυτόματες πραγματικές δοκιμές (κρυφό ``--test-tone``): σταθερός, χαμηλός
     τόνος 440 Hz σε πραγματικό χρόνο αντί για μικρόφωνο, ώστε η δοκιμή να μην εξαρτάται
-    από συσκευή εισόδου ή άδεια μικροφώνου."""
+    από συσκευή εισόδου ή άδεια μικροφώνου. ``melody``: νότες αντί για σταθερό τόνο (4.4).
+    ``report``: TestReport· ένα γεγονός «pub» ανά block (αύξων, χρόνος, παραλήπτες)."""
     import math
 
     samples = BLOCK_BYTES // 2
     period = BLOCK_SAMPLES / SAMPLE_RATE
-    phase = 0
+    angle = 0.0
     frames_sent = 0
     next_at = time.monotonic()
-    print("Πηγή δοκιμής ενεργή (τόνος 440 Hz, όχι μικρόφωνο).", flush=True)
+    amplitude = 2500 if melody else 800
+    print("Πηγή δοκιμής ενεργή (" + ("μελωδία" if melody else "τόνος 440 Hz")
+          + ", όχι μικρόφωνο).", flush=True)
     while stop is None or not stop.is_set():
+        frequency = (MELODY_HZ[(frames_sent // MELODY_NOTE_BLOCKS) % len(MELODY_HZ)]
+                     if melody else 440.0)
+        step = 2 * math.pi * frequency / SAMPLE_RATE
         block = bytearray()
         for index in range(samples):
-            value = int(800 * math.sin(2 * math.pi * 440 * (phase + index) / SAMPLE_RATE))
+            # Συνεχής φάση και στις αλλαγές νότας: καμία ασυνέχεια (κλικ) από την πηγή.
+            value = int(amplitude * math.sin(angle + step * index))
             block += value.to_bytes(2, "little", signed=True)
-        phase += samples
-        broadcaster.publish(bytes(block), time.monotonic_ns() // 1000)
+        angle = (angle + step * samples) % (2 * math.pi)
+        published_us = time.monotonic_ns() // 1000
+        result = broadcaster.publish(bytes(block), published_us)
+        if report is not None and result is not None:
+            report.event("pub", t=published_us, seq=result[0], n=result[1])
         frames_sent += 1
         if stats is not None:
             stats.update(frames_sent, 0)
@@ -676,7 +693,10 @@ def main() -> None:
     parser.add_argument("--max-pending-requests", type=int, default=None,
                         help=argparse.SUPPRESS)
     parser.add_argument("--watch-port", type=int, default=None, help=argparse.SUPPRESS)
-    parser.add_argument("--test-tone", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--test-tone", nargs="?", const="440", choices=("440", "melody"),
+                        default=None, help=argparse.SUPPRESS)
+    # Μόνο για τις δοκιμές 4.4 (μαζί με --test-tone): ένα γεγονός ανά block σε αρχείο JSONL.
+    parser.add_argument("--test-report", type=Path, default=None, help=argparse.SUPPRESS)
     parser.add_argument("--extra-beacon-port", type=int, default=None,
                         help=argparse.SUPPRESS)
     parser.add_argument("--start-check-seconds", type=float, default=3.0,
@@ -823,7 +843,13 @@ def main() -> None:
             monitoring.start()
             try:
                 if args.test_tone:
-                    stream_test_tone(broadcaster, stop=stop, stats=stats)
+                    tone_report = None
+                    if args.test_report is not None:
+                        from shared.test_report import TestReport
+                        tone_report = TestReport(args.test_report)
+                        runtime.callback(tone_report.close)
+                    stream_test_tone(broadcaster, stop=stop, stats=stats,
+                                     melody=args.test_tone == "melody", report=tone_report)
                 else:
                     stream_microphone(broadcaster, device=args.device, latency=args.latency,
                                       stop=stop, stats=stats)

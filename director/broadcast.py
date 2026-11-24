@@ -208,20 +208,27 @@ class AudioBroadcaster:
         self.on_event(f"[Director] {client_id} ({room}) συνδέθηκε — σύνολο {self.client_count}")
         return True
 
-    def publish(self, pcm: bytes, timestamp_us: int) -> None:
-        """Μόνο επιλεγμένοι λαμβάνουν PCM· οι άλλοι λαμβάνουν keepalive από το sender."""
+    def publish(self, pcm: bytes, timestamp_us: int) -> tuple[int, int] | None:
+        """Μόνο επιλεγμένοι λαμβάνουν PCM· οι άλλοι λαμβάνουν keepalive από το sender.
+
+        Επιστρέφει (αύξων αριθμός, πλήθος επιλεγμένων Clients) για τις μετρήσεις 4.4.
+        """
         with self._lock:
             if self._closed:
-                return
+                return None
             seq = self._sequence
             self._sequence = (seq + 1) & 0xFFFFFFFF
             sessions = tuple(self._sessions.values())
             # Μετάβαση και enqueue γίνονται με ένα lock: δεν περνά PCM μετά το STOP.
             voice = encode_frame(pcm, seq, timestamp_us)
+            selected = 0
             for session in sessions:
                 session.set_selected(self._is_selected(session))
-                if session.selected and session.enqueue(voice):
-                    self.dropped += 1
+                if session.selected:
+                    selected += 1
+                    if session.enqueue(voice):
+                        self.dropped += 1
+        return seq, selected
 
     def update_client_info(self, client_id: str, room: str, name: str) -> None:
         """Apply Manager-owned room immediately and queue Client metadata update."""
