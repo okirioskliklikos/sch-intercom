@@ -20,6 +20,8 @@
 
 4.3C2: --notices full | duplicate | both (ψεύτικα: «γεμάτος» Manager, ίδια ταυτότητα
 στον C2627-Γ1 · Board1) και --page home | security.
+
+Κλίμακα περιβάλλοντος: --scale 80 | 90 | 100 | 110 | 125 (προεπιλογή όπως η εφαρμογή).
 """
 from __future__ import annotations
 
@@ -241,6 +243,8 @@ def main() -> None:
     parser.add_argument("--notices", choices=("none", "full", "duplicate", "both"),
                         default="none", help="4.3C2: ειδοποιήσεις «γεμάτος» / ίδια ταυτότητα")
     parser.add_argument("--page", choices=("home", "security"), default="security")
+    parser.add_argument("--scale", type=int, choices=(80, 90, 100, 110, 125), default=None,
+                        help="κλίμακα περιβάλλοντος %% (προεπιλογή: όπως η εφαρμογή, 90 στα Windows)")
     parser.add_argument("--screenshot", type=Path, default=None,
                         help="μόνο στιγμιότυπο (offscreen) και έξοδος")
     args = parser.parse_args()
@@ -249,11 +253,15 @@ def main() -> None:
         use_offscreen()  # offscreen· στα Windows και γραμματοσειρές του συστήματος
 
     from director.gui import DirectorMicrophone
-    from director.qt_gui import DirectorWindow, create_application, release_window
+    from director.qt_gui import (DirectorWindow, create_application, release_window,
+                                 save_layout_settings)
+    from shared.ui import theme
 
-    app = create_application()
+    scale = args.scale or theme.default_ui_scale()
+    app = create_application(ui_scale=scale)
     with tempfile.TemporaryDirectory(prefix="sch-intercom-demo-") as temp:
         print(f"Προσωρινός φάκελος: {temp} (σβήνεται στο κλείσιμο)")
+        save_layout_settings(Path(temp) / "director-gui.json", {"ui_scale": scale})
         broadcaster, model, enrollment = build(Path(temp))
         broadcaster.set_notices(args.notices)
         role = build_role(Path(temp), args.role, lambda: model.trust.registry.version,

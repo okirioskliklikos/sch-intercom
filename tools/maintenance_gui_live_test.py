@@ -362,6 +362,7 @@ class LiveTest:
         self.gui = GuiManager(self.pc, self.app)
         window = self.gui.window
         window.nav_buttons["settings"].click()
+        self.gui.settings.tab_maintenance.click()   # Ρυθμίσεις ανοίγουν στην «Εμφάνιση»
         self.gui.pump()
         page = self.gui.settings
         when = page.restore_rows.values["when"].text()

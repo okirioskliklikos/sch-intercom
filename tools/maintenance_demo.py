@@ -3,6 +3,7 @@
 Χρήση (Linux ή Windows, χρειάζεται PySide6):
     python -m tools.maintenance_demo                 # ανοίγει στη «Συντήρηση»
     python -m tools.maintenance_demo --page certificates
+    python -m tools.maintenance_demo --page appearance --scale 80   # Ρυθμίσεις → Εμφάνιση
     python -m tools.maintenance_demo --screenshots DIR   # μόνο στιγμιότυπα και έξοδος
 
 Όλα γίνονται σε προσωρινό φάκελο (ταυτότητα Manager, μητρώο με 26 υπολογιστές, 2 MP3,
@@ -87,7 +88,10 @@ def build(root: Path, log=print):
 def main() -> None:
     from tools import security_demo
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("--page", choices=("maintenance", "certificates"), default="maintenance")
+    parser.add_argument("--page", choices=("maintenance", "appearance", "certificates"),
+                        default="maintenance")
+    parser.add_argument("--scale", type=int, choices=(80, 90, 100, 110, 125), default=None,
+                        help="κλίμακα περιβάλλοντος %% (προεπιλογή: όπως η εφαρμογή, 90 στα Windows)")
     parser.add_argument("--role", choices=security_demo.ROLE_SCENARIOS, default="primary",
                         help="σενάριο Κύριου/Εφεδρικού (όπως στο security_demo)")
     parser.add_argument("--width", type=int, default=None, help="πλάτος παραθύρου")
@@ -99,15 +103,19 @@ def main() -> None:
         use_offscreen()  # offscreen· στα Windows και γραμματοσειρές του συστήματος
 
     from director.gui import DirectorMicrophone
-    from director.qt_gui import DirectorWindow, create_application, release_window
+    from director.qt_gui import (DirectorWindow, create_application, release_window,
+                                 save_layout_settings)
+    from shared.ui import theme
     from tools.security_demo import fake_stream
 
-    app = create_application()
+    scale = args.scale or theme.default_ui_scale()
+    app = create_application(ui_scale=scale)
     with tempfile.TemporaryDirectory(prefix="sch-intercom-demo-") as temp:
         print(f"Προσωρινός φάκελος: {temp} (σβήνεται στο κλείσιμο)")
         broadcaster, model, enrollment, maintenance, backup_path = build(Path(temp))
         role = security_demo.build_role(Path(temp), args.role,
                                         lambda: model.trust.registry.version)
+        save_layout_settings(Path(temp) / "director-gui.json", {"ui_scale": scale})
         try:
             options = {"restart": lambda: window.close(),
                        "choose_save": None, "choose_open": None}
@@ -125,6 +133,8 @@ def main() -> None:
                     window.security_page.show_tab("Πιστοποιητικά")
                 else:
                     window.show_page("settings")
+                    if args.page == "maintenance":
+                        window.settings_page.show_tab("Συντήρηση")
                 print("Κλείστε το παράθυρο για τέλος· όλα τα δεδομένα επίδειξης σβήνονται.")
                 app.exec()
             window.close()
@@ -149,9 +159,17 @@ def screenshots(app, window, backup_path: Path, out: Path) -> None:
     settle()
     window.grab().save(str(out / "pistopoiitika.png"))
     window.show_page("settings")
+    page = window.settings_page
+    settle()
+    window.grab().save(str(out / "emfanisi.png"))
+    other = next(v for v in (90, 100) if v != page.applied_scale)
+    page.scale_buttons[other].click()
+    settle()
+    window.grab().save(str(out / "emfanisi-allagi.png"))
+    page.scale_buttons[page.applied_scale].click()
+    page.show_tab("Συντήρηση")
     settle()
     window.grab().save(str(out / "syntirisi.png"))
-    page = window.settings_page
 
     def fill_backup(dialog: QDialog):
         dialog.password.setText(PASSWORD)

@@ -15,19 +15,24 @@ from pathlib import Path
 
 from PySide6.QtCore import QSize, Qt, QTimer
 from PySide6.QtGui import QAction, QFontDatabase, QGuiApplication
-from PySide6.QtWidgets import (QApplication, QCheckBox, QDialog, QFileDialog, QFrame,
-                               QGridLayout, QHBoxLayout, QLabel, QLayout, QLineEdit, QMessageBox,
-                               QPushButton, QScrollArea, QToolButton, QVBoxLayout, QWidget)
+from PySide6.QtWidgets import (QApplication, QButtonGroup, QCheckBox, QDialog, QFileDialog,
+                               QFrame, QGridLayout, QHBoxLayout, QLabel, QLayout, QLineEdit,
+                               QMessageBox, QPushButton, QScrollArea, QStackedWidget, QToolButton,
+                               QVBoxLayout, QWidget)
 
 from director import maintenance as m
 from director import registry_sync
 from director.backup import EXTENSION, BackupError
-from director.qt_gui import (ElidedLabel, _repolish, fit_tab_text, load_layout_settings, px,
-                             save_layout_settings)
+from director.qt_gui import (ElidedLabel, _repolish, current_ui_scale, fit_tab_text,
+                             load_layout_settings, load_ui_scale, px, save_layout_settings)
 from shared.ui import icons, theme
 
 SETTINGS_TITLE = "Ρυθμίσεις"
 TAB_MAINTENANCE = "Συντήρηση"
+TAB_APPEARANCE = "Εμφάνιση"
+SCALE_TITLE = "Κλίμακα περιβάλλοντος"
+SCALE_NOTE = "Ισχύει μετά από επανεκκίνηση"
+RESTART_NOW = "Επανεκκίνηση τώρα"
 IDENTITY_TITLE = "Ταυτότητα Manager"
 BACKUP_TITLE = "Backup"
 RESTORE_TITLE = "Επαναφορά"
@@ -821,7 +826,8 @@ def run_restore(parent: QWidget | None, model: m.MaintenanceModel, request: m.Re
 
 # --- Ρυθμίσεις → Συντήρηση ----------------------------------------------------
 class SettingsPage(QWidget):
-    """Σελίδα «Ρυθμίσεις» με μόνο tab τη «Συντήρηση» (απόφαση χρήστη 22/11/2026)."""
+    """Σελίδα «Ρυθμίσεις»: tabs «Εμφάνιση» (κλίμακα περιβάλλοντος, 24/11/2026) και
+    «Συντήρηση» (απόφαση χρήστη 22/11/2026)."""
 
     def __init__(self, model: m.MaintenanceModel, *,
                  start_restore: Callable[[m.RestoreRequest], None] | None = None,
@@ -831,7 +837,9 @@ class SettingsPage(QWidget):
                  confirm: Callable[[str, str, str], bool] | None = None,
                  inform: Callable[[str, str], None] | None = None,
                  dialog_hook: Callable[[QDialog], None] | None = None,
-                 layout_settings: Path | None = None, parent=None):
+                 layout_settings: Path | None = None,
+                 restart_app: Callable[[], None] | None = None,
+                 ui_scale: int | None = None, parent=None):
         super().__init__(parent)
         self.model = model
         self.start_restore = start_restore
@@ -844,20 +852,43 @@ class SettingsPage(QWidget):
         self.dialog_hook = dialog_hook
         self.layout_settings = layout_settings
         self.side_by_side: bool | None = None
+        # Κλίμακα με την οποία τρέχει τώρα η εφαρμογή και αυτή που έχει επιλεγεί.
+        self.restart_app = restart_app
+        self.applied_scale = ui_scale or current_ui_scale()
+        self.chosen_scale = (load_ui_scale(layout_settings) if layout_settings is not None
+                             else self.applied_scale)
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(px(theme.CARD_SPACING))
         tabs = QHBoxLayout()
-        self.tab_maintenance = QPushButton(TAB_MAINTENANCE)
-        self.tab_maintenance.setObjectName("tab")
-        self.tab_maintenance.setCheckable(True)
-        fit_tab_text(self.tab_maintenance)
-        self.tab_maintenance.setChecked(True)
-        self.tab_maintenance.clicked.connect(lambda: self.tab_maintenance.setChecked(True))
-        tabs.addWidget(self.tab_maintenance)
+        self.tab_buttons: dict[str, QPushButton] = {}
+        for name in (TAB_APPEARANCE, TAB_MAINTENANCE):
+            button = QPushButton(name)
+            button.setObjectName("tab")
+            button.setCheckable(True)
+            fit_tab_text(button)
+            button.clicked.connect(lambda _=False, name=name: self.show_tab(name))
+            tabs.addWidget(button)
+            self.tab_buttons[name] = button
+        self.tab_appearance = self.tab_buttons[TAB_APPEARANCE]
+        self.tab_maintenance = self.tab_buttons[TAB_MAINTENANCE]
         tabs.addStretch(1)
         layout.addLayout(tabs)
+        self.stack = QStackedWidget()
+        layout.addWidget(self.stack, 1)
+
+        appearance = QWidget()
+        appearance.setObjectName("appearanceBody")
+        column = QVBoxLayout(appearance)
+        column.setContentsMargins(0, 0, px(theme.SCROLL_GAP), 0)
+        column.setSpacing(px(theme.CARD_SPACING))
+        self.scale_card = self._build_scale_card()
+        self.scale_card.setFixedWidth(px(theme.MAINTENANCE_CARD))
+        column.addWidget(self.scale_card, 0, Qt.AlignmentFlag.AlignLeft)
+        column.addStretch(1)
+        self.appearance_scroll = _scroll(appearance)
+        self.stack.addWidget(self.appearance_scroll)
 
         body = QWidget()
         body.setObjectName("maintenanceBody")
@@ -871,7 +902,76 @@ class SettingsPage(QWidget):
             card.setFixedWidth(px(theme.MAINTENANCE_CARD))
         self._arrange(True)
         self.scroll = _scroll(body)
-        layout.addWidget(self.scroll, 1)
+        self.stack.addWidget(self.scroll)
+        self.show_tab(TAB_APPEARANCE)
+
+    # --- tabs ----------------------------------------------------------------
+    def show_tab(self, name: str) -> None:
+        for key, button in self.tab_buttons.items():
+            button.setChecked(key == name)
+        self.stack.setCurrentIndex(0 if name == TAB_APPEARANCE else 1)
+
+    @property
+    def current_tab(self) -> str:
+        return TAB_APPEARANCE if self.stack.currentIndex() == 0 else TAB_MAINTENANCE
+
+    # --- Εμφάνιση: κλίμακα περιβάλλοντος -------------------------------------
+    def _build_scale_card(self) -> QFrame:
+        card, layout = _card(SCALE_TITLE)
+        row = QHBoxLayout()
+        row.setSpacing(px(8))
+        self.scale_group = QButtonGroup(self)
+        self.scale_group.setExclusive(True)
+        self.scale_buttons: dict[int, QPushButton] = {}
+        for value in theme.UI_SCALES:
+            button = QPushButton(f"{value}%")
+            button.setObjectName("tab")
+            button.setCheckable(True)
+            button.setCursor(Qt.CursorShape.PointingHandCursor)
+            fit_tab_text(button)
+            button.setMinimumWidth(max(button.minimumWidth(), px(theme.SCALE_OPTION)))
+            button.setChecked(value == self.chosen_scale)
+            self.scale_group.addButton(button, value)
+            self.scale_buttons[value] = button
+            row.addWidget(button)
+        row.addStretch(1)
+        self.scale_group.idClicked.connect(self.choose_scale)
+        layout.addLayout(row)
+        self.scale_note_row = QWidget()
+        note_row = QHBoxLayout(self.scale_note_row)
+        note_row.setContentsMargins(0, px(8), 0, 0)
+        self.scale_note = _label(SCALE_NOTE, "muted")
+        self.restart_button = _button(RESTART_NOW, "primaryAction", "restart", theme.WHITE)
+        self.restart_button.clicked.connect(self._restart_now)
+        note_row.addWidget(self.scale_note)
+        note_row.addStretch(1)
+        note_row.addWidget(self.restart_button)
+        layout.addWidget(self.scale_note_row)
+        self._refresh_scale()
+        return card
+
+    def choose_scale(self, value: int) -> None:
+        """Αποθηκεύει την κλίμακα στο director-gui.json· ισχύει στην επόμενη εκκίνηση."""
+        if value not in theme.UI_SCALES:
+            return
+        self.chosen_scale = value
+        self.scale_buttons[value].setChecked(True)
+        save_layout_settings(self.layout_settings, {"ui_scale": value})
+        self._refresh_scale()
+
+    def _refresh_scale(self) -> None:
+        pending = self.chosen_scale != self.applied_scale
+        self.scale_note_row.setVisible(pending)
+        self.restart_button.setVisible(pending and self.restart_app is not None)
+
+    def set_restart_allowed(self, allowed: bool) -> None:
+        """Όχι επανεκκίνηση όσο υπάρχει ζωντανή ανακοίνωση (DirectorWindow.refresh)."""
+        if self.restart_button.isEnabled() != allowed:
+            self.restart_button.setEnabled(allowed)
+
+    def _restart_now(self) -> None:
+        if self.restart_app is not None and self.restart_button.isEnabled():
+            self.restart_app()
 
     # --- κατασκευή ---------------------------------------------------------
     def _build_backup_card(self) -> QFrame:
@@ -1065,6 +1165,7 @@ class SettingsPage(QWidget):
             self.start_restore(request)
 
     def open_import(self, path: Path | None = None) -> None:
+        self.show_tab(TAB_MAINTENANCE)
         dialog = ImportDialog(self.model, self._folder(), choose_path=self.choose_open,
                               parent=self)
         self.last_dialog = dialog

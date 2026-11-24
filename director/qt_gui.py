@@ -66,6 +66,7 @@ CAPACITY_REFRESH_SECONDS = 1.0
 
 
 _metrics = theme.metrics_for(None)
+_ui_scale = theme.UI_SCALE_DEFAULT
 
 
 def px(mockup_px: float) -> int:
@@ -465,7 +466,23 @@ def load_layout_settings(path: Path | None) -> dict:
         value = data.get(key)
         if type(value) in (int, float) and 0 <= value <= 10000:
             result[key] = float(value)
+    scale = data.get("ui_scale")
+    if type(scale) is int and scale in theme.UI_SCALES:
+        result["ui_scale"] = scale
     return result
+
+
+def load_ui_scale(path: Path | None) -> int:
+    """Κλίμακα περιβάλλοντος (%) από το director-gui.json· αλλιώς η προεπιλογή του
+    συστήματος (90% στα Windows, 100% αλλού)."""
+    return load_layout_settings(path).get("ui_scale", theme.default_ui_scale())
+
+
+def gui_settings_path(args) -> Path | None:
+    """director-gui.json δίπλα στο μητρώο (π.χ. ~/.school-intercom/director-gui.json)."""
+    registry_file = getattr(args, "registry_file", None)
+    return (Path(registry_file).with_name("director-gui.json")
+            if registry_file is not None else None)
 
 
 def save_layout_settings(path: Path | None, settings: dict) -> None:
@@ -713,6 +730,7 @@ class DirectorWindow(QMainWindow):
             options = {key: value for key, value in self._maintenance_options.items()
                        if key not in ("stop_serving", "restart", "warn")}
             options.setdefault("layout_settings", self._layout_settings)
+            options["restart_app"] = self.restart_for_scale
             self.settings_page = SettingsPage(self.maintenance, start_restore=self.start_restore,
                                               restore_blocked=self.restore_blocked, **options)
             self.pages.addWidget(self.settings_page)
@@ -1158,6 +1176,8 @@ class DirectorWindow(QMainWindow):
         self.mic.clear_error_if_ready()
         self._refresh_rooms()
         self._refresh_announcement()
+        if self.settings_page is not None:
+            self.settings_page.set_restart_allowed(not self.mic.live)
         if time.monotonic() - self._capacity_refreshed >= CAPACITY_REFRESH_SECONDS:
             self.refresh_capacity()
         if self.security_page is not None and self.current_page == "security":
@@ -1515,6 +1535,14 @@ class DirectorWindow(QMainWindow):
                                             size=px(theme.ICON)))
 
     # --- επαναφορά από backup (Ρυθμίσεις → Συντήρηση) ------------------------
+    def restart_for_scale(self) -> None:
+        """Ρυθμίσεις → Εμφάνιση: η νέα κλίμακα ισχύει με επανεκκίνηση (όχι σε ζωντανή)."""
+        restart = self._maintenance_options.get("restart")
+        if self.mic.live or restart is None:
+            return
+        self.timer.stop()
+        restart()
+
     def restore_blocked(self) -> str | None:
         if self.mic.live:
             return "Τερματίστε πρώτα τη ζωντανή ανακοίνωση."
@@ -1549,15 +1577,26 @@ def system_font_pt(app: QApplication) -> float | None:
 
 
 def create_application(argv: list[str] | None = None, *,
-                       base_pt: float | None = None) -> QApplication:
-    """QApplication με το κοινό στυλ. `base_pt` μόνο για δοκιμές/στιγμιότυπα."""
-    global _metrics
+                       base_pt: float | None = None,
+                       ui_scale: int | None = None) -> QApplication:
+    """QApplication με το κοινό στυλ. `base_pt` μόνο για δοκιμές/στιγμιότυπα.
+
+    `ui_scale`: κλίμακα περιβάλλοντος σε % (Ρυθμίσεις → Εμφάνιση)· None = 100%.
+    """
+    global _metrics, _ui_scale
     app = QApplication.instance() or QApplication(argv or [])
     app.setApplicationName("School Intercom")
     app.setWindowIcon(icons.app_icon())
     app.setStyle("Fusion")  # ίδια σχεδίαση στοιχείων σε Windows/Linux
-    _metrics = (theme.Metrics(base_pt) if base_pt else
-                theme.metrics_for(system_font_pt(app)))
+    _ui_scale = ui_scale or theme.UI_SCALE_DEFAULT
+    # Η γραμματοσειρά του συστήματος μετριέται μία φορά: μετά το setFont παρακάτω το
+    # app.font() είναι η δική μας (σημαντικό όταν η κλίμακα ξαναεφαρμόζεται, π.χ. δοκιμές).
+    system_pt = app.property("schSystemFontPt")
+    if system_pt is None:
+        system_pt = system_font_pt(app) or 0.0
+        app.setProperty("schSystemFontPt", system_pt)
+    _metrics = (theme.Metrics(base_pt * _ui_scale / 100) if base_pt else
+                theme.metrics_for(system_pt or None, _ui_scale))
     font = app.font()
     font.setPointSizeF(_metrics.font_pt())
     app.setFont(font)
@@ -1567,6 +1606,11 @@ def create_application(argv: list[str] | None = None, *,
 
 def current_metrics() -> theme.Metrics:
     return _metrics
+
+
+def current_ui_scale() -> int:
+    """Η κλίμακα (%) με την οποία φτιάχτηκε το τρέχον QApplication."""
+    return _ui_scale
 
 
 def release_window(window: QWidget) -> None:
@@ -1609,9 +1653,7 @@ class GuiRuntime:
         self.last_seen = last_seen
         self.security_options = security_options
         # Ρυθμίσεις εμφάνισης δίπλα στο μητρώο (π.χ. ~/.school-intercom/director-gui.json).
-        registry_file = getattr(args, "registry_file", None)
-        self.layout_settings = (Path(registry_file).with_name("director-gui.json")
-                                if registry_file is not None else None)
+        self.layout_settings = gui_settings_path(args)
         self.stop = threading.Event()
         self.broadcaster = AudioBroadcaster(max_clients=MAX_CLIENTS,
                                             on_event=lambda s: print(s, flush=True))
@@ -1752,8 +1794,8 @@ class GuiRuntime:
 
 def run_qt_gui(args, *, accept_clients, stream_microphone, enrollment=None, trust=None,
                last_seen=None, release_lock=None) -> bool:
-    """Επιστρέφει True αν ζητήθηκε επανεκκίνηση (μετά από επαναφορά backup)."""
-    app = create_application()
+    """Επιστρέφει True αν ζητήθηκε επανεκκίνηση (επαναφορά backup ή νέα κλίμακα)."""
+    app = create_application(ui_scale=load_ui_scale(gui_settings_path(args)))
     runtime = GuiRuntime(args, accept_clients=accept_clients,
                          stream_microphone=stream_microphone, enrollment=enrollment,
                          trust=trust, last_seen=last_seen, release_lock=release_lock)

@@ -10,6 +10,7 @@ tests/test_ui_theme.py ελέγχει ότι τα δύο συμφωνούν.
 from __future__ import annotations
 
 import math
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -102,11 +103,25 @@ class Metrics:
         return round(self.base_pt * ratio, 2)
 
 
-def metrics_for(system_pt: float | None) -> Metrics:
-    """Βάση από το σύστημα· άγνωστο ή μικρότερο από FONT_MIN_PT → FONT_MIN_PT."""
+# Κλίμακα περιβάλλοντος (Ρυθμίσεις → Εμφάνιση, απόφαση χρήστη 24/11/2026): ποσοστό
+# που πολλαπλασιάζει τη βάση, άρα γράμματα, αποστάσεις και εικονίδια μαζί. Στα
+# Windows (Segoe UI 9pt → ελάχιστο 12pt) προεπιλογή 90%, αλλού 100%.
+UI_SCALES = (80, 90, 100, 110, 125)
+UI_SCALE_DEFAULT = 100
+UI_SCALE_DEFAULT_WINDOWS = 90
+
+
+def default_ui_scale(platform: str | None = None) -> int:
+    platform = sys.platform if platform is None else platform
+    return UI_SCALE_DEFAULT_WINDOWS if platform.startswith("win") else UI_SCALE_DEFAULT
+
+
+def metrics_for(system_pt: float | None, ui_scale: int = UI_SCALE_DEFAULT) -> Metrics:
+    """Βάση από το σύστημα· άγνωστο ή μικρότερο από FONT_MIN_PT → FONT_MIN_PT,
+    επί την κλίμακα περιβάλλοντος (%)."""
     if system_pt is None or system_pt <= 0:
         system_pt = FONT_MIN_PT
-    return Metrics(max(float(system_pt), FONT_MIN_PT))
+    return Metrics(max(float(system_pt), FONT_MIN_PT) * ui_scale / 100)
 
 
 # --- Διαστάσεις στο μέγεθος του mockup (ui-style.md §2, §5) --------------
@@ -162,6 +177,7 @@ SECTION_GAP = 16            # απόσταση από το διαχωριστι�
 REQUEST_CARD_SPACING = 10   # απόσταση ανάμεσα στις κάρτες αιτημάτων
 # Πιστοποιητικά / Συντήρηση (ui-style.md §7–§8)
 IDENTITY_CARD_MAX = 700     # κάρτες «Ταυτότητα Manager» και «Ρόλος Manager»
+SCALE_OPTION = 62          # ελάχιστο πλάτος επιλογής «80%» … «125%» (Ρυθμίσεις → Εμφάνιση)
 MAINTENANCE_CARD = 420      # κάρτες «Backup» / «Επαναφορά» (δίπλα-δίπλα όταν χωρούν)
 DIALOG_WIDTH = 490          # διάλογοι backup/επαναφοράς
 FIELD_HEIGHT = 32           # πεδία κειμένου/κωδικού στους διαλόγους
@@ -573,7 +589,7 @@ QScrollBar::add-page, QScrollBar::sub-page {{
 QDialog#maintenanceDialog {{
     background: {WINDOW_BG};
 }}
-QScrollArea, #roomGrid, #securityBody, #maintenanceBody {{
+QScrollArea, #roomGrid, #securityBody, #maintenanceBody, #appearanceBody {{
     background: transparent;
     border: none;
 }}
