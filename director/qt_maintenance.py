@@ -22,7 +22,8 @@ from PySide6.QtWidgets import (QApplication, QCheckBox, QDialog, QFileDialog, QF
 from director import maintenance as m
 from director import registry_sync
 from director.backup import EXTENSION, BackupError
-from director.qt_gui import ElidedLabel, _repolish, load_layout_settings, px, save_layout_settings
+from director.qt_gui import (ElidedLabel, _repolish, fit_tab_text, load_layout_settings, px,
+                             save_layout_settings)
 from shared.ui import icons, theme
 
 SETTINGS_TITLE = "Ρυθμίσεις"
@@ -660,6 +661,7 @@ class ImportDialog(_Dialog):
             button.setObjectName("tab")
             button.setCheckable(True)
             button.setCursor(Qt.CursorShape.PointingHandCursor)
+            fit_tab_text(button)
             button.clicked.connect(lambda _=False, k=key: self.set_prefer(k))
             toggle.addWidget(button)
             self.prefer_buttons[key] = button
@@ -850,6 +852,7 @@ class SettingsPage(QWidget):
         self.tab_maintenance = QPushButton(TAB_MAINTENANCE)
         self.tab_maintenance.setObjectName("tab")
         self.tab_maintenance.setCheckable(True)
+        fit_tab_text(self.tab_maintenance)
         self.tab_maintenance.setChecked(True)
         self.tab_maintenance.clicked.connect(lambda: self.tab_maintenance.setChecked(True))
         tabs.addWidget(self.tab_maintenance)

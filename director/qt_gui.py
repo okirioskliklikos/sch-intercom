@@ -16,7 +16,7 @@ from collections.abc import Callable
 
 from PySide6.QtCore import (QElapsedTimer, QPointF, QRectF, QSize, Qt, QTimer,
                             QVariantAnimation)
-from PySide6.QtGui import QColor, QFontDatabase, QFontMetrics, QPainter, QPen
+from PySide6.QtGui import QColor, QFont, QFontDatabase, QFontMetrics, QPainter, QPen
 from PySide6.QtWidgets import (QAbstractButton, QApplication, QButtonGroup, QCheckBox,
                                QFrame, QGridLayout, QHBoxLayout, QLabel, QMainWindow, QMessageBox,
                                QPushButton, QRadioButton, QScrollArea, QSizePolicy,
@@ -71,6 +71,18 @@ _metrics = theme.metrics_for(None)
 def px(mockup_px: float) -> int:
     """Διάσταση του mockup στην κλίμακα της εφαρμογής (βλ. theme.Metrics)."""
     return _metrics.px(mockup_px)
+
+
+def fit_tab_text(button: QPushButton) -> None:
+    """Tab/κουμπί εναλλαγής (#tab): πλάτος για το **έντονο** κείμενο της επιλεγμένης
+    κατάστασης. Το Qt μετρά το sizeHint με την κανονική γραμματοσειρά, οπότε στα Windows
+    (Segoe UI, πιο φαρδιά σε έντονα) η επιλεγμένη λέξη κοβόταν αριστερά-δεξιά."""
+    button.ensurePolished()
+    bold = QFont(button.font())
+    bold.setWeight(QFont.Weight.DemiBold)
+    text = QFontMetrics(bold).horizontalAdvance(button.text())
+    # padding 16 + περίγραμμα 1 κάθε πλευρά (theme #tab) και μικρό περιθώριο.
+    button.setMinimumWidth(text + 2 * px(16) + 2 + px(4))
 
 
 def _repolish(widget: QWidget, **properties) -> None:

@@ -19,7 +19,7 @@ from PySide6.QtWidgets import (QApplication, QFrame, QGraphicsDropShadowEffect, 
                                QMessageBox, QPushButton, QScrollArea, QSizePolicy,
                                QStackedWidget, QToolButton, QVBoxLayout, QWidget)
 
-from director.qt_gui import (ElidedLabel, SplitHandle, StatusDot, _repolish,
+from director.qt_gui import (ElidedLabel, SplitHandle, StatusDot, _repolish, fit_tab_text,
                              load_layout_settings, px, save_layout_settings)
 from director.security import (CODE_LENGTH, TEXT_CHANGES_PRIMARY_ONLY, TEXT_PRIMARY_ONLY,
                                ComputerView, Decision, RequestView, RoleStatus, RoomView,
@@ -403,6 +403,7 @@ class SecurityPage(QWidget):
         for tab in (self.tab_computers, self.tab_certificates):
             tab.setObjectName("tab")
             tab.setCheckable(True)
+            fit_tab_text(tab)
             tabs.addWidget(tab)
         tabs.addStretch(1)
         self.tab_computers.setChecked(True)
