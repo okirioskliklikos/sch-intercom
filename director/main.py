@@ -225,6 +225,20 @@ BUSY_LOG_INTERVAL_SECONDS = 5.0
 HELLO_TIMEOUT_SECONDS = 2.0
 
 
+def _reject_full(connection: socket.socket, broadcaster: AudioBroadcaster, client_id: str,
+                 room: str, name: str) -> None:
+    """4.3C1: «γεμάτος» πριν από το WELCOME· ο Client το γράφει και ξαναδοκιμάζει σε 30 s."""
+    if broadcaster.note_full(client_id, room, name):
+        waiting = len(broadcaster.full_waiting())
+        print(f"[Director] Όριο {broadcaster.max_clients} Clients: ο {name or client_id} "
+              f"({room}) περιμένει θέση· σε αναμονή {waiting}", flush=True)
+    try:
+        send_welcome(connection, accepted=False, full=True)
+    except OSError:
+        pass
+    connection.close()
+
+
 def _admit_client(connection: socket.socket, address, broadcaster: AudioBroadcaster,
                   tls_context: ssl.SSLContext, *,
                   registry: SignedClientRegistry | None = None,
@@ -257,6 +271,10 @@ def _admit_client(connection: socket.socket, address, broadcaster: AudioBroadcas
                     reports.record(client_id, seen, room=entry["room"],
                                    name=entry.get("name") or "",
                                    local_rv=registry_version, local_hash=registry_hash)
+                if not broadcaster.has_room(client_id):
+                    _reject_full(connection, broadcaster, client_id, entry["room"],
+                                 entry.get("name") or "")
+                    return
                 send_welcome(connection, accepted=True, registry_version=registry_version,
                              registry_hash=registry_hash)
                 if not broadcaster.add_client(connection, client_id, entry["room"],
@@ -264,6 +282,9 @@ def _admit_client(connection: socket.socket, address, broadcaster: AudioBroadcas
                     print(f"[Director] Όριο Clients: {broadcaster.max_clients}", flush=True)
                 return
         # Legacy isolated transport tests only; production always supplies registry.
+        if not broadcaster.has_room(client_id):
+            _reject_full(connection, broadcaster, client_id, room, "")
+            return
         send_welcome(connection, accepted=True)
     except ProtocolMismatch as exc:
         print(f"[Director] Απόρριψη {address}: {exc}", flush=True)
@@ -484,6 +505,15 @@ def command_loop(broadcaster: AudioBroadcaster, stop: threading.Event,
                 for client_id, room, active, age in clients:
                     state = "Online" if active else "Offline"
                     print(f"  {client_id} | {room} | {state} | τελευταίο heartbeat πριν {age:.1f}s", flush=True)
+                waiting = broadcaster.full_waiting()
+                if waiting:
+                    print(f"[Manager] Όριο {broadcaster.max_clients} Clients: "
+                          f"{len(waiting)} περιμένουν θέση", flush=True)
+                    for client_id, room, name in waiting:
+                        print(f"  {client_id} | {room} | {name or '—'}", flush=True)
+                for client_id, room, addresses in broadcaster.duplicate_identities():
+                    print(f"[Manager] Ίδια ταυτότητα σε δύο υπολογιστές: {client_id} ({room}) "
+                          f"από {', '.join(addresses)}", flush=True)
             elif command == "serve" and controller is not None:
                 if values in (["on"], ["on", "force"]):
                     controller.start(force=values == ["on", "force"])

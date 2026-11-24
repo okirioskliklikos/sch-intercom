@@ -19,13 +19,16 @@ from shared.audio import (BLOCK_BYTES, BLOCK_MS, BLOCK_SAMPLES, CHANNELS, DEFAUL
                           MESSAGE_CLIENT_SETTINGS, decode_client_settings,
                           receive_message)
 from shared.jitter import DelayTracker, JitterBuffer
-from shared.identity import load_identity, receive_welcome, send_hello
+from shared.identity import ManagerFull, load_identity, receive_welcome, send_hello
 from shared.enrollment import ENROLL_PORT, make_request, enroll_client
 from shared.client_hints import load_hints, save_hints
 from shared.registry_seen import load_seen, manager_key, record_seen
 from shared.device_identity import create_device_identity, replace_device_identity
 from shared.transport_security import client_context, connect_tls, DEFAULT_SERVER_NAME
-from shared.discovery import discover, DISCOVERY_PORT
+from shared.discovery import discover_candidates, DISCOVERY_PORT
+from shared.manager_pin import load_pin, save_pin
+from client.identity_reset import (CLONED, PREVIOUS, archive_identity, check_clone,
+                                   previous_room, remember_machine)
 from shared.control import heartbeat_sender
 from client.windows_volume import (AnnouncementVolume, AudioPolicyWorker,
                                    create_volume_controller, recover_pending_volume)
@@ -35,6 +38,8 @@ from client.windows_apps import ApplicationAudio
 #: όταν πολλοί Clients ξεκινούν μαζί (π.χ. πρωινό άνοιγμα υπολογιστών).
 RECONNECT_DELAY_SECONDS = 5
 RECONNECT_JITTER_SECONDS = 1
+#: 4.3C1: ο Manager έχει ήδη το μέγιστο πλήθος υπολογιστών· αραιότερες προσπάθειες.
+FULL_RETRY_SECONDS = 30
 # Έγκυρο PCM, KEEPALIVE ή STREAM_STOP ανανεώνει το όριο. Απώλεια όλων
 # των μηνυμάτων για 3 s ενεργοποιεί τον υπάρχοντα μηχανισμό επανασύνδεσης.
 RECEIVE_TIMEOUT_SECONDS = 3.0
@@ -262,6 +267,61 @@ def open_connection(host: str, port: int, *,
     return connection
 
 
+def _fingerprint(connection: socket.socket) -> str:
+    peer = getattr(connection, "getpeercert", None)   # οι ψεύτικες συνδέσεις των tests
+    return manager_key((peer(binary_form=True) if peer else None) or b"")
+
+
+def _close_quietly(connection: socket.socket) -> None:
+    try:
+        connection.close()
+    except OSError:
+        pass
+
+
+def _verified_connection(candidates, *, port, pin, log, **connect):
+    """Δοκιμάζει τους υποψηφίους με TLS· επιστρέφει (σύνδεση, ID) ή σηκώνει σφάλμα.
+
+    Ένας υποψήφιος: απευθείας. Πολλοί: δοκιμάζονται όλοι (έως 8)· όσοι περνούν το TLS
+    είναι ο ίδιος Manager αν έχουν το ίδιο πιστοποιητικό (π.χ. δύο κάρτες δικτύου).
+    Με διαφορετικά πιστοποιητικά προτιμάται ο γνωστός (pin)· αλλιώς καμία σύνδεση.
+    """
+    verified: list[tuple[socket.socket, str | None, str]] = []
+    for host, target_port, identifier in candidates:
+        log(f"Σύνδεση στον Director {host}:{target_port}...")
+        try:
+            connection = open_connection(host, target_port, **connect)
+        except OSError as exc:   # περιλαμβάνει ssl.SSLError (λάθος πιστοποιητικό)
+            if len(candidates) > 1:
+                log(f"Ο {host}:{target_port} δεν επαληθεύτηκε ως Manager: {exc}")
+                continue
+            raise
+        verified.append((connection, identifier, f"{host}:{target_port}"))
+        if len(candidates) == 1:
+            break
+    if not verified:
+        raise ConnectionError(f"Κανένας από τους {len(candidates)} υποψήφιους Managers "
+                              "δεν επαληθεύτηκε με TLS")
+    prints = {_fingerprint(connection) for connection, _, _ in verified}
+    chosen = verified[0]
+    if len(prints) > 1:
+        known = [item for item in verified
+                 if pin is not None and _fingerprint(item[0]) == pin["fingerprint"]]
+        if not known:
+            for connection, _, _ in verified:
+                _close_quietly(connection)
+            raise ValueError("Δύο Managers με διαφορετικό πιστοποιητικό απαντούν έγκυρα ("
+                             + ", ".join(where for _, _, where in verified)
+                             + "): ορίστε χειροκίνητα --host")
+        chosen = known[0]
+    for item in verified:
+        if item is not chosen:
+            _close_quietly(item[0])
+    if len(verified) > 1 or len(candidates) > 1:
+        log(f"Επαληθεύτηκε ο Manager {chosen[2]} ({len(candidates)} υποψήφιοι)")
+    return chosen[0], chosen[1]
+
+
 def run_with_reconnect(
     host: str | None,
     port: int,
@@ -270,10 +330,12 @@ def run_with_reconnect(
     receive_timeout: float = RECEIVE_TIMEOUT_SECONDS,
     reconnect_delay: float = RECONNECT_DELAY_SECONDS,
     reconnect_jitter: float = RECONNECT_JITTER_SECONDS,
+    full_delay: float = FULL_RETRY_SECONDS,
     discovery_port: int = DISCOVERY_PORT,
     tls_context: ssl.SSLContext | None = None,
     tls_server_name: str = DEFAULT_SERVER_NAME,
-    discovery: Callable[..., tuple[str, int, str] | None] = discover,
+    discovery: Callable[..., object] = discover_candidates,
+    pin_file: Path | None = None,
     max_sessions: int | None = None,
     log: Callable[[str], None] = lambda line: print(line, flush=True),
     sleep: Callable[[float], None] = time.sleep,
@@ -286,28 +348,43 @@ def run_with_reconnect(
     # Έλεγχος πριν από τον βρόχο: αλλιώς το σφάλμα θα γινόταν ατέρμονη επανασύνδεση.
     _require_tls(tls_context)
     attempts = 0
-    preferred_id: str | None = None
+    pin = load_pin(pin_file)
+    preferred_id: str | None = pin["director_id"] if pin else None
     while max_sessions is None or attempts < max_sessions:
         attempts += 1
         try:
-            target_host, target_port = host, port
             if host is None:
                 result = discovery(udp_port=discovery_port, preferred_id=preferred_id)
-                if result is None:
+                candidates = [result] if isinstance(result, tuple) else list(result or [])
+                if not candidates:
                     log("Δεν εντοπίστηκε Director στο LAN· επανάληψη ανακάλυψης.")
                     raise ConnectionError("Ο Director δεν είναι διαθέσιμος")
-                target_host, target_port, found_id = result
-                log(f"Discovery: Director {target_host}:{target_port} ({found_id})")
-            log(f"Σύνδεση στον Director {target_host}:{target_port}...")
-            with open_connection(target_host, target_port, receive_timeout=receive_timeout,
-                                 tls_context=tls_context,
-                                 tls_server_name=tls_server_name) as connection:
+                for item in candidates:
+                    log(f"Discovery: Director {item[0]}:{item[1]} ({item[2]})")
+            else:
+                candidates = [(host, port, None)]
+            connection, found_id = _verified_connection(
+                candidates, port=port, pin=pin, log=log, receive_timeout=receive_timeout,
+                tls_context=tls_context, tls_server_name=tls_server_name)
+            with connection:
                 # «Κλείδωμα» στον Director μόνο αφού το TLS τον επαλήθευσε· ένα
                 # ψεύτικο beacon που απάντησε πρώτο δεν κρατά τον Client μακριά
-                # από τον πραγματικό Director.
-                if host is None and preferred_id is None:
+                # από τον πραγματικό Director. 4.3C1: και μόνιμα, στον δίσκο.
+                if host is None and found_id is not None:
                     preferred_id = found_id
+                    fingerprint = _fingerprint(connection)
+                    try:
+                        if save_pin(pin_file, found_id, fingerprint):
+                            pin = load_pin(pin_file)
+                    except OSError as exc:
+                        log(f"[Client] Δεν αποθηκεύτηκε ο Manager: {exc}")
+                    if pin is None or pin.get("fingerprint") != fingerprint:
+                        pin = {"director_id": found_id, "fingerprint": fingerprint}
                 session(connection)
+        except ManagerFull:
+            delay = _retry_delay(full_delay, reconnect_jitter)
+            log(f"Ο Manager έχει συμπληρώσει το όριο υπολογιστών· "
+                f"νέα προσπάθεια σε {delay:.0f}s.")
         except socket.timeout:
             delay = _retry_delay(reconnect_delay, reconnect_jitter)
             log(f"Δεν ήρθε έγκυρο μήνυμα από τον Director για {receive_timeout:g}s· "
@@ -340,6 +417,10 @@ def main() -> None:
     parser.add_argument("--new-client-key", action="store_true",
                         help="Δημιουργία νέου κλειδιού για τον ίδιο UUID (μετά από ανάκληση)· "
                              "απαιτεί νέα έγκριση από τον Director")
+    parser.add_argument("--new-identity", action="store_true",
+                        help="Νέα ταυτότητα (νέο UUID και κλειδί) και νέα αίτηση εγγραφής, "
+                             "π.χ. μετά από αντιγραφή δίσκου· τα παλιά αρχεία μετακινούνται "
+                             "σε φάκελο previous-identity-<ημερομηνία>")
     parser.add_argument("--enroll", action="store_true",
                         help="Μία αρχική εγγραφή μέσω TLS/SAS, χωρίς εκκίνηση ήχου")
     parser.add_argument("--enrollment-port", type=int, default=ENROLL_PORT,
@@ -378,7 +459,7 @@ def main() -> None:
     )
     parser.add_argument(
         "--mute-others", action="store_true",
-        help="Πειραματικό: μειώνει προσωρινά τις άλλες εφαρμογές στο 0% και "
+        help="Πειραματικό: μειώνει προσωρινά τις άλλες εφαρμογές στο 0%% και "
              "κάνει pause στα διαθέσιμα media (απαιτεί --announcement-volume)",
     )
     # Μόνο για αυτόματες δοκιμές: αρχείο ανάκαμψης έντασης εκτός της κανονικής εγκατάστασης.
@@ -391,8 +472,33 @@ def main() -> None:
         parser.error("--announcement-volume: επιτρέπεται τιμή 0–100")
     if args.announcement_volume is not None and args.device is not None:
         parser.error("--announcement-volume δεν συνδυάζεται ακόμη με --device")
+    if args.new_identity and args.new_client_key:
+        parser.error("--new-identity φτιάχνει ήδη νέο κλειδί· όχι μαζί με --new-client-key")
 
-    client_id, room = load_identity(args.identity_file, room_override=args.room)
+    # 4.3C1: κλωνοποιημένος υπολογιστής ή ρητή νέα ταυτότητα. Τα παλιά αρχεία
+    # μετακινούνται (όχι διαγραφή) και ακολουθεί νέα αίτηση εγγραφής.
+    pin_file = args.identity_file.with_name("manager-pin.json")
+    reset_label, old_room = None, previous_room(args.identity_file)
+    if args.new_identity:
+        reset_label = PREVIOUS
+    else:
+        try:
+            reason = check_clone(args.identity_file, args.client_credentials_dir)
+        except OSError as exc:
+            print(f"[Client] Δεν ελέγχθηκε αν ο υπολογιστής είναι αντίγραφος: {exc}", flush=True)
+            reason = None
+        if reason is not None:
+            reset_label = CLONED
+            print(f"[Client] Αυτός ο υπολογιστής μοιάζει αντίγραφο άλλου ({reason}). "
+                  "Η ταυτότητα του άλλου υπολογιστή δεν χρησιμοποιείται.", flush=True)
+    if reset_label is not None:
+        folder = archive_identity([args.identity_file, args.client_credentials_dir,
+                                   args.client_hints_file], reset_label)
+        print("[Client] Δημιουργείται νέα ταυτότητα· χρειάζεται νέα έγκριση στον Manager."
+              + (f" Τα παλιά αρχεία: {folder}" if folder else ""), flush=True)
+
+    room_override = args.room or (old_room if reset_label is not None else None)
+    client_id, room = load_identity(args.identity_file, room_override=room_override)
     if args.new_client_key:
         certfile, keyfile, password = replace_device_identity(args.client_credentials_dir,
                                                               client_id)
@@ -400,31 +506,57 @@ def main() -> None:
     else:
         certfile, keyfile, password = create_device_identity(args.client_credentials_dir,
                                                              client_id)
-    if args.enroll:
+    try:
+        remember_machine(args.client_credentials_dir)
+    except OSError as exc:
+        print(f"[Client] Δεν σημειώθηκε το αποτύπωμα του υπολογιστή: {exc}", flush=True)
+
+    def submit_enrollment() -> None:
         hints = load_hints(args.client_hints_file)
         proposed_room = args.room or hints.get("room") or room
         computer_name = args.computer_name or hints.get("name") or socket.gethostname()[:64]
         request = make_request(client_id, proposed_room, computer_name,
                                certfile.read_bytes(), keyfile.read_bytes(), password)
         if args.host:
-            enrollment_host = args.host
+            hosts = [args.host]
         else:
-            found = discover(udp_port=args.discovery_port)
-            if found is None:
-                parser.exit(2, "Δεν βρέθηκε Manager για εγγραφή. Δώστε --host.\\n")
-            enrollment_host = found[0]
-        try:
-            queued = enroll_client(enrollment_host, args.enrollment_port, args.tls_ca,
-                                   args.tls_server_name, request)
-        except (OSError, EOFError, ValueError) as exc:
-            parser.exit(2, f"Η αίτηση εγγραφής δεν καταχωρήθηκε: {exc}\n")
+            # 4.3C1: όπως στη σύνδεση, κάθε υποψήφιος ελέγχεται με TLS στο enroll_client.
+            hosts = list(dict.fromkeys(item[0] for item in discover_candidates(
+                udp_port=args.discovery_port,
+                preferred_id=(load_pin(pin_file) or {}).get("director_id"))))
+            if not hosts:
+                raise ConnectionError("Δεν βρέθηκε Manager για εγγραφή. Δώστε --host.")
+        errors = []
+        for enrollment_host in hosts:
+            try:
+                queued = enroll_client(enrollment_host, args.enrollment_port, args.tls_ca,
+                                       args.tls_server_name, request)
+                break
+            except (OSError, EOFError, ValueError) as exc:
+                errors.append(f"{enrollment_host}: {exc}")
+        else:
+            raise ConnectionError("; ".join(errors))
         save_hints(args.client_hints_file, proposed_room, computer_name)
         until = time.strftime("%d/%m/%Y %H:%M", time.localtime(queued["expires_at"]))
         print(f"Αίθουσα: {proposed_room} | Υπολογιστής: {computer_name} | "
               f"Κωδικός: {queued['code']} | Λήξη: {until}", flush=True)
+
+    if args.enroll:
+        try:
+            submit_enrollment()
+        except (OSError, EOFError, ValueError) as exc:
+            parser.exit(2, f"Η αίτηση εγγραφής δεν καταχωρήθηκε: {exc}\n")
         print("Γράψτε τα και κλείστε. Μετά την έγκριση στον Manager ο Client "
               "συνδέεται μόνος του στην επόμενη εκκίνηση.", flush=True)
         return
+    if reset_label is not None:
+        try:
+            submit_enrollment()
+            print("[Client] Νέα αίτηση εγγραφής· μετά την έγκριση με τον κωδικό στον Manager "
+                  "ο Client συνδέεται μόνος του.", flush=True)
+        except (OSError, EOFError, ValueError) as exc:
+            print(f"[Client] Η νέα αίτηση εγγραφής δεν καταχωρήθηκε: {exc}. "
+                  "Δοκιμάστε αργότερα με --enroll.", flush=True)
     trusted_director = client_context(args.tls_ca, certfile=certfile, keyfile=keyfile,
                                       password=password)
     print(f"Πιστοποιητικό Client: {certfile}", flush=True)
@@ -468,7 +600,7 @@ def main() -> None:
 
     try:
         run_with_reconnect(args.host, args.port, session,
-                           discovery_port=args.discovery_port,
+                           discovery_port=args.discovery_port, pin_file=pin_file,
                            tls_context=trusted_director,
                            tls_server_name=args.tls_server_name)
     except KeyboardInterrupt:

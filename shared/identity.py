@@ -34,7 +34,14 @@ HASH_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 MAX_REGISTRY_VERSION = 2 ** 32 - 1
 WELCOME_OK = 0
 WELCOME_INCOMPATIBLE = 1
+#: 4.3C1: ο Manager έχει ήδη το μέγιστο πλήθος Clients. Χωρίς νέα έκδοση πρωτοκόλλου:
+#: Client v7 χωρίς αυτή την τιμή το διαβάζει ως απόρριψη και ξαναδοκιμάζει όπως πριν.
+WELCOME_FULL = 2
 UPDATE_HINT = "ενημερώστε μαζί Director και Client"
+
+
+class ManagerFull(Exception):
+    """Ο Manager απάντησε ότι έχει συμπληρώσει το όριο Clients (4.3C1)."""
 
 
 class ProtocolMismatch(ValueError):
@@ -121,12 +128,15 @@ def receive_hello_details(connection: socket.socket) -> tuple[str, str, dict | N
 
 
 def send_welcome(connection: socket.socket, *, accepted: bool,
-                 registry_version: int = 0, registry_hash: str | None = None) -> None:
+                 registry_version: int = 0, registry_hash: str | None = None,
+                 full: bool = False) -> None:
     """Απάντηση Director στη δήλωση: αποδοχή (με έκδοση/hash μητρώου) ή ασύμβατη έκδοση.
 
     Η απόρριψη στέλνει μόνο την κεφαλίδα, ώστε να τη διαβάζει και Client άλλης έκδοσης.
     """
-    status = WELCOME_OK if accepted else WELCOME_INCOMPATIBLE
+    if full and accepted:
+        raise ValueError("Ένα WELCOME είναι είτε αποδοχή είτε «γεμάτος»")
+    status = WELCOME_FULL if full else WELCOME_OK if accepted else WELCOME_INCOMPATIBLE
     packet = WELCOME.pack(WELCOME_MAGIC, CONNECTION_PROTOCOL, status)
     if accepted:
         if registry_version:
@@ -156,6 +166,8 @@ def receive_welcome(connection: socket.socket) -> dict | None:
     if magic != WELCOME_MAGIC:
         raise ProtocolMismatch(f"Άγνωστη απάντηση Director: {UPDATE_HINT}",
                                client_version=CONNECTION_PROTOCOL)
+    if status == WELCOME_FULL and version == CONNECTION_PROTOCOL:
+        raise ManagerFull("Ο Manager έχει συμπληρώσει το όριο υπολογιστών")
     if status != WELCOME_OK or version != CONNECTION_PROTOCOL:
         raise ProtocolMismatch(
             f"Ασύμβατη έκδοση: Client v{CONNECTION_PROTOCOL}, Director v{version}: {UPDATE_HINT}",

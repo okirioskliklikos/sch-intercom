@@ -21,6 +21,15 @@ from shared.identity import validate_identity
 #: Στο μέλλον μπορεί να χρειαστεί συμπίεση ήχου (π.χ. Opus)· βλ. docs/prototype.md.
 MAX_CLIENTS = 70
 MAX_CLIENT_PENDING_BLOCKS = 5
+#: 4.3C1: ένα μήνυμα «γεμάτος» ανά Client ανά λεπτό· «περιμένει» όσο ξαναδοκιμάζει
+#: (ο Client ξαναδοκιμάζει ανά 30 s όταν ο Manager είναι γεμάτος).
+FULL_LOG_SECONDS = 60.0
+FULL_WAITING_SECONDS = 70.0
+#: 4.3C1: ίδια ταυτότητα από άλλη IP πάνω από τόσες φορές μέσα στο παράθυρο =
+#: πιθανός κλωνοποιημένος υπολογιστής. Μία προειδοποίηση ανά 5 λεπτά ανά Client.
+DUPLICATE_REPLACEMENTS = 3
+DUPLICATE_WINDOW_SECONDS = 60.0
+DUPLICATE_WARN_SECONDS = 300.0
 SEND_TIMEOUT_SECONDS = 1.0
 
 
@@ -45,6 +54,10 @@ class AudioBroadcaster:
         self._sequence = 0
         self._closed = False
         self.dropped = 0
+        self._full: dict[str, tuple[str, str, float, float]] = {}   # id -> room, name, seen, logged
+        self._replacements: dict[str, list[tuple[float, str, str]]] = {}
+        self._duplicates: dict[str, tuple[str, tuple[str, ...], float]] = {}
+        self.clock: Callable[[], float] = time.monotonic
 
     @property
     def client_count(self) -> int:
@@ -95,6 +108,62 @@ class AudioBroadcaster:
                 or (rooms is not None and session.room in rooms)
                 or (ids is not None and session.client_id in ids))
 
+    def has_room(self, client_id: str) -> bool:
+        """Χωράει ο Client; Ίδιο UUID με ενεργή σύνδεση πάντα χωράει (αντικατάσταση)."""
+        with self._lock:
+            return (not self._closed and (client_id in self._sessions
+                                          or len(self._sessions) < self.max_clients))
+
+    def note_full(self, client_id: str, room: str, name: str = "") -> bool:
+        """Καταγράφει Client που απορρίφθηκε λόγω ορίου· True αν πρέπει να γραφτεί log."""
+        now = self.clock()
+        with self._lock:
+            previous = self._full.get(client_id)
+            log = previous is None or now - previous[3] >= FULL_LOG_SECONDS
+            self._full[client_id] = (room, name, now, now if log else previous[3])
+            if len(self._full) > 256:
+                del self._full[min(self._full, key=lambda key: self._full[key][2])]
+        return log
+
+    def full_waiting(self) -> list[tuple[str, str, str]]:
+        """Clients που περιμένουν θέση (UUID, αίθουσα, όνομα), για status/GUI."""
+        now = self.clock()
+        with self._lock:
+            self._full = {key: value for key, value in self._full.items()
+                          if now - value[2] < FULL_WAITING_SECONDS}
+            return sorted((key, value[0], value[1]) for key, value in self._full.items())
+
+    def duplicate_identities(self) -> list[tuple[str, str, tuple[str, ...]]]:
+        """Ταυτότητες που χρησιμοποιούν δύο υπολογιστές (UUID, αίθουσα, IP), για status/GUI."""
+        now = self.clock()
+        with self._lock:
+            self._duplicates = {key: value for key, value in self._duplicates.items()
+                                if now - value[2] < DUPLICATE_WARN_SECONDS}
+            return sorted((key, value[0], value[1]) for key, value in self._duplicates.items())
+
+    def _note_replacement(self, client_id: str, room: str, old_ip: str,
+                          new_ip: str) -> str | None:
+        """Μέσα στο lock. Επιστρέφει προειδοποίηση όταν δύο IP «κλέβουν» τη σύνδεση."""
+        now = self.clock()
+        history = [item for item in self._replacements.get(client_id, [])
+                   if now - item[0] < DUPLICATE_WINDOW_SECONDS]
+        history.append((now, old_ip, new_ip))
+        self._replacements[client_id] = history
+        if len(self._replacements) > 256:
+            del self._replacements[min(self._replacements,
+                                       key=lambda key: self._replacements[key][-1][0])]
+        if len(history) <= DUPLICATE_REPLACEMENTS:
+            return None
+        addresses = tuple(sorted({ip for _, a, b in history for ip in (a, b)}))
+        previous = self._duplicates.get(client_id)
+        self._duplicates[client_id] = (room, addresses, now)
+        if previous is not None and now - previous[2] < DUPLICATE_WARN_SECONDS:
+            self._duplicates[client_id] = (room, addresses, previous[2])
+            return None
+        return (f"[Director] ΠΡΟΣΟΧΗ: η ταυτότητα {client_id} ({room}) χρησιμοποιείται "
+                f"από δύο υπολογιστές ({', '.join(addresses)})· πιθανώς κλωνοποιημένος "
+                f"δίσκος. Στον έναν: client --new-identity και νέα έγκριση.")
+
     def add_client(self, connection: socket.socket, client_id: str, room: str,
                    address: object = "local", *, name: str | None = None) -> bool:
         """Αναλαμβάνει το socket. Διπλό UUID αντικαθιστά την προηγούμενη σύνδεση."""
@@ -113,6 +182,14 @@ class AudioBroadcaster:
                 session.enqueue(encode_client_settings(room, name))
             self._sessions[client_id] = session
             self._offline.pop(client_id, None)
+            self._full.pop(client_id, None)
+            warning = None
+            if existing is not None:
+                old_ip, new_ip = _ip(existing.address), _ip(address)
+                if old_ip is not None and new_ip is not None and old_ip != new_ip:
+                    warning = self._note_replacement(client_id, room, old_ip, new_ip)
+        if warning is not None:
+            self.on_event(warning)
         if existing is not None:
             existing.stop()
         try:
@@ -182,6 +259,12 @@ class AudioBroadcaster:
                 del self._offline[oldest]
         session.stop()
         self.on_event(f"[Director] {session.client_id} αποσυνδέθηκε — σύνολο {self.client_count}")
+
+
+def _ip(address: object) -> str | None:
+    if isinstance(address, tuple) and address and isinstance(address[0], str):
+        return address[0]
+    return None
 
 
 class _ClientSession:

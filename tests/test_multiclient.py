@@ -10,7 +10,7 @@ from director.broadcast import AudioBroadcaster, _ClientSession
 from director.main import accept_clients
 from shared.audio import (BLOCK_BYTES, Frame, MESSAGE_KEEPALIVE, MESSAGE_STREAM_STOP,
                           receive_frame, receive_message)
-from shared.identity import receive_welcome, send_hello
+from shared.identity import ManagerFull, receive_welcome, send_hello
 from tests.tls_support import LocalTLSFixture
 
 
@@ -266,9 +266,13 @@ class MultiClientTests(LocalTLSFixture, unittest.TestCase):
         extra = self.connect_tls_client(self.server.getsockname())
         self.clients.append(extra)
         send_hello(extra, str(uuid.UUID(int=200)), "C2627-Γ3")
-        receive_welcome(extra)
+        # 4.3C1: «γεμάτος» πριν από το WELCOME, όχι αποδοχή και μετά κλείσιμο.
+        with self.assertRaises(ManagerFull):
+            receive_welcome(extra)
         self.assertEqual(extra.recv(1), b"")
         self.assertEqual(self.broadcast.client_count, 2)
+        self.assertEqual([cid for cid, _, _ in self.broadcast.full_waiting()],
+                         [str(uuid.UUID(int=200))])
 
 
 if __name__ == "__main__":
