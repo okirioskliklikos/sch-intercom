@@ -20,6 +20,7 @@ import uuid
 
 from director.backup import BackupError, ensure_no_interrupted_restore, manager_lock, rollback
 from director.broadcast import AudioBroadcaster, MAX_CLIENTS
+from director.registry_reports import RegistryReports, ReportedRegistry
 from shared.manager_key import ManagerKeyError, migrate as migrate_manager_key, password_path
 from director.security import LastSeenStore, last_seen_path, track_last_seen
 from shared.client_registry import RegistryError, SignedClientRegistry, digest
@@ -33,7 +34,7 @@ from shared.discovery import BeaconWatcher
 from shared.enrollment import (EnrollmentError, EnrollmentServer, ENROLL_PORT,
                                IncorrectCodeError)
 from shared.discovery import announce, director_id, DISCOVERY_PORT
-from shared.identity import ProtocolMismatch, receive_hello, send_welcome
+from shared.identity import ProtocolMismatch, receive_hello_details, send_welcome
 from shared.transport_security import accept_tls, server_context
 from shared.audio import BLOCK_BYTES, BLOCK_SAMPLES, CHANNELS, DEFAULT_PORT, DTYPE, SAMPLE_RATE
 
@@ -119,6 +120,8 @@ def show_help() -> str:
   registry export <φάκελος ή αρχείο>   Εξαγωγή υπογεγραμμένου μητρώου
   registry import <αρχείο> [confirm]  Εισαγωγή νεότερου μητρώου
   registry import <αρχείο> merge [prefer-incoming] confirm  Συγχώνευση
+  registry accept-current [confirm]   Συνέχεια με αυτό το μητρώο (νεότερο που ανέφεραν
+                                      Clients θεωρείται χαμένο· μόνο Κύριος)
   quit          Τερματισμός Director"""
 
 
@@ -193,13 +196,14 @@ HELLO_TIMEOUT_SECONDS = 2.0
 
 def _admit_client(connection: socket.socket, address, broadcaster: AudioBroadcaster,
                   tls_context: ssl.SSLContext, *,
-                  registry: SignedClientRegistry | None = None) -> None:
+                  registry: SignedClientRegistry | None = None,
+                  reports=None) -> None:
     """TLS και HELLO ενός Client, σε δικό του νήμα ώστε να μην καθυστερεί τους άλλους."""
     # Το TLS ολοκληρώνεται πριν επιτραπεί οποιοδήποτε HELLO/PCM.
     try:
         connection = accept_tls(connection, tls_context)
         connection.settimeout(HELLO_TIMEOUT_SECONDS)
-        client_id, room = receive_hello(connection)
+        client_id, room, seen = receive_hello_details(connection)
         if registry is not None:
             with registry.lock:
                 reason = registry.rejection_reason(
@@ -216,7 +220,14 @@ def _admit_client(connection: socket.socket, address, broadcaster: AudioBroadcas
                 if room != entry["room"]:
                     print(f"[Director] Client {client_id}: δηλώνει {room}, "
                           f"ο Manager ορίζει {entry['room']}", flush=True)
-                send_welcome(connection, accepted=True)
+                registry_version, registry_hash = registry.welcome_info()
+                if reports is not None:
+                    # 4.2D3: μόνο εγκεκριμένος Client· μόνο ένδειξη, όχι εμπιστοσύνη.
+                    reports.record(client_id, seen, room=entry["room"],
+                                   name=entry.get("name") or "",
+                                   local_rv=registry_version, local_hash=registry_hash)
+                send_welcome(connection, accepted=True, registry_version=registry_version,
+                             registry_hash=registry_hash)
                 if not broadcaster.add_client(connection, client_id, entry["room"],
                                               address, name=entry.get("name") or ""):
                     print(f"[Director] Όριο Clients: {broadcaster.max_clients}", flush=True)
@@ -250,6 +261,30 @@ class RegistryTrust:
         self._keyfile = keyfile
         self._context = registry.tls_server_context(certfile, keyfile)
         self._manager_state_path = manager_state_path(registry.path)
+        self.reports = RegistryReports()
+
+    def reported(self) -> ReportedRegistry | None:
+        """Νεότερο/διαφορετικό μητρώο που ανέφεραν εγκεκριμένοι Clients (4.2D3)."""
+        version, registry_hash = self.registry.welcome_info()
+        approved = {e["client_id"] for e in self.registry.snapshot()["clients"]
+                    if e["status"] == "approved"}
+        return self.reports.reported(version, registry_hash, approved=approved)
+
+    def accept_current(self, *, newer_hosts: tuple[str, ...] = ()) -> int:
+        """«Συνέχεια με αυτό το μητρώο»: μόνο στον Κύριο, μόνο για αναφορές Clients.
+
+        ``newer_hosts``: Managers σε λειτουργία με νεότερο μητρώο (beacon)· τότε
+        η σωστή ενέργεια είναι η εισαγωγή, οπότε άρνηση.
+        """
+        with self.registry.lock:
+            require_primary(load_manager_state(self._manager_state_path))
+            if newer_hosts:
+                raise RegistryError(f"Ο υπολογιστής {newer_hosts[0]} έχει νεότερο μητρώο "
+                                    "σε λειτουργία· εισαγάγετέ το αντί γι' αυτό.")
+            reported = self.reported()
+            if reported is None:
+                raise RegistryError("Δεν υπάρχει αναφορά νεότερου μητρώου από Clients.")
+            return self.registry.advance_version(reported.target_version)
 
     def context(self) -> ssl.SSLContext:
         with self.registry.lock:
@@ -275,6 +310,7 @@ class RegistryTrust:
         with self.registry.lock:
             require_primary(load_manager_state(self._manager_state_path))
             self.registry.revoke(client_id)
+            self.reports.forget(client_id)
             broadcaster.disconnect_client(client_id)
             self._context = self.registry.tls_server_context(self._certfile, self._keyfile)
 
@@ -309,7 +345,7 @@ def accept_clients(server: socket.socket, broadcaster: AudioBroadcaster,
                    stop: threading.Event, *, tls_context: ssl.SSLContext | None = None,
                    max_pending: int = MAX_PENDING_HANDSHAKES,
                    registry: SignedClientRegistry | None = None,
-                   context_provider=None) -> None:
+                   context_provider=None, reports=None) -> None:
     """Αποδέχεται νέους Clients ανεξάρτητα από την καταγραφή ήχου.
 
     Το νήμα αυτό μόνο δέχεται συνδέσεις. Το TLS και το HELLO κάθε Client γίνονται
@@ -346,7 +382,8 @@ def accept_clients(server: socket.socket, broadcaster: AudioBroadcaster,
         def admit(connection=connection, address=address):
             try:
                 current_tls = context_provider() if context_provider is not None else tls_context
-                _admit_client(connection, address, broadcaster, current_tls, registry=registry)
+                _admit_client(connection, address, broadcaster, current_tls, registry=registry,
+                              reports=reports)
             finally:
                 pending.release()
 
@@ -398,6 +435,10 @@ def command_loop(broadcaster: AudioBroadcaster, stop: threading.Event,
                             print("[Manager] Αλλαγές που δεν έχουν εξαχθεί: " +
                                   ("ποτέ" if info["unexported"] is None else
                                    str(info["unexported"])), flush=True)
+                    if trust is not None:
+                        reported = trust.reported()
+                        if reported is not None:
+                            print(reported.status_line(), flush=True)
                     if watcher is not None:
                         for other in watcher.others():
                             print(f'[Manager] Άλλος Manager: {other.info.host} '
@@ -476,8 +517,23 @@ def command_loop(broadcaster: AudioBroadcaster, stop: threading.Event,
                             source, broadcaster, merge_conflict=merge_conflict,
                             prefer=prefer, expected_digest=digest(local))
                         print(f'[Manager] Εισαγωγή: {result["relation"]}', flush=True)
+                elif action == "accept-current" and values[1:] in ([], ["confirm"]):
+                    newer_hosts = (tuple(o.info.host for o in watcher.newer(
+                        trust.registry.version)) if watcher is not None else ())
+                    reported = trust.reported()
+                    if reported is None:
+                        print("Δεν υπάρχει αναφορά νεότερου μητρώου από Clients.", flush=True)
+                    elif values[1:] == []:
+                        print(reported.status_line(), flush=True)
+                        print(reported.accept_warning(), flush=True)
+                        print("Για επιβεβαίωση: registry accept-current confirm", flush=True)
+                    else:
+                        version = trust.accept_current(newer_hosts=newer_hosts)
+                        print(f"[Manager] Συνέχεια με αυτό το μητρώο: νέα έκδοση v{version}",
+                              flush=True)
                 else:
-                    print("Χρήση: registry export|import <αρχείο>", flush=True)
+                    print("Χρήση: registry export|import <αρχείο> ή registry accept-current "
+                          "[confirm]", flush=True)
             elif command == "revoke" and len(values) == 1 and revoke is not None:
                 revoke(values[0])
                 print(f"Ανακλήθηκε ο Client {values[0]}", flush=True)
@@ -637,7 +693,8 @@ def main() -> None:
             return
         trust = RegistryTrust(registry, args.tls_cert, args.tls_key)
         secure_accept = partial(accept_clients, tls_context=trust.context(),
-                                registry=registry, context_provider=trust.context)
+                                registry=registry, context_provider=trust.context,
+                                reports=trust.reports)
         # Η θύρα εγγραφής είναι πάντα ανοιχτή (απόφαση χρήστη 22/11/2026): ανοίγει με το
         # CLI παρακάτω ή με το GuiRuntime.start στο --gui.
         enrollment = RoleAwareEnrollmentServer(args.tls_cert, args.tls_key, trust,

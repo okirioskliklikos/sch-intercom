@@ -263,7 +263,9 @@ class LiveTest:
             self.gui.screenshot("05-eisagogi", dialog)
             dialog.run()
         self.gui.window.settings_page.dialog_hook = run
-        self.gui.window.newer_bar.buttons[0].click()
+        from director.qt_role import IMPORT_REGISTRY
+        next(button for button in self.gui.window.newer_bar.buttons
+             if button.text() == IMPORT_REGISTRY).click()
         self.gui.window.settings_page.dialog_hook = None
         gone = self.gui.wait(lambda: not self.gui.window.newer_bar.isVisible(), timeout=10)
         same = self.version(self.b) == self.version(self.a)

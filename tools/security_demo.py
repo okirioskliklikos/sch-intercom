@@ -14,6 +14,7 @@
 μετονομασία και ανάκληση δουλεύουν κανονικά στο προσωρινό μητρώο.
 
 Κύριος/Εφεδρικός (4.2D2): --role primary | restored | conflict | newer | backup | stopped.
+4.2D3: --role reported (Clients ανέφεραν νεότερο μητρώο) | divergent (ίδια έκδοση, άλλο hash).
 Ο «άλλος Manager» είναι ψεύτικος (κανένα δίκτυο)· αλλαγή ρόλου και Έναρξη/Διακοπή
 δουλεύουν πάνω στο προσωρινό manager-state.json.
 """
@@ -46,7 +47,8 @@ ROOMS = {
 REQUESTS = [("C2627-Ζ1", "Board1"), ("Αίθουσα Μουσικής", "Laptop")]
 # Κατάσταση με τη σειρά: online, «πριν …» (δευτερόλεπτα), ή None = δεν συνδέθηκε ποτέ.
 STATES = [True, 600, True, 7200, True, 3 * 86400, True, 30, None, True, 2400]
-ROLE_SCENARIOS = ("primary", "restored", "conflict", "newer", "backup", "stopped")
+ROLE_SCENARIOS = ("primary", "restored", "conflict", "newer", "backup", "stopped",
+                  "reported", "divergent")
 DEMO_HOST = "ΓΡΑΜΜΑΤΕΙΑ-PC"
 OTHER_HOST, OTHER_IP = "ΓΡΑΜΜΑΤΕΙΑ-2", "192.168.1.35"
 
@@ -93,7 +95,19 @@ class DemoWatcher:
         self.seen.append(SeenManager(info, ip, time.monotonic()))
 
 
-def build_role(root: Path, scenario: str, registry_version):
+def inject_reports(trust, scenario: str) -> None:
+    """4.2D3: αναφορές «έχω δει vN» από δύο εγκεκριμένους Clients της επίδειξης."""
+    version, registry_hash = trust.registry.welcome_info()
+    approved = [e for e in trust.registry.snapshot()["clients"] if e["status"] == "approved"]
+    seen = ({"rv": version, "hash": "f" * 64} if scenario == "divergent"
+            else {"rv": version + 3, "hash": "e" * 64})
+    for entry in approved[:2]:
+        trust.reports.record(entry["client_id"], seen, room=entry["room"],
+                             name=entry.get("name") or "", local_rv=version,
+                             local_hash=registry_hash)
+
+
+def build_role(root: Path, scenario: str, registry_version, trust=None):
     """RoleModel με τον πραγματικό ServingController, χωρίς δίκτυο."""
     from director import manager_state
     from director.security import RoleModel
@@ -115,8 +129,13 @@ def build_role(root: Path, scenario: str, registry_version):
                                    stop_network=lambda: None, check_seconds=0,
                                    report=lambda _m: None)
     controller.startup() if scenario != "conflict" else controller.start(force=True)
+    extra = {}
+    if trust is not None:
+        if scenario in ("reported", "divergent"):
+            inject_reports(trust, scenario)
+        extra = {"reported": trust.reported, "accept_current": trust.accept_current}
     return RoleModel(state, controller, watcher, registry_version=registry_version,
-                     host=DEMO_HOST)
+                     host=DEMO_HOST, **extra)
 
 
 def fake_stream(_gate, *, stop, ready_callback, level_callback, **_kwargs):
@@ -202,7 +221,8 @@ def main() -> None:
     with tempfile.TemporaryDirectory(prefix="sch-intercom-demo-") as temp:
         print(f"Προσωρινός φάκελος: {temp} (σβήνεται στο κλείσιμο)")
         broadcaster, model, enrollment = build(Path(temp))
-        role = build_role(Path(temp), args.role, lambda: model.trust.registry.version)
+        role = build_role(Path(temp), args.role, lambda: model.trust.registry.version,
+                          trust=model.trust)
         try:
             from director.maintenance import MaintenanceModel
             root = Path(temp)

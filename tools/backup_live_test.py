@@ -143,6 +143,7 @@ class Device:
         return ["--tls-ca", str(trust), "--identity-file", str(self.dir / "client.json"),
                 "--client-credentials-dir", str(self.dir / "credentials"),
                 "--client-hints-file", str(self.dir / "client-hints.json"),
+                "--registry-seen-file", str(self.dir / "registry-seen.json"),
                 "--host", HOST, "--port", str(PORT), "--enrollment-port", str(ENROLL_PORT)]
 
     def enroll(self, trust: Path) -> str | None:
