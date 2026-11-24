@@ -16,7 +16,7 @@ from collections.abc import Callable
 
 from PySide6.QtCore import (QElapsedTimer, QPointF, QRectF, QSize, Qt, QTimer,
                             QVariantAnimation)
-from PySide6.QtGui import QColor, QFontMetrics, QPainter, QPen
+from PySide6.QtGui import QColor, QFontDatabase, QFontMetrics, QPainter, QPen
 from PySide6.QtWidgets import (QAbstractButton, QApplication, QButtonGroup, QCheckBox,
                                QFrame, QGridLayout, QHBoxLayout, QLabel, QMainWindow, QMessageBox,
                                QPushButton, QRadioButton, QScrollArea, QSizePolicy,
@@ -60,6 +60,8 @@ NAV_ITEMS = [
 SECURITY_REFRESH_SECONDS = 1.0
 #: Ρόλος/εξυπηρέτηση/άλλοι Managers (επάνω μπάρα και ειδοποιήσεις) το πολύ τόσο συχνά.
 ROLE_REFRESH_SECONDS = 0.5
+#: 4.3C2: ειδοποιήσεις «γεμάτος» / ίδια ταυτότητα.
+CAPACITY_REFRESH_SECONDS = 1.0
 
 
 _metrics = theme.metrics_for(None)
@@ -580,6 +582,7 @@ class DirectorWindow(QMainWindow):
         self._room_shape: tuple[int, int] | None = None
         self.page: QWidget | None = None
         self.notice: tuple[str, float] | None = None
+        self._capacity_refreshed = -math.inf
 
         self.setWindowTitle(WINDOW_TITLE)
         self.setWindowIcon(icons.app_icon())
@@ -674,6 +677,7 @@ class DirectorWindow(QMainWindow):
         layout.addLayout(header)
         if self.role is not None:
             self._build_role_bars(layout)
+        self._build_capacity_bars(layout)
 
         self.pages = QStackedWidget()
         self.page_keys = ["home"]
@@ -733,6 +737,49 @@ class DirectorWindow(QMainWindow):
         for bar in (self.restored_bar, self.newer_bar, self.conflict_bar):
             layout.addWidget(bar)
 
+    def _build_capacity_bars(self, layout: QVBoxLayout) -> None:
+        """4.3C2: «γεμάτος» Manager και ίδια ταυτότητα σε 2 υπολογιστές, σε όλες τις σελίδες."""
+        from director.notices import TEXT_SHOW
+        self.full_bar = NoticeBar("alarm")
+        self.duplicate_bar = NoticeBar("alarm")
+        self.duplicate_show = self.duplicate_bar.add_button(
+            action_button(TEXT_SHOW, "secondaryAction"))
+        self.duplicate_show.clicked.connect(self.show_computers)
+        self.duplicate_show.setVisible(self.security is not None)
+        layout.addWidget(self.full_bar)
+        layout.addWidget(self.duplicate_bar)
+
+    def show_computers(self) -> None:
+        """«Προβολή» στην ειδοποίηση ίδιας ταυτότητας: Ασφάλεια → Υπολογιστές."""
+        if self.security_page is None:
+            return
+        from director.qt_security import TAB_COMPUTERS
+        self.show_page("security")
+        self.security_page.show_tab(TAB_COMPUTERS)
+        self.refresh_capacity()
+
+    def refresh_capacity(self) -> None:
+        from director.notices import duplicate_html, full_html
+        self._capacity_refreshed = time.monotonic()
+        broadcaster = self.broadcaster
+        waiting = getattr(broadcaster, "full_waiting", list)()
+        text = full_html(waiting, getattr(broadcaster, "max_clients", MAX_CLIENTS))
+        self.full_bar.setVisible(text is not None)
+        if text is not None:
+            self.full_bar.set_text(text)
+        duplicates = getattr(broadcaster, "duplicate_identities", list)()
+        names = getattr(broadcaster, "client_names", dict)()
+        mono = QFontDatabase.systemFont(QFontDatabase.SystemFont.FixedFont).family()
+        # Δεύτερη γραμμή («Στον έναν…») λίγο μικρότερη, όπως το «small» των καρτών.
+        hint = f"{self.duplicate_bar.text.font().pointSizeF() * 0.9:.1f}pt"
+        text = duplicate_html(duplicates, names, mono=f'"{mono}"', hint_size=hint)
+        self.duplicate_bar.setVisible(text is not None)
+        if text is not None:
+            self.duplicate_bar.set_text(text)
+            on_computers = (self.security_page is not None and self.current_page == "security"
+                            and self.security_page.current_tab == "Υπολογιστές")
+            self.duplicate_show.setVisible(self.security is not None and not on_computers)
+
     def open_registry_import(self) -> None:
         """Από την κόκκινη ειδοποίηση «Το μητρώο χρειάζεται ενημέρωση»."""
         if self.settings_page is None:
@@ -748,6 +795,7 @@ class DirectorWindow(QMainWindow):
             button.setChecked(name == key)
         self.pages.setCurrentIndex(self.page_keys.index(key))
         self._role_refreshed = -math.inf
+        self._capacity_refreshed = -math.inf
         if key == "security":
             from director.qt_security import PAGE_TITLE as SECURITY_TITLE
             self.page_title.setText(SECURITY_TITLE)
@@ -1079,6 +1127,8 @@ class DirectorWindow(QMainWindow):
         self.mic.clear_error_if_ready()
         self._refresh_rooms()
         self._refresh_announcement()
+        if time.monotonic() - self._capacity_refreshed >= CAPACITY_REFRESH_SECONDS:
+            self.refresh_capacity()
         if self.security_page is not None and self.current_page == "security":
             now = time.monotonic()
             if now - self._security_refreshed >= SECURITY_REFRESH_SECONDS:

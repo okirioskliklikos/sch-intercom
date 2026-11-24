@@ -23,6 +23,7 @@ from pathlib import Path
 from shared.client_registry import RegistryError, _atomic_write
 from shared.enrollment import (MAX_PENDING, REQUEST_TTL, EnrollmentError,
                                IncorrectCodeError)
+from director.notices import TEXT_DUPLICATE_STATE
 from shared.identity import ROOM_PATTERN
 from shared.ui import theme
 
@@ -256,8 +257,12 @@ class ComputerView:
     room: str
     online: bool
     last_seen: float | None
+    #: 4.3C2: IP των δύο υπολογιστών όταν η ταυτότητα χρησιμοποιείται διπλά, αλλιώς ().
+    duplicate: tuple[str, ...] = ()
 
     def state(self, now: float) -> str:
+        if self.duplicate:
+            return TEXT_DUPLICATE_STATE
         if self.online:
             return "Online"
         if self.last_seen is None:
@@ -376,6 +381,8 @@ class SecurityModel:
         online = {client_id for client_id, _room, active, _age in status if active}
         # Η ζωντανή κατάσταση μετρά αμέσως, πριν από τον επόμενο γύρο του LastSeenStore.
         live = {client_id: now - max(0.0, float(age)) for client_id, _r, _a, age in status}
+        duplicates = {client_id: addresses for client_id, _room, addresses
+                      in getattr(self.broadcaster, "duplicate_identities", list)()}
         groups: dict[str, RoomView] = {}
         for entry in self.trust.registry.snapshot()["clients"]:
             if entry.get("status") != "approved":
@@ -385,7 +392,8 @@ class SecurityModel:
             seen = [t for t in (self.last_seen.get(client_id), live.get(client_id))
                     if t is not None]
             computer = ComputerView(client_id, name, entry["room"], client_id in online,
-                                    max(seen) if seen else None)
+                                    max(seen) if seen else None,
+                                    duplicates.get(client_id, ()))
             groups.setdefault(entry["room"], RoomView(entry["room"])).computers.append(computer)
         for group in groups.values():
             group.computers.sort(key=lambda c: (_sort_key(c.name), c.client_id))

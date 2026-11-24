@@ -24,6 +24,7 @@ from director.qt_gui import (ElidedLabel, SplitHandle, StatusDot, _repolish,
 from director.security import (CODE_LENGTH, TEXT_CHANGES_PRIMARY_ONLY, TEXT_PRIMARY_ONLY,
                                ComputerView, Decision, RequestView, RoleStatus, RoomView,
                                SecurityModel, computers_text)
+from director.notices import duplicate_tooltip
 from shared.ui import icons, theme
 
 PAGE_TITLE = "Ασφάλεια"
@@ -273,8 +274,19 @@ class ComputerRow(QWidget):
         # Το όνομα παίρνει τον επιπλέον χώρο· η κατάσταση στοιχίζεται δεξιά, δίπλα στο ⋮
         # (απόφαση χρήστη 22/11/2026)· το όνομα κόβεται με «…» μόνο όταν δεν χωρά.
         layout.addWidget(self.name, 1)
-        layout.addWidget(self.state)
+        # 4.3C2: «⚠ Σε 2 υπολογιστές» με κόκκινο όταν η ταυτότητα χρησιμοποιείται διπλά.
+        self.alert = QLabel()
+        self.alert.setPixmap(icons.pixmap("alert", theme.LIVE, px(16), stroke_width=2.0))
+        self.alert.setStyleSheet("background: transparent;")
+        self.alert.hide()
+        state_box = QHBoxLayout()
+        state_box.setContentsMargins(0, 0, 0, 0)
+        state_box.setSpacing(px(5))
+        state_box.addWidget(self.alert, 0, Qt.AlignmentFlag.AlignVCenter)
+        state_box.addWidget(self.state)
+        layout.addLayout(state_box)
         layout.addWidget(self.menu_button)
+        self._duplicate: tuple[str, ...] = ()
 
     def update_state(self, computer: ComputerView, now: float) -> None:
         self.computer = computer
@@ -282,6 +294,15 @@ class ComputerRow(QWidget):
         text = computer.state(now)
         if self.state.text() != text:
             self.state.setText(text)
+        if computer.duplicate != self._duplicate:
+            self._duplicate = computer.duplicate
+            duplicate = bool(computer.duplicate)
+            self.alert.setVisible(duplicate)
+            self.state.setStyleSheet(
+                f"color: {theme.LIVE}; font-weight: 500;" if duplicate else "")
+            tip = duplicate_tooltip(computer.duplicate) if duplicate else ""
+            for widget in (self.state, self.alert):
+                widget.setToolTip(tip)
 
 
 class RoomHeader(QWidget):

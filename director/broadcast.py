@@ -141,6 +141,11 @@ class AudioBroadcaster:
                                 if now - value[2] < DUPLICATE_WARN_SECONDS}
             return sorted((key, value[0], value[1]) for key, value in self._duplicates.items())
 
+    def client_names(self) -> dict[str, str]:
+        """Όνομα υπολογιστή ανά UUID για τους συνδεδεμένους (για τις ειδοποιήσεις GUI)."""
+        with self._lock:
+            return {key: item.name for key, item in self._sessions.items() if item.name}
+
     def _note_replacement(self, client_id: str, room: str, old_ip: str,
                           new_ip: str) -> str | None:
         """Μέσα στο lock. Επιστρέφει προειδοποίηση όταν δύο IP «κλέβουν» τη σύνδεση."""
