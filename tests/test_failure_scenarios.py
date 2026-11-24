@@ -28,7 +28,7 @@ from shared.audio import BLOCK_BYTES, Frame, encode_frame, receive_message
 from shared.client_registry import SignedClientRegistry
 from shared.control import heartbeat_sender
 from shared.device_identity import create_device_identity
-from shared.identity import receive_welcome, send_hello
+from shared.identity import ManagerFull, receive_welcome, send_hello
 from shared.jitter import DelayTracker, JitterBuffer
 from shared.transport_security import DEFAULT_SERVER_NAME, client_context
 from tests.tls_support import LocalTLSFixture
@@ -394,14 +394,15 @@ class ConnectionLimitTests(RegistryFixture, unittest.TestCase):
         first = self.join(*ids[0])
         self.join(*ids[1])
         self.assertTrue(wait_until(lambda: self.broadcast.client_count == 2))
-        extra = self.join(*ids[2])          # WELCOME και μετά κλείσιμο (§5.2)
-        extra.settimeout(2)
-        self.assertEqual(extra.recv(1), b"")
+        with self.assertRaises(ManagerFull):  # 4.3C1: «γεμάτος» πριν από το WELCOME
+            self.join(*ids[2])
         self.assertEqual(self.broadcast.client_count, 2)
+        self.assertEqual(len(self.broadcast.full_waiting()), 1)
         first.close()
         self.assertTrue(wait_until(lambda: self.broadcast.client_count == 1, timeout=8))
         self.join(*ids[2])                  # επόμενη προσπάθεια του Client
         self.assertTrue(wait_until(lambda: self.broadcast.client_count == 2))
+        self.assertEqual(self.broadcast.full_waiting(), [])
         self.assertIn(ids[2][0], [cid for cid, _ in self.broadcast.clients_snapshot()])
 
     def test_same_identity_from_two_connections_keeps_replacing(self):

@@ -274,3 +274,59 @@ def discover(*, udp_port: int = DISCOVERY_PORT, timeout: float = DISCOVERY_WINDO
                          "πιθανή πλαστοπροσωπία, δεν γίνεται σύνδεση")
     host, tcp_port = next(iter(addresses))
     return host, tcp_port, identifier
+
+
+#: Μέγιστο πλήθος υποψηφίων που δοκιμάζει ο Client με TLS (4.3C1).
+MAX_CANDIDATES = 8
+
+
+def discover_candidates(*, udp_port: int = DISCOVERY_PORT, timeout: float = DISCOVERY_WINDOW,
+                        preferred_id: str | None = None,
+                        confirm: float = CONFIRM_WINDOW) -> list[tuple[str, int, str]]:
+    """Όλοι οι πιθανοί Managers (IP πηγής, TCP port, ID), χωρίς να εμπιστεύεται κανέναν.
+
+    4.3C1: ένα ψεύτικο beacon δεν πρέπει να εμποδίζει τη σύνδεση. Ο Client δοκιμάζει
+    τους υποψηφίους με TLS και κρατά μόνο αυτόν που επαληθεύεται. Αν έχει βρεθεί ο
+    προτιμώμενος Manager, επιστρέφονται μόνο οι διευθύνσεις του (μετά το confirm)·
+    αν δεν εμφανιστεί σε όλο το παράθυρο, επιστρέφονται όλοι (π.χ. ο Manager μεταφέρθηκε
+    σε άλλον υπολογιστή με νέο ID). Το πλήθος περιορίζεται σε ``MAX_CANDIDATES``.
+    """
+    found: dict[tuple[str, int, str], None] = {}
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as listener:
+        listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        if hasattr(socket, "SO_REUSEPORT"):
+            try:
+                listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
+            except OSError:
+                pass
+        listener.bind(("", udp_port))
+        start = time.monotonic()
+        deadline = start + timeout
+        early = start + min(confirm, timeout)
+        while True:
+            now = time.monotonic()
+            preferred_seen = preferred_id is not None and any(
+                identifier == preferred_id for _, _, identifier in found)
+            if preferred_seen and now >= early:
+                break
+            remaining = deadline - now
+            if remaining <= 0:
+                break
+            listener.settimeout(remaining)
+            try:
+                packet, sender = listener.recvfrom(MAX_BEACON_BYTES + 1)
+            except socket.timeout:
+                break
+            except OSError:
+                continue   # Windows: υπερμεγέθες πακέτο/ICMP· όπως κάθε άκυρο beacon
+            try:
+                identifier, tcp_port = decode_beacon(packet)
+            except ValueError:
+                continue
+            key = (sender[0], tcp_port, identifier)
+            if key not in found and len(found) < 4 * MAX_CANDIDATES:
+                found[key] = None
+    candidates = list(found)
+    if preferred_id is not None and any(item[2] == preferred_id for item in candidates):
+        candidates = [item for item in candidates if item[2] == preferred_id]
+    return candidates[:MAX_CANDIDATES]

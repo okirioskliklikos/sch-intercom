@@ -16,6 +16,7 @@
 """
 from __future__ import annotations
 
+import json
 from pathlib import Path
 import re
 import shutil
@@ -36,14 +37,16 @@ from shared.client_registry import SignedClientRegistry  # noqa: E402
 from shared.control import heartbeat_sender  # noqa: E402
 from shared.device_identity import create_device_identity  # noqa: E402
 from shared.discovery import director_id, encode_beacon  # noqa: E402
-from shared.identity import load_identity, receive_welcome, send_hello  # noqa: E402
+from shared.identity import (ManagerFull, load_identity, receive_welcome,  # noqa: E402
+                             send_hello)
 from shared.transport_security import (DEFAULT_SERVER_NAME, client_context,  # noqa: E402
                                       server_context)
 from tools.mtls_live_test import JOINED, Process  # noqa: E402
 from tools.manager_role_live_test import TestMachine  # noqa: E402
 
-TOTAL = 16
+TOTAL = 18
 HOST = "127.0.0.1"
+SECOND_IP = "127.0.0.2"
 PORT, BROADCAST_PORT, ENROLL_PORT, WATCH_PORT = 51705, 51706, 51709, 51707
 DISCOVERY_PORT = 51708        # beacons του Manager προς τον Board2 (loopback)
 FAKE_DISCOVERY_PORT = 51718   # μόνο ψεύτικα/χειροκίνητα beacons, για τον Board4
@@ -123,7 +126,13 @@ class FreezableProxy:
                     self.pairs.append((client, client))
                 continue
             try:
-                upstream = socket.create_connection((HOST, self.upstream), timeout=3)
+                # Από 127.0.0.2: για τον Manager ο Client του proxy είναι «άλλος
+                # υπολογιστής» (βήμα 17, ίδια ταυτότητα από δύο IP).
+                try:
+                    upstream = socket.create_connection((HOST, self.upstream), timeout=3,
+                                                        source_address=(SECOND_IP, 0))
+                except OSError:
+                    upstream = socket.create_connection((HOST, self.upstream), timeout=3)
             except OSError:
                 client.close()
                 continue
@@ -324,10 +333,14 @@ class LoadClient:
         self.stop = threading.Event()
         self.ended = threading.Event()
         plain = socket.create_connection((HOST, PORT), timeout=5)
-        connection = self.context.wrap_socket(plain, server_hostname=DEFAULT_SERVER_NAME)
-        connection.settimeout(5)
-        send_hello(connection, self.client_id, LOAD_ROOM)
-        receive_welcome(connection)
+        try:
+            connection = self.context.wrap_socket(plain, server_hostname=DEFAULT_SERVER_NAME)
+            connection.settimeout(5)
+            send_hello(connection, self.client_id, LOAD_ROOM)
+            receive_welcome(connection)
+        except BaseException:
+            plain.close()
+            raise
         self.connection = connection
         threading.Thread(target=heartbeat_sender, args=(connection, self.stop),
                          daemon=True).start()
@@ -377,6 +390,15 @@ class FailureMachine(TestMachine):
             self.director = None
 
 
+def fake_manager_tls(folder: Path) -> ssl.SSLContext:
+    """Ψεύτικος Manager με δικό του (έγκυρο αλλά όχι έμπιστο) πιστοποιητικό."""
+    folder.mkdir(parents=True, exist_ok=True)
+    cert, key = folder / "fake.crt", folder / "fake.key"
+    if not cert.exists():
+        create_director_identity(cert, key)
+    return server_context(cert, key)
+
+
 # --------------------------------------------------------------------- δοκιμή
 class LiveTest:
     def __init__(self, root: Path):
@@ -393,6 +415,7 @@ class LiveTest:
         self.fake_beacons = FakeBeacons(DISCOVERY_PORT)
         self.fake_tcp: FakeManager | None = None
         self.load: list[LoadClient] = []
+        self.extra: list[Board] = []
         self.results: list[tuple[str, str, str]] = []
         self.volume_skips = 0
 
@@ -519,11 +542,14 @@ class LiveTest:
         return ok, f"επανασύνδεση σε {round(time.monotonic() - started, 1)} s"
 
     def s06(self):
-        # Ψεύτικα beacons στη θύρα discovery του Board2 σε όλη την επανεκκίνηση (βλ. 11).
-        self.fake_tcp = FakeManager(FAKE_TCP_PORT, None)
+        # Ψεύτικα beacons στη θύρα discovery του Board2 σε όλη την επανεκκίνηση (βλ. 11):
+        # άκυρα/υπερμεγέθη, άλλο ID και (4.3C1) το ΠΡΑΓΜΑΤΙΚΟ ID προς ψεύτικο Manager.
+        self.fake_tcp = FakeManager(FAKE_TCP_PORT, fake_manager_tls(self.root / "fake-manager"))
+        real = director_id(self.m.dir / "director.id")
         self.fake_beacons.send([
             b"not a beacon", b"\x00" * 600,
-            encode_beacon(str(uuid.uuid4()), FAKE_TCP_PORT, inst=str(uuid.uuid4()))])
+            encode_beacon(str(uuid.uuid4()), FAKE_TCP_PORT, inst=str(uuid.uuid4())),
+            encode_beacon(real, FAKE_TCP_PORT, inst=str(uuid.uuid4()))])
         marks = [board.process.mark() for board in self.boards]
         self.send("all")
         if not self.hears(self.b1, marks[0]):
@@ -615,17 +641,14 @@ class LiveTest:
     def s11(self):
         # Έλεγχος όσων έγιναν στα 6–7 με ψεύτικα beacons ενεργά.
         rejoined = self.director.seen(self.b2.client_id, JOINED)
-        fake = self.fake_tcp.connections
+        fake = self.fake_tcp
         self.fake_beacons.close()
-        return rejoined and fake == 0, (f"Board2 ξανά στον πραγματικό {rejoined}, "
-                                        f"συνδέσεις στον ψεύτικο {fake}")
+        ok = rejoined and fake.handshakes == 0 and fake.app_bytes == 0
+        return ok, (f"Board2 ξανά στον πραγματικό {rejoined}· ψεύτικος με το ίδιο ID: "
+                    f"{fake.connections} δοκιμές, {fake.handshakes} TLS, {fake.app_bytes} bytes")
 
     def s12(self):
-        fake_dir = self.root / "fake-manager"
-        fake_dir.mkdir()
-        cert, key = fake_dir / "fake.crt", fake_dir / "fake.key"
-        create_director_identity(cert, key)
-        context = server_context(cert, key)
+        context = fake_manager_tls(self.root / "fake-manager")
         fake = FakeManager(FAKE_TLS_PORT, context)
         beacons = FakeBeacons(FAKE_DISCOVERY_PORT)
         try:
@@ -675,9 +698,12 @@ class LiveTest:
             connected.append(client)
         full = self.director.wait_for(f"σύνολο {MAX_CLIENTS}", since=mark, timeout=15)
         extra = self.load[room]
-        extra.connect()                   # WELCOME και κλείσιμο (§5.2)
-        refused = extra.ended.wait(3)
-        limit = self.director.seen("Όριο Clients", since=mark)
+        try:
+            extra.connect()
+            refused = False
+        except ManagerFull:               # 4.3C1: «γεμάτος» πριν από το WELCOME
+            refused = True
+        limit = self.director.wait_for("περιμένει θέση", since=mark, timeout=3) is not None
         extra.close()
         mark = self.director.mark()
         connected[0].close()
@@ -688,8 +714,8 @@ class LiveTest:
         for client in [*connected, extra]:
             client.close()
         ok = full is not None and refused and limit and joined is not None and stays
-        return ok, (f"{MAX_CLIENTS} συνδεδεμένοι {full is not None}, ο επιπλέον "
-                    f"απορρίφθηκε {refused} και μπήκε μετά {joined is not None and stays}")
+        return ok, (f"{MAX_CLIENTS} συνδεδεμένοι {full is not None}, ο επιπλέον πήρε "
+                    f"«γεμάτος» {refused}, log {limit}, μπήκε μετά {joined is not None and stays}")
 
     def s15(self):
         time.sleep(2)
@@ -715,6 +741,60 @@ class LiveTest:
         ok = joined and vol_up and vol_ok and journal_ok
         return ok, f"ξανά συνδεδεμένος {joined}, {detail}"
 
+    def copy_board(self, source: Board, name: str, room: str, *, port=PORT) -> Board:
+        board = Board(self.root, name, room, port=port)
+        shutil.copytree(source.dir, board.dir)
+        board.client_id = source.client_id
+        return board
+
+    def s17(self):
+        """Κλωνοποιημένος υπολογιστής: αντίγραφο του Board1 «από άλλο μηχάνημα»."""
+        clone = self.copy_board(self.b1, "Board5", ROOM1)
+        self.extra.append(clone)
+        binding = clone.dir / "credentials" / "machine-binding.json"
+        data = json.loads(binding.read_text(encoding="utf-8"))
+        data["machine_id"] = "0" * 32     # η ταυτότητα φτιάχτηκε σε άλλον υπολογιστή
+        binding.write_text(json.dumps(data), encoding="utf-8")
+        mark_d, mark_1 = self.director.mark(), self.b1.process.mark()
+        process = clone.start(self.m.cert)
+        detected = process.wait_for("μοιάζει αντίγραφο", timeout=10) is not None
+        code_line = process.wait_for("Κωδικός:", timeout=20)
+        new_id = json.loads((clone.dir / "client.json").read_text(encoding="utf-8"))["client_id"]
+        archived = any(path.name.startswith("cloned-") for path in clone.dir.iterdir())
+        request = self.director.wait_for("Νέο αίτημα", since=mark_d, timeout=10)
+        approved = False
+        if request and code_line:
+            short = request.split("Νέο αίτημα")[1].split("|")[0].strip()
+            code = code_line.split("Κωδικός:")[1].split("|")[0].strip()
+            mark = self.director.mark()
+            self.send(f"approve {short} {code}")
+            approved = self.director.wait_for("Εγκρίθηκε:", since=mark, timeout=10) is not None
+        clone.client_id = new_id
+        joined = self.joined(clone, mark_d, 20)
+        board1_ok = (not self.director.seen(self.b1.client_id, LEFT, since=mark_d)
+                     and self.no_loss([self.b1], mark_1))
+        clone.stop()
+        ok = (detected and archived and new_id != self.b1.client_id and approved and joined
+              and board1_ok)
+        return ok, (f"ανίχνευση {detected}, παλιά αρχεία σε cloned-* {archived}, νέο UUID "
+                    f"{new_id != self.b1.client_id}, εγκρίθηκε {approved}, συνδέθηκε {joined}, "
+                    f"ο Board1 ανεπηρέαστος {board1_ok}")
+
+    def s18(self):
+        """Ίδια ταυτότητα χωρίς ανίχνευση (π.χ. αντίγραφο πριν το 4.3C1): προειδοποίηση."""
+        twin = self.copy_board(self.b3, "Board6", ROOM2)   # ο Board3 έρχεται από 127.0.0.2
+        self.extra.append(twin)
+        mark = self.director.mark()
+        twin.start(self.m.cert)
+        warning = self.director.wait_for("ΠΡΟΣΟΧΗ", self.b3.client_id, since=mark, timeout=60)
+        status_mark = self.director.mark()
+        self.send("status")
+        listed = self.director.wait_for("Ίδια ταυτότητα σε δύο υπολογιστές", self.b3.client_id,
+                                        since=status_mark, timeout=5) is not None
+        twin.stop()
+        return warning is not None and listed, (f"προειδοποίηση {warning is not None}, "
+                                                f"στο status {listed}")
+
     def s16(self):
         self.b1.stop()
         self.b3.stop()
@@ -737,7 +817,7 @@ class LiveTest:
 
     # ------------------------------------------------------------------ εκτέλεση
     def close(self):
-        for board in (*self.boards, self.b4):
+        for board in (*self.boards, self.b4, *self.extra):
             board.stop()
         for client in self.load:
             client.close()
@@ -762,12 +842,16 @@ class LiveTest:
             ("20 γρήγορες ανακοινώσεις: καμία αποσύνδεση, ένταση όπως πριν", self.s08),
             ("Ανάκληση Client στη μέση ανακοίνωσης: κόβεται, οι άλλοι συνεχίζουν", self.s09),
             ("Ο ανακλημένος ξαναπροσπαθεί και απορρίπτεται, εξυπηρέτηση κανονική", self.s10),
-            ("Ψεύτικα beacons στην επανεκκίνηση: ο Client γύρισε στον πραγματικό", self.s11),
+            ("Ψεύτικα beacons (και με το ίδιο ID) στην επανεκκίνηση: ο Client γύρισε στον "
+             "πραγματικό", self.s11),
             ("Ψεύτικος Manager με άλλο πιστοποιητικό: κανένα HELLO, μετά στον πραγματικό",
              self.s12),
             ("25 σιωπηλές συνδέσεις TCP: πραγματικός Client συνδέεται", self.s13),
             ("Όριο 70: ο επιπλέον απορρίπτεται και μπαίνει όταν φύγει ένας", self.s14),
             ("Kill του Client στη μέση ανακοίνωσης και επανεκκίνηση", self.s15),
+            ("Κλωνοποιημένος υπολογιστής: νέα ταυτότητα, έγκριση, ο αρχικός ανεπηρέαστος",
+             self.s17),
+            ("Ίδια ταυτότητα από δύο IP: προειδοποίηση στον Manager και στο status", self.s18),
             ("Κανονικό κλείσιμο Manager: lock ελεύθερο, κανένα υπόλοιπο", self.s16),
         ]
         try:
