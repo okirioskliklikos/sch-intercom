@@ -185,6 +185,37 @@ def stream_microphone(broadcaster: AudioBroadcaster, *, device: int | None = Non
                 stats.update(frames_sent, dropped)
 
 
+def stream_test_tone(broadcaster: AudioBroadcaster, *, stop: threading.Event | None = None,
+                     stats: DirectorStats | None = None) -> None:
+    """Μόνο για αυτόματες πραγματικές δοκιμές (κρυφό ``--test-tone``): σταθερός, χαμηλός
+    τόνος 440 Hz σε πραγματικό χρόνο αντί για μικρόφωνο, ώστε η δοκιμή να μην εξαρτάται
+    από συσκευή εισόδου ή άδεια μικροφώνου."""
+    import math
+
+    samples = BLOCK_BYTES // 2
+    period = BLOCK_SAMPLES / SAMPLE_RATE
+    phase = 0
+    frames_sent = 0
+    next_at = time.monotonic()
+    print("Πηγή δοκιμής ενεργή (τόνος 440 Hz, όχι μικρόφωνο).", flush=True)
+    while stop is None or not stop.is_set():
+        block = bytearray()
+        for index in range(samples):
+            value = int(800 * math.sin(2 * math.pi * 440 * (phase + index) / SAMPLE_RATE))
+            block += value.to_bytes(2, "little", signed=True)
+        phase += samples
+        broadcaster.publish(bytes(block), time.monotonic_ns() // 1000)
+        frames_sent += 1
+        if stats is not None:
+            stats.update(frames_sent, 0)
+        next_at += period
+        delay = next_at - time.monotonic()
+        if delay > 0:
+            time.sleep(delay)
+        else:
+            next_at = time.monotonic()
+
+
 #: Ταυτόχρονες προσπάθειες σύνδεσης (TLS + HELLO σε εξέλιξη), όχι όριο
 #: συνδεδεμένων Clients. Οι επιπλέον κλείνουν αμέσως και ο Client ξαναδοκιμάζει
 #: μετά από 5 s ±1 s (client.main.RECONNECT_DELAY_SECONDS).
@@ -615,6 +646,7 @@ def main() -> None:
     parser.add_argument("--max-pending-requests", type=int, default=None,
                         help=argparse.SUPPRESS)
     parser.add_argument("--watch-port", type=int, default=None, help=argparse.SUPPRESS)
+    parser.add_argument("--test-tone", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--extra-beacon-port", type=int, default=None,
                         help=argparse.SUPPRESS)
     parser.add_argument("--start-check-seconds", type=float, default=3.0,
@@ -760,8 +792,11 @@ def main() -> None:
                 daemon=True, name="director-collision-monitor")
             monitoring.start()
             try:
-                stream_microphone(broadcaster, device=args.device, latency=args.latency,
-                                  stop=stop, stats=stats)
+                if args.test_tone:
+                    stream_test_tone(broadcaster, stop=stop, stats=stats)
+                else:
+                    stream_microphone(broadcaster, device=args.device, latency=args.latency,
+                                      stop=stop, stats=stats)
             except KeyboardInterrupt:
                 print("\nΟ Director τερματίστηκε.", flush=True)
             finally:

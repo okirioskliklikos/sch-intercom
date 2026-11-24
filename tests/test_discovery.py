@@ -266,5 +266,59 @@ class DiscoveryTests(unittest.TestCase):
             open_connection("127.0.0.1", 9)
 
 
+class WindowsLikeSocket(socket.socket):
+    """Όπως στα Windows: datagram μεγαλύτερο από το buffer δίνει WSAEMSGSIZE, δεν κόβεται."""
+
+    def recvfrom(self, size, *args):
+        data, address = super().recvfrom(65535, *args)
+        if len(data) > size:
+            raise OSError(10040, "WSAEMSGSIZE: message too long")
+        return data, address
+
+
+class OversizedPacketTests(unittest.TestCase):
+    """4.3B, εύρημα της πραγματικής δοκιμής Windows: ένα υπερμεγέθες UDP πακέτο
+    έκανε το discovery να αποτυγχάνει και σταματούσε για πάντα τον BeaconWatcher."""
+
+    def free_port(self):
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as test:
+            test.bind(("127.0.0.1", 0))
+            return test.getsockname()[1]
+
+    def test_discover_ignores_oversized_packet(self):
+        identifier, port = str(uuid.uuid4()), self.free_port()
+        def sender():
+            time.sleep(0.06)
+            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+                sock.sendto(b"\x00" * 600, ("127.0.0.1", port))
+                sock.sendto(encode_beacon(identifier, 50555), ("127.0.0.1", port))
+        with mock.patch("shared.discovery.socket.socket", WindowsLikeSocket):
+            thread = threading.Thread(target=sender)
+            thread.start()
+            try:
+                self.assertEqual(discover(udp_port=port, timeout=0.5),
+                                 ("127.0.0.1", 50555, identifier))
+            finally:
+                thread.join()
+
+    def test_watcher_keeps_running_after_oversized_packet(self):
+        school, inst, other = (str(uuid.uuid4()) for _ in range(3))
+        port = self.free_port()
+        with mock.patch("shared.discovery.socket.socket", WindowsLikeSocket):
+            watcher = BeaconWatcher(school, inst, port=port)
+            watcher.start()
+            self.addCleanup(watcher.close)
+            time.sleep(0.1)
+            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+                sock.sendto(b"\x00" * 600, ("127.0.0.1", port))
+                time.sleep(0.1)
+                sock.sendto(encode_beacon(str(uuid.uuid4()), 50555, school=school,
+                                          inst=other, host="pc-b"), ("127.0.0.1", port))
+            deadline = time.monotonic() + 2
+            while not watcher.others() and time.monotonic() < deadline:
+                time.sleep(0.02)
+        self.assertEqual([item.info.inst for item in watcher.others()], [other])
+
+
 if __name__ == "__main__":
     unittest.main()
