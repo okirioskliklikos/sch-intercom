@@ -423,6 +423,15 @@ class SecurityPageTests(SecurityFixture, unittest.TestCase):
         self.asked.append((title, text))
         return self.confirm_answer
 
+    def test_selected_tab_text_fits_in_bold(self):
+        # Windows 24/11/2026: το έντονο «Υπολογιστές» κοβόταν αριστερά-δεξιά.
+        from PySide6.QtGui import QFont, QFontMetrics
+        for tab in (self.page.tab_computers, self.page.tab_certificates):
+            bold = QFont(tab.font())
+            bold.setWeight(QFont.Weight.DemiBold)
+            needed = QFontMetrics(bold).horizontalAdvance(tab.text())
+            self.assertGreaterEqual(tab.width(), needed + 2 * 16, tab.text())
+
     def test_menu_switches_page_and_title(self):
         window = self.window
         self.assertTrue(window.nav_buttons["security"].isEnabled())

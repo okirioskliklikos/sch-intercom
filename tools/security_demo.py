@@ -17,6 +17,9 @@
 4.2D3: --role reported (Clients ανέφεραν νεότερο μητρώο) | divergent (ίδια έκδοση, άλλο hash).
 Ο «άλλος Manager» είναι ψεύτικος (κανένα δίκτυο)· αλλαγή ρόλου και Έναρξη/Διακοπή
 δουλεύουν πάνω στο προσωρινό manager-state.json.
+
+4.3C2: --notices full | duplicate | both (ψεύτικα: «γεμάτος» Manager, ίδια ταυτότητα
+στον C2627-Γ1 · Board1) και --page home | security.
 """
 from __future__ import annotations
 
@@ -56,8 +59,34 @@ OTHER_HOST, OTHER_IP = "ΓΡΑΜΜΑΤΕΙΑ-2", "192.168.1.35"
 class DemoBroadcaster:
     """Σταθερή κατάσταση online/offline· οι στόχοι και οι ενημερώσεις αγνοούνται."""
 
+    max_clients = 70
+
     def __init__(self):
         self.status: dict[str, tuple[str, bool, float]] = {}
+        self.names: dict[str, str] = {}
+        self.rooms: dict[str, str] = {}
+        self.waiting: list[tuple[str, str, str]] = []
+        self.duplicates: list[tuple[str, str, tuple[str, ...]]] = []
+
+    def full_waiting(self):
+        return list(self.waiting)
+
+    def duplicate_identities(self):
+        return list(self.duplicates)
+
+    def client_names(self):
+        return dict(self.names)
+
+    def set_notices(self, scenario: str) -> None:
+        """4.3C2: ψεύτικοι «σε αναμονή» και ίδια ταυτότητα στον C2627-Γ1 · Board1."""
+        if scenario in ("full", "both"):
+            self.waiting = [(str(uuid.uuid4()), "C2627-Γ3", "Board1"),
+                            (str(uuid.uuid4()), "C2627-Δ2", "PC")]
+        if scenario in ("duplicate", "both"):
+            [client_id] = [cid for cid, name in self.names.items()
+                           if name == "Board1" and self.rooms[cid] == "C2627-Γ1"]
+            self.status[client_id] = ("C2627-Γ1", True, 0.1)
+            self.duplicates = [(client_id, "C2627-Γ1", ("192.168.1.21", "192.168.1.47"))]
 
     def status_snapshot(self):
         return sorted((cid, room, online, age)
@@ -187,6 +216,8 @@ def build(root: Path, log=print):
                             if (r.room, r.name) == (room, name)]
             if not model.approve(request_id, code).ok:
                 raise SystemExit(f"Η έγκριση {room} · {name} απέτυχε")
+            broadcaster.names[client_id] = name
+            broadcaster.rooms[client_id] = room
             state = STATES[index % len(STATES)]
             index += 1
             if state is True:
@@ -207,6 +238,9 @@ def main() -> None:
     parser.add_argument("--role", choices=ROLE_SCENARIOS, default="primary",
                         help="σενάριο Κύριου/Εφεδρικού")
     parser.add_argument("--tab", choices=("computers", "certificates"), default="computers")
+    parser.add_argument("--notices", choices=("none", "full", "duplicate", "both"),
+                        default="none", help="4.3C2: ειδοποιήσεις «γεμάτος» / ίδια ταυτότητα")
+    parser.add_argument("--page", choices=("home", "security"), default="security")
     parser.add_argument("--screenshot", type=Path, default=None,
                         help="μόνο στιγμιότυπο (offscreen) και έξοδος")
     args = parser.parse_args()
@@ -221,6 +255,7 @@ def main() -> None:
     with tempfile.TemporaryDirectory(prefix="sch-intercom-demo-") as temp:
         print(f"Προσωρινός φάκελος: {temp} (σβήνεται στο κλείσιμο)")
         broadcaster, model, enrollment = build(Path(temp))
+        broadcaster.set_notices(args.notices)
         role = build_role(Path(temp), args.role, lambda: model.trust.registry.version,
                           trust=model.trust)
         try:
@@ -235,8 +270,8 @@ def main() -> None:
             if args.width:
                 window.resize(args.width, 900)
             window.show()
-            window.show_page("security")
-            if args.tab == "certificates":
+            window.show_page(args.page)
+            if args.page == "security" and args.tab == "certificates":
                 window.security_page.show_tab("Πιστοποιητικά")
             if args.screenshot:
                 for _ in range(5):

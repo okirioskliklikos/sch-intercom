@@ -576,6 +576,33 @@ class DirectorWindowTests(TestCase):
         window.radio_all.click()
         self.assertEqual(window.mode, MODE_ALL)
 
+    def test_clear_unchecks_all_rooms_then_pick_one(self):
+        # Απόφαση χρήστη 24/11/2026: «Καθαρισμός» στην κάρτα «Αίθουσες».
+        window = self.make(self.STATUS)
+        self.assertTrue(window.clear_button.isEnabled())
+        window.clear_button.click()
+        self.assertEqual(window.mode, MODE_ROOMS)
+        self.assertTrue(window.radio_rooms.isChecked())
+        self.assertEqual(window.checked, set())
+        self.assertFalse(any(row.checkbox.isChecked() for row in window.room_rows.values()))
+        self.assertFalse(window.clear_button.isEnabled())   # τίποτα να καθαριστεί
+        window.room_rows["Γ1"].checkbox.click()
+        self.assertEqual(window.checked, {"Γ1"})
+        self.assertTrue(window.clear_button.isEnabled())
+        window.announce_button.click()
+        self.assertEqual(self.broadcaster.targets[-1], ({"Γ1"}, set()))
+        self.assertFalse(window.clear_button.isEnabled())   # όχι κατά την ανακοίνωση
+        window.clear_button.click()
+        self.assertEqual(window.checked, {"Γ1"})
+        window.announce_button.click()
+        window.radio_all.click()
+        self.assertEqual(window.mode, MODE_ALL)
+        self.assertTrue(all(row.checkbox.isChecked() for row in window.room_rows.values()))
+
+    def test_clear_hidden_without_rooms(self):
+        window = self.make([])
+        self.assertTrue(window.clear_button.isHidden())
+
     def test_no_online_client_shows_notice_without_audio(self):
         window = self.make([("id-2", "Γ2", False, 8.0)])
         window.announce_button.click()
