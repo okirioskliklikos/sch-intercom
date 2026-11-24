@@ -865,8 +865,8 @@ def restart_command() -> list[str]:
 
 
 def restart_manager() -> None:
-    """Νέα εκκίνηση μετά από επαναφορά από το GUI· το κλείδωμα έχει ήδη αφεθεί."""
-    print("Επανεκκίνηση Manager μετά την επαναφορά…", flush=True)
+    """Νέα εκκίνηση μετά από επαναφορά ή αλλαγή κλίμακας από το GUI· το κλείδωμα έχει ήδη αφεθεί."""
+    print("Επανεκκίνηση Manager…", flush=True)
     command = restart_command()
     if os.name == "nt":
         subprocess.Popen(command)  # ίδια κονσόλα· η τρέχουσα διεργασία τελειώνει αμέσως

@@ -517,6 +517,7 @@ class QtTests(unittest.TestCase):
         window = self.make_window(confirm=lambda *_a: answers.pop(0))
         window.show_page("settings")
         page = window.settings_page
+        page.tab_maintenance.click()   # οι Ρυθμίσεις ανοίγουν στην «Εμφάνιση»
         self.assertTrue(page.delete_button.isVisible())
         self.assertTrue(page.previous_name.full_text.startswith("pre-restore-"))
         self.assertNotEqual(page.restore_rows.values["when"].text(), "—")
