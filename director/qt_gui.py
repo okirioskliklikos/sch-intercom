@@ -60,6 +60,7 @@ NAV_ITEMS = [
 SECURITY_REFRESH_SECONDS = 1.0
 #: Ρόλος/εξυπηρέτηση/άλλοι Managers (επάνω μπάρα και ειδοποιήσεις) το πολύ τόσο συχνά.
 ROLE_REFRESH_SECONDS = 0.5
+TEXT_CLEAR_ROOMS = "Καθαρισμός"
 #: 4.3C2: ειδοποιήσεις «γεμάτος» / ίδια ταυτότητα.
 CAPACITY_REFRESH_SECONDS = 1.0
 
@@ -1063,6 +1064,13 @@ class DirectorWindow(QMainWindow):
         # Κρατά τον τίτλο και τις αίθουσες πάνω αριστερά,
         # ανεξάρτητα από το ύψος της κάρτας.
         layout.addStretch(1)
+        # «Καθαρισμός» κάτω δεξιά: καμία αίθουσα επιλεγμένη, για να διαλέξει ο χρήστης
+        # λίγες (απόφαση χρήστη 24/11/2026). Ίδιο στυλ με την «Προεπισκόπηση»· δεν
+        # φαρδαίνει την κάρτα (στενότερο από μία στήλη αιθουσών).
+        self.clear_button = QPushButton(TEXT_CLEAR_ROOMS)
+        self.clear_button.setObjectName("pillSmall")
+        self.clear_button.clicked.connect(self.clear_rooms)
+        layout.addWidget(self.clear_button, 0, Qt.AlignmentFlag.AlignRight)
         return card
 
     # --- ενέργειες χρήστη --------------------------------------------------
@@ -1098,6 +1106,17 @@ class DirectorWindow(QMainWindow):
             # Ξεκινά από τις online αίθουσες, όπως φαίνονταν στο «Όλες».
             self.checked = {room for room, online in self.rooms if online}
         self.mode = mode
+        self.refresh()
+
+    def clear_rooms(self) -> None:
+        """Αποεπιλογή όλων των αιθουσών: «Συγκεκριμένες αίθουσες» χωρίς καμία."""
+        if self.mic.live:
+            return
+        self.checked = set()
+        self.mode = MODE_ROOMS
+        self.radio_rooms.blockSignals(True)
+        self.radio_rooms.setChecked(True)
+        self.radio_rooms.blockSignals(False)
         self.refresh()
 
     def room_toggled(self, room: str, checked: bool) -> None:
@@ -1199,6 +1218,9 @@ class DirectorWindow(QMainWindow):
                                            enabled=not locked)
         for radio in (self.radio_all, self.radio_rooms):
             radio.setEnabled(not locked)
+        self.clear_button.setVisible(bool(rooms))
+        self.clear_button.setEnabled(
+            not locked and (self.mode == MODE_ALL or bool(self.checked)))
 
     def _rebuild_room_rows(self, names: list[str]) -> None:
         for row in self.room_rows.values():
@@ -1326,7 +1348,8 @@ class DirectorWindow(QMainWindow):
         row_height = px(theme.ROW_HEIGHT)
         margins = self.rooms_card_layout.contentsMargins()
         chrome = (margins.top() + margins.bottom() + self.rooms_card_layout.spacing()
-                  + self.rooms_title.sizeHint().height() + 2)
+                  + self.rooms_title.sizeHint().height() + 2
+                  + self.rooms_card_layout.spacing() + self.clear_button.sizeHint().height())
         names = list(self.room_rows)
         width = self._room_column_width()
         spacing = self.room_grid.horizontalSpacing()
