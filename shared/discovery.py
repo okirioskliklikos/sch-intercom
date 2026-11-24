@@ -196,7 +196,13 @@ class BeaconWatcher:
                 except socket.timeout:
                     continue
                 except OSError:
-                    break
+                    # Windows: πακέτο μεγαλύτερο από το buffer δίνει WSAEMSGSIZE (10040)
+                    # αντί να κοπεί, και ένα ICMP «unreachable» δίνει WSAECONNRESET.
+                    # Ένα τέτοιο πακέτο από οποιονδήποτε στο LAN δεν πρέπει να
+                    # σταματά για πάντα την παρακολούθηση άλλων Managers.
+                    if self._stop.wait(0.05):
+                        break
+                    continue
                 self.receive(packet, sender[0])
 
     def start(self) -> None:
@@ -246,6 +252,10 @@ def discover(*, udp_port: int = DISCOVERY_PORT, timeout: float = DISCOVERY_WINDO
                 packet, sender = listener.recvfrom(MAX_BEACON_BYTES + 1)
             except socket.timeout:
                 break
+            except OSError:
+                # Windows: υπερμεγέθες πακέτο (WSAEMSGSIZE) ή WSAECONNRESET. Αγνοείται
+                # όπως κάθε άκυρο beacon· αλλιώς ένα πακέτο εμπόδιζε τη σύνδεση.
+                continue
             try:
                 identifier, tcp_port = decode_beacon(packet)
             except ValueError:
