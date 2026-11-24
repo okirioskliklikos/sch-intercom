@@ -32,6 +32,7 @@ START = "Έναρξη εξυπηρέτησης"
 STAY_BACKUP = "Να μείνει Εφεδρικός"
 MAKE_PRIMARY = "Να γίνει Κύριος…"
 IMPORT_REGISTRY = "Εισαγωγή μητρώου…"
+ACCEPT_CURRENT = "Συνέχεια με αυτό το μητρώο…"
 FORCE_START = "Έναρξη παρ' όλα αυτά"
 TEXT_STOP = ("Οι Clients αποσυνδέονται από αυτόν τον υπολογιστή και δεν συνδέονται ξανά "
              "εδώ μέχρι την «Έναρξη εξυπηρέτησης».")
@@ -126,6 +127,27 @@ class StartConflictDialog(_Dialog):
         self.accept_button.clicked.connect(self.accept)
 
 
+class AcceptCurrentDialog(_Dialog):
+    """4.2D3: το νεότερο μητρώο που ανέφεραν οι Clients θεωρείται χαμένο.
+    Προεπιλογή «Άκυρο», κόκκινο κουμπί (η ενέργεια χάνει ανακλήσεις)."""
+
+    def __init__(self, status: RoleStatus, parent=None):
+        super().__init__("Συνέχεια με αυτό το μητρώο", parent)
+        reported = status.reported
+        self.body.addWidget(_text(reported.bar_text()))
+        self.warning = _text(reported.accept_warning(), name="warnText")
+        self.body.addWidget(self.warning)
+        self.body.addWidget(_text(
+            f"Το μητρώο εδώ γίνεται v{reported.target_version} και η ειδοποίηση σβήνει. "
+            "Αν το χαμένο μητρώο βρεθεί αργότερα, η εισαγωγή του γίνεται με συγχώνευση."))
+        self.cancel, self.accept_button = self.footer("Συνέχεια με αυτό το μητρώο")
+        self.accept_button.setObjectName("dangerAction")
+        _restyle(self.accept_button)
+        self.cancel.setDefault(True)
+        self.cancel.setFocus()
+        self.accept_button.clicked.connect(self.accept)
+
+
 class RoleActions:
     """Ενέργειες ρόλου/εξυπηρέτησης με τους διαλόγους τους.
 
@@ -189,6 +211,20 @@ class RoleActions:
             self.model.acknowledge()
         except (OSError, ValueError) as exc:
             self.inform(STAY_BACKUP, str(exc))
+        self._done()
+
+    def accept_current(self) -> None:
+        """«Συνέχεια με αυτό το μητρώο…» στην κόκκινη ειδοποίηση μητρώου (4.2D3)."""
+        status = self.model.status()
+        if not status.can_accept_current:
+            self._done()
+            return
+        if not self._show(AcceptCurrentDialog(status, self.parent)):
+            return
+        try:
+            self.model.accept_current()
+        except (OSError, ValueError) as exc:
+            self.inform("Συνέχεια με αυτό το μητρώο", f"Η αλλαγή απέτυχε: {exc}")
         self._done()
 
     # --- εξυπηρέτηση ---------------------------------------------------------

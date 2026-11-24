@@ -705,8 +705,8 @@ class DirectorWindow(QMainWindow):
 
     def _build_role_bars(self, layout: QVBoxLayout) -> None:
         """Ειδοποιήσεις Κύριου/Εφεδρικού κάτω από τον τίτλο, σε όλες τις σελίδες."""
-        from director.qt_role import IMPORT_REGISTRY, MAKE_PRIMARY, STAY_BACKUP, RoleActions, \
-            stop_button
+        from director.qt_role import ACCEPT_CURRENT, IMPORT_REGISTRY, MAKE_PRIMARY, \
+            STAY_BACKUP, RoleActions, stop_button
         options = self._role_options
         self.role_actions = RoleActions(self.role, self, dialog_hook=options.get("dialog_hook"),
                                         inform=options.get("inform"),
@@ -718,6 +718,11 @@ class DirectorWindow(QMainWindow):
         promote = self.restored_bar.add_button(action_button(MAKE_PRIMARY, "primaryAction"))
         promote.clicked.connect(actions.promote)
         self.newer_bar = NoticeBar("alarm")
+        # 4.2D3: «Συνέχεια με αυτό το μητρώο…» μόνο όταν το ανέφεραν Clients (Κύριος).
+        self.accept_current = self.newer_bar.add_button(
+            action_button(ACCEPT_CURRENT, "secondaryAction"))
+        self.accept_current.clicked.connect(actions.accept_current)
+        self.accept_current.setVisible(False)
         importing = self.newer_bar.add_button(
             action_button(IMPORT_REGISTRY, "secondaryAction", "import"))
         importing.clicked.connect(self.open_registry_import)
@@ -1111,9 +1116,14 @@ class DirectorWindow(QMainWindow):
         self.restored_bar.setVisible(status.restored)
         if status.restored:
             self.restored_bar.set_text(status.restored_html())
-        self.newer_bar.setVisible(bool(status.newer))
-        if status.newer:
-            self.newer_bar.set_text(status.newer_html())
+        self.newer_bar.setVisible(status.registry_alarm)
+        if status.registry_alarm:
+            self.newer_bar.set_text(status.registry_alarm_html())
+            reported = status.reported
+            self.newer_bar.setToolTip(
+                "" if reported is None or status.newer else
+                "Το ανέφεραν: " + ", ".join(reported.reporters))
+        self.accept_current.setVisible(status.can_accept_current)
         self.conflict_bar.setVisible(status.conflict)
         if status.conflict:
             self.conflict_bar.set_text(status.conflict_html())
@@ -1573,8 +1583,13 @@ class GuiRuntime:
         role = None
         if self.controller is not None:
             from director.security import RoleModel
+            trust = self.trust
             role = RoleModel(manager_state_path(args.registry_file), self.controller,
-                             self.watcher, registry_version=lambda: registry.version)
+                             self.watcher, registry_version=lambda: registry.version,
+                             reported=(trust.reported if trust is not None
+                                       else (lambda: None)),
+                             accept_current=(trust.accept_current if trust is not None
+                                             else None))
         options = {"stop_serving": self.stop_serving, "restart": self.request_restart,
                    **self.maintenance_options}
         self.window = DirectorWindow(

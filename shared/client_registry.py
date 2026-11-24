@@ -303,10 +303,38 @@ class SignedClientRegistry:
         raise RegistryError("Registry on disk diverged from the running Manager; "
                             "restart the Manager before changing Clients")
 
-    def _commit(self, newer: dict) -> None:
+    def welcome_info(self) -> tuple[int, str]:
+        """(registry_version, digest) για το WELCOME (4.2D3)."""
+        with self.lock:
+            registry = self._document["registry"]
+            return registry["registry_version"], digest(registry)
+
+    def advance_version(self, minimum: int) -> int:
+        """«Συνέχεια με αυτό το μητρώο» (4.2D3): νέα υπογεγραμμένη έκδοση ≥ minimum.
+
+        Το περιεχόμενο δεν αλλάζει. Επειδή ισχύει registry_version == len(history) + 1,
+        οι εκδόσεις που παραλείπονται γράφονται στο ιστορικό ως σημάδια που δεν
+        αντιστοιχούν σε κανένα μητρώο. Έτσι ένα χαμένο μητρώο που θα βρεθεί αργότερα
+        βγαίνει «σύγκρουση» στην εισαγωγή (όχι «παλαιότερο») και συγχωνεύεται.
+        """
+        with self.lock:
+            self._refresh_from_disk()
+            if type(minimum) is not int or minimum <= self.version:
+                raise RegistryError("Η νέα έκδοση πρέπει να είναι μεγαλύτερη από την τρέχουσα")
+            if minimum > self.version + 100000:
+                raise RegistryError("Υπερβολικά μεγάλη έκδοση μητρώου")
+            self._commit(self.snapshot(), target_version=minimum)
+            return self.version
+
+    def _commit(self, newer: dict, *, target_version: int | None = None) -> None:
         older = self._document["registry"]
-        newer["history"] = older["history"] + [digest(older)]
-        newer["registry_version"] = older["registry_version"] + 1
+        parent = digest(older)
+        history = older["history"] + [parent]
+        while target_version is not None and len(history) + 1 < target_version:
+            marker = f"sch-intercom-skipped:{parent}:{len(history) + 1}"
+            history.append(hashlib.sha256(marker.encode("ascii")).hexdigest())
+        newer["history"] = history
+        newer["registry_version"] = len(history) + 1
         document = _wrap(newer, self._signing_key)
         self._persist(document)  # No in-memory commit if disk write failed.
         self._document = document

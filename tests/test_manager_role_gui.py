@@ -191,7 +191,8 @@ class WindowTests(unittest.TestCase):
 
     def window(self, scenario: str) -> DirectorWindow:
         self.role = security_demo.build_role(self.root, scenario,
-                                             lambda: self.model.trust.registry.version)
+                                             lambda: self.model.trust.registry.version,
+                                             trust=self.model.trust)
         window = DirectorWindow(
             self.broadcaster, DirectorMicrophone(security_demo.fake_stream, self.broadcaster),
             security=self.model, maintenance=self.maintenance, role=self.role,
@@ -411,9 +412,46 @@ class WindowTests(unittest.TestCase):
         opened = []
         window.settings_page.dialog_hook = lambda dialog: opened.append(dialog) or \
             dialog.reject()
-        window.newer_bar.buttons[0].click()
+        importing = next(b for b in window.newer_bar.buttons
+                         if b.text() == qt_role.IMPORT_REGISTRY)
+        self.assertFalse(window.accept_current.isVisibleTo(window))  # beacon, όχι Clients
+        importing.click()
         self.assertEqual(window.current_page, "settings")
         self.assertIsInstance(opened[0], qt_maintenance.ImportDialog)
+
+    # --- 4.2D3: νεότερο μητρώο που ανέφεραν Clients ------------------------------
+    def test_reported_bar_and_accept_current(self):
+        before = self.model.trust.registry.version
+        window = self.window("reported")
+        self.assertTrue(window.newer_bar.isVisibleTo(window))
+        self.assertIn(f"Υπάρχει νεότερο μητρώο (v{before + 3})", window.newer_bar.text.text())
+        self.assertTrue(window.accept_current.isVisibleTo(window))
+        self.assertEqual(window.accept_current.text(), qt_role.ACCEPT_CURRENT)
+        self.answer = ["reject"]
+        window.accept_current.click()
+        dialog = self.dialogs[-1]
+        self.assertIsInstance(dialog, qt_role.AcceptCurrentDialog)
+        self.assertEqual(dialog.accept_button.objectName(), "dangerAction")
+        self.assertIn("θα θεωρηθεί χαμένο", dialog.warning.text())
+        self.assertEqual(self.model.trust.registry.version, before)
+        self.answer = ["accept"]
+        window.accept_current.click()
+        self.settle()
+        self.assertEqual(self.model.trust.registry.version, before + 4)
+        self.assertFalse(window.newer_bar.isVisibleTo(window))
+        self.assertFalse(window.accept_current.isVisibleTo(window))
+
+    def test_divergent_text(self):
+        window = self.window("divergent")
+        self.assertIn("διαφορετικό μητρώο", window.newer_bar.text.text())
+        self.assertTrue(window.accept_current.isVisibleTo(window))
+
+    def test_accept_current_hidden_on_backup(self):
+        window = self.window("reported")
+        self.role.demote()
+        window.refresh_role()
+        self.assertTrue(window.newer_bar.isVisibleTo(window))
+        self.assertFalse(window.accept_current.isVisibleTo(window))
 
 
 if __name__ == "__main__":

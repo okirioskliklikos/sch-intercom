@@ -453,6 +453,9 @@ class RoleStatus:
     others: tuple[OtherManager, ...]
     registry_version: int | None
     host: str
+    #: 4.2D3: νεότερο/διαφορετικό μητρώο που ανέφεραν Clients
+    #: (`director.registry_reports.ReportedRegistry`) ή None.
+    reported: object | None = None
 
     @property
     def primary(self) -> bool:
@@ -529,6 +532,22 @@ class RoleStatus:
         return (f"Το μητρώο χρειάζεται ενημέρωση: ο {html.escape(other.host)} έχει "
                 f"v{other.rv}, εδώ v{self.registry_version}.")
 
+    @property
+    def registry_alarm(self) -> bool:
+        """Κόκκινη ειδοποίηση μητρώου: από beacon άλλου Manager ή από Clients."""
+        return bool(self.newer) or self.reported is not None
+
+    @property
+    def can_accept_current(self) -> bool:
+        """«Συνέχεια με αυτό το μητρώο…»: μόνο στον Κύριο, μόνο όταν το νεότερο
+        μητρώο το ανέφεραν Clients και κανένας Manager σε λειτουργία δεν το έχει."""
+        return self.primary and self.reported is not None and not self.newer
+
+    def registry_alarm_html(self) -> str:
+        if self.newer:
+            return self.newer_html()
+        return html.escape(self.reported.bar_text())
+
     def newer_warning(self) -> str | None:
         """Γραμμή στον διάλογο «Αλλαγή σε Κύριο» (phase4-2d.md §4)."""
         if not self.newer:
@@ -558,12 +577,16 @@ class RoleModel:
 
     def __init__(self, state_path: Path, controller, watcher, *,
                  registry_version: Callable[[], int | None] = lambda: None,
-                 host: str | None = None):
+                 host: str | None = None,
+                 reported: Callable[[], object | None] = lambda: None,
+                 accept_current: Callable[..., int] | None = None):
         self.state_path = Path(state_path)
         self.controller = controller
         self.watcher = watcher
         self.registry_version = registry_version
         self.host = host or local_host()
+        self.reported = reported
+        self._accept_current = accept_current
 
     def status(self) -> RoleStatus:
         from director.manager_state import load
@@ -571,7 +594,15 @@ class RoleModel:
         others = tuple(OtherManager(item.info.host, item.ip, item.info.rv, item.info.inst)
                        for item in (self.watcher.others() if self.watcher else []))
         return RoleStatus(state.role, bool(self.controller and self.controller.active),
-                          state.notice, others, self.registry_version(), self.host)
+                          state.notice, others, self.registry_version(), self.host,
+                          self.reported())
+
+    def accept_current(self) -> int:
+        """«Συνέχεια με αυτό το μητρώο» (4.2D3)· επιστρέφει τη νέα έκδοση."""
+        if self._accept_current is None:
+            raise ValueError("Δεν υπάρχει μητρώο")
+        status = self.status()
+        return self._accept_current(newer_hosts=tuple(o.host for o in status.newer))
 
     # --- ενέργειες ----------------------------------------------------------
     def promote(self) -> None:

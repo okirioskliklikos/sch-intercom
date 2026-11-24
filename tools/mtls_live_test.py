@@ -476,7 +476,8 @@ class ClientRun:
         return ["--tls-ca", str(self.cert),
                 "--identity-file", str(self.work / f"client-identity{suffix}.json"),
                 "--client-credentials-dir", str(self.work / f"credentials{suffix}"),
-                "--client-hints-file", str(self.hints_file(profile))]
+                "--client-hints-file", str(self.hints_file(profile)),
+                "--registry-seen-file", str(self.work / f"registry-seen{suffix}.json")]
 
     def hints_file(self, profile: str) -> Path:
         suffix = "" if profile == "main" else f"-{profile}"

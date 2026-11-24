@@ -22,6 +22,7 @@ from shared.jitter import DelayTracker, JitterBuffer
 from shared.identity import load_identity, receive_welcome, send_hello
 from shared.enrollment import ENROLL_PORT, make_request, enroll_client
 from shared.client_hints import load_hints, save_hints
+from shared.registry_seen import load_seen, manager_key, record_seen
 from shared.device_identity import create_device_identity, replace_device_identity
 from shared.transport_security import client_context, connect_tls, DEFAULT_SERVER_NAME
 from shared.discovery import discover, DISCOVERY_PORT
@@ -348,6 +349,9 @@ def main() -> None:
     parser.add_argument("--client-hints-file", type=Path,
                         default=Path.home() / ".school-intercom" / "client-hints.json",
                         help="Τελευταία στοιχεία που όρισε ο Manager")
+    parser.add_argument("--registry-seen-file", type=Path,
+                        default=Path.home() / ".school-intercom" / "registry-seen.json",
+                        help="Μεγαλύτερη έκδοση μητρώου που έχει δει ο Client ανά Manager")
     parser.add_argument("--tls-server-name", default=DEFAULT_SERVER_NAME,
                         help="DNS όνομα στο SAN του πιστοποιητικού Director")
     parser.add_argument("--device", type=int, default=None, help="Αριθμός συσκευής εξόδου PortAudio")
@@ -425,8 +429,22 @@ def main() -> None:
     print(f"Client ID: {client_id} | Αίθουσα: {room}", flush=True)
 
     def session(connection: socket.socket) -> None:
-        send_hello(connection, client_id, room)
-        receive_welcome(connection)
+        # 4.2D3: αναφορά «έχω δει vN» στον Manager που πέρασε τον έλεγχο TLS.
+        key = manager_key(connection.getpeercert(binary_form=True) or b"")
+        seen = load_seen(args.registry_seen_file, key)
+        send_hello(connection, client_id, room, seen=seen)
+        welcome = receive_welcome(connection)
+        if welcome is not None:
+            if seen is not None and (seen["rv"] > welcome["rv"] or (
+                    seen["rv"] == welcome["rv"] and seen["hash"] != welcome["hash"])):
+                kind = "διαφορετικό μητρώο " if seen["rv"] == welcome["rv"] else ""
+                print(f"[Client] Ο Manager έχει μητρώο v{welcome['rv']}· "
+                      f"έχω δει {kind}v{seen['rv']} (αναφέρθηκε στον Manager).", flush=True)
+            try:
+                if record_seen(args.registry_seen_file, key, welcome):
+                    print(f"[Client] Μητρώο Manager v{welcome['rv']}", flush=True)
+            except OSError as exc:
+                print(f"[Client] Δεν αποθηκεύτηκε η έκδοση μητρώου: {exc}", flush=True)
         heartbeat_stop = threading.Event()
         sender = threading.Thread(target=heartbeat_sender, args=(connection, heartbeat_stop),
                                   name="client-heartbeat", daemon=True)
