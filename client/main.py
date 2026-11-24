@@ -381,6 +381,9 @@ def main() -> None:
         help="Πειραματικό: μειώνει προσωρινά τις άλλες εφαρμογές στο 0% και "
              "κάνει pause στα διαθέσιμα media (απαιτεί --announcement-volume)",
     )
+    # Μόνο για αυτόματες δοκιμές: αρχείο ανάκαμψης έντασης εκτός της κανονικής εγκατάστασης.
+    parser.add_argument("--volume-recovery-file", type=Path, default=None,
+                        help=argparse.SUPPRESS)
     args = parser.parse_args()
     if args.mute_others and args.announcement_volume is None:
         parser.error("--mute-others απαιτεί --announcement-volume")
@@ -455,6 +458,7 @@ def main() -> None:
                         fade_ms=args.fade_ms, resume_fade_ms=args.resume_fade_ms,
                         announcement_volume=args.announcement_volume,
                         mute_others=args.mute_others,
+                        recovery_path=args.volume_recovery_file,
                         settings_callback=lambda info: save_hints(
                             args.client_hints_file, info["room"],
                             info["name"] or socket.gethostname()[:64]))
