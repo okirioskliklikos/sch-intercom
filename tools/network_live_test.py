@@ -2,7 +2,7 @@
 
 Ο υπολογιστής «director» οδηγεί τη δοκιμή και κάθε υπολογιστής «client» τρέχει έναν
 βοηθό που εκτελεί ό,τι του ζητηθεί και στέλνει πίσω τις μετρήσεις του. Τρέχουν τα
-πραγματικά ``director.main`` (μελωδία δοκιμής αντί για μικρόφωνο) και ``client.main``
+πραγματικά ``director.main`` (πηγή δοκιμής αντί για μικρόφωνο) και ``client.main``
 (πραγματική αναπαραγωγή στα ηχεία), με προσωρινά κλειδιά/μητρώο σε φάκελο δοκιμής που
 διαγράφεται στο τέλος: η κανονική εγκατάσταση δεν αγγίζεται.
 
@@ -10,7 +10,8 @@
 συγχρονισμό αιθουσών (≤ 1 s), 5 λεπτά ήχο μαζί με heartbeat, φόρτο με εικονικούς
 Clients, επανεκκίνηση Director και «πάγωμα» δικτύου (TCP proxy στον Director, χωρίς
 admin). Τα ρολόγια ευθυγραμμίζονται μέσα από το κανάλι δοκιμής (μέτρηση τύπου NTP).
-Η μόνη ερώτηση: στο τέλος, αν η μελωδία ακούστηκε καθαρά.
+Οι μετρήσεις στέλνουν σιωπή (μετρά ο αύξων αριθμός, όχι ο ήχος)· μόνο στο τελευταίο
+βήμα παίζει ήπια μελωδία ~10 s και η μόνη ερώτηση είναι αν ακούστηκε καθαρά.
 
 ΜΟΝΟ ΓΙΑ ΔΟΚΙΜΕΣ: το κανάλι συντονισμού (TCP 50567, UDP beacon 50568) είναι χωρίς
 κρυπτογράφηση και μεταφέρει μόνο δημόσια πιστοποιητικά, εντολές και μετρήσεις.
@@ -297,7 +298,12 @@ class Agent:
         summary = "Η δοκιμή διακόπηκε"
         try:
             while True:
-                message = channel.receive()
+                try:
+                    message = channel.receive()
+                except OSError:      # ConnectionError/10053: ο Director σταμάτησε
+                    summary = ("Η σύνδεση με τον Director έκλεισε πριν από το τέλος "
+                               "(διακόπηκε η δοκιμή στον Director;)")
+                    break
                 cmd = message["cmd"]
                 try:
                     if cmd == "clock":
@@ -406,7 +412,11 @@ class NetworkTest:
         self.collected: dict[str, list[nm.ClientResult]] = {}
 
     # ------------------------------------------------------------ βοηθητικά
-    def step(self, title: str, function) -> None:
+    def step(self, title: str, function, minutes: float = 0) -> None:
+        number = len(self.results) + 1
+        print(f"\n... {number:02d}/{TOTAL}: {title}"
+              + (f" (περίπου {minutes:g} λεπτ{'ό' if minutes == 1 else 'ά'})" if minutes else "")
+              + time.strftime(" — %H:%M:%S"), flush=True)
         try:
             answer = function()
             state, detail = answer if isinstance(answer, tuple) else (
@@ -429,7 +439,7 @@ class NetworkTest:
     def kind(self, peer: Peer) -> str:
         return nm.path_kind(self.link, peer.info.get("link"))
 
-    def start_director(self) -> TimedProcess:
+    def start_director(self, tone: str = "silent") -> TimedProcess:
         self.starts += 1
         self.report_file = self.work / f"director-report-{self.starts}.jsonl"
         self.director = TimedProcess(
@@ -438,13 +448,13 @@ class NetworkTest:
              "--port", str(AUDIO_PORT), "--discovery-port", str(DISCOVERY_PORT),
              "--enrollment-port", str(ENROLL_PORT),
              "--director-id-file", str(self.work / "director.id"),
-             "--start-check-seconds", "2", "--test-tone", "melody",
+             "--start-check-seconds", "2", "--test-tone", tone,
              "--test-report", str(self.report_file)],
             label="Director", show=not self.quiet)
         if self.director.wait_for("[Manager] Εξυπηρέτηση: ενεργή", timeout=30) is None:
             raise RuntimeError("Ο Director δεν ξεκίνησε: " + " | ".join(self.director.lines[-5:]))
         if self.director.wait_for("Πηγή δοκιμής ενεργή", timeout=10) is None:
-            raise RuntimeError("Ο Director δεν ξεκίνησε τη μελωδία δοκιμής")
+            raise RuntimeError("Ο Director δεν ξεκίνησε την πηγή δοκιμής")
         self.command("none")
         return self.director
 
@@ -483,7 +493,16 @@ class NetworkTest:
 
     def announce(self, seconds: float) -> None:
         self.command("all")
-        time.sleep(seconds)
+        if seconds >= 120:          # μεγάλη ανακοίνωση: ένδειξη ότι η δοκιμή προχωρά
+            ended = time.monotonic() + seconds
+            while (left := ended - time.monotonic()) > 0:
+                time.sleep(min(60.0, left))
+                if ended - time.monotonic() > 1:
+                    print(f"    ... η μέτρηση συνεχίζεται (σιωπηλά), απομένουν "
+                          f"{(ended - time.monotonic()) / 60:.0f} λεπτ{'ό' if ended - time.monotonic() < 90 else 'ά'}",
+                          flush=True)
+        else:
+            time.sleep(seconds)
         self.command("none")
 
     def measure(self, since_us: int, after: dict[int, int], label: str
@@ -763,6 +782,14 @@ class NetworkTest:
         return all(oks), "\n       ".join(details)
 
     def s11_listen(self):
+        # Οι μετρήσεις στέλνουν σιωπή (ο αύξων μετρά, όχι ο ήχος)· μελωδία μόνο εδώ.
+        self.stop_director()
+        mark = 0
+        self.start_director("melody")
+        found = self.wait_joined([peer.client_id for peer in self.peers], mark, timeout=30)
+        if not all(found.values()):
+            return False, "οι Clients δεν ξανασυνδέθηκαν για την ακρόαση"
+        time.sleep(WARMUP_SECONDS)
         self.command("all")
         time.sleep(1)
         if not self.ask_user:
@@ -784,19 +811,22 @@ class NetworkTest:
             self.step("Βοηθοί Client, είδος δικτύου, ευθυγράμμιση ρολογιών", self.prepare)
             if self.results[-1][1] == "FAIL" and not self.peers:
                 raise RuntimeError("χωρίς βοηθούς Client")
-            for title, function in (
-                    ("Οι πραγματικοί Clients συνδέονται με mTLS", self.s02_connect),
-                    ("Καθυστέρηση αποστολή→ηχείο, 60 s συνεχής ανακοίνωση", self.s03_latency),
-                    ("Πρώτα/τελευταία 3 blocks: 10 ανακοινώσεις + 5 γρήγορες", self.s04_edges),
-                    ("Συγχρονισμός αιθουσών (≤ 1 s)", self.s05_sync),
+            for title, function, minutes in (
+                    ("Οι πραγματικοί Clients συνδέονται με mTLS", self.s02_connect, 0),
+                    ("Καθυστέρηση αποστολή→ηχείο, 60 s συνεχής ανακοίνωση",
+                     self.s03_latency, 1),
+                    ("Πρώτα/τελευταία 3 blocks: 10 ανακοινώσεις + 5 γρήγορες",
+                     self.s04_edges, 1),
+                    ("Συγχρονισμός αιθουσών (≤ 1 s)", self.s05_sync, 0),
                     ("Ήχος και heartbeat μαζί, χωρίς αποσύνδεση και χωρίς αύξηση "
-                     "καθυστέρησης", self.s06_long),
-                    ("Φόρτος: εικονικοί Clients μέσα από το πραγματικό δίκτυο", self.s07_load),
-                    ("Επανεκκίνηση Director (τερματισμός διεργασίας)", self.s08_restart),
-                    ("Πάγωμα δικτύου 10 s: εντοπισμός και επανασύνδεση", self.s09_freeze),
-                    ("Σύντομο κόλλημα 0,5 s: χωρίς αποσύνδεση", self.s10_short_freeze),
-                    ("Ακρόαση: καθαρός ήχος (ερώτηση)", self.s11_listen)):
-                self.step(title, function)
+                     "καθυστέρησης", self.s06_long, round(self.long_seconds / 60)),
+                    ("Φόρτος: εικονικοί Clients μέσα από το πραγματικό δίκτυο",
+                     self.s07_load, 1),
+                    ("Επανεκκίνηση Director (τερματισμός διεργασίας)", self.s08_restart, 0),
+                    ("Πάγωμα δικτύου 10 s: εντοπισμός και επανασύνδεση", self.s09_freeze, 0),
+                    ("Σύντομο κόλλημα 0,5 s: χωρίς αποσύνδεση", self.s10_short_freeze, 0),
+                    ("Ακρόαση: καθαρός ήχος (ερώτηση)", self.s11_listen, 0)):
+                self.step(title, function, minutes)
         except Exception as exc:  # noqa: BLE001
             self.results.append(("Απρόσμενο σφάλμα δοκιμής", "FAIL",
                                  f"{type(exc).__name__}: {exc}"))
