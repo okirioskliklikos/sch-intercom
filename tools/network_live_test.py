@@ -35,6 +35,7 @@ import subprocess
 import sys
 import tempfile
 import queue
+import shutil
 import threading
 import time
 import uuid
@@ -227,6 +228,30 @@ class VirtualClient:
             self.connection = None
 
 
+def firewalld_running() -> bool:
+    """Linux: τρέχει το firewalld (openSUSE, Fedora); ``firewall-cmd --state`` χωρίς root."""
+    if os.name == "nt" or shutil.which("firewall-cmd") is None:
+        return False
+    try:
+        result = subprocess.run(["firewall-cmd", "--state"], capture_output=True,
+                                text=True, timeout=5)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return result.stdout.strip() == "running"
+
+
+def discovery_hint(*, firewalld: bool | None = None) -> str:
+    """Τι να κάνει ο χρήστης όταν ο βοηθός δεν βρίσκει τον Director (4.4, Εκτέλεση 3)."""
+    if firewalld is None:
+        firewalld = firewalld_running()
+    if firewalld:
+        return (f"Δεν βρέθηκε ακόμη. Το firewalld τρέχει και κόβει το beacon (UDP {BEACON_PORT}).\n"
+                f"  Άνοιγμα μέχρι την επανεκκίνηση: sudo firewall-cmd --add-port={BEACON_PORT}/udp\n"
+                "  ή ξανά με --director-host <IP του Director>")
+    return ("Δεν βρέθηκε ακόμη. Ελέγξτε ότι ο Director τρέχει στο ίδιο δίκτυο και ότι το "
+            f"firewall επιτρέπει εισερχόμενο UDP {BEACON_PORT}, ή ξανά με --director-host <IP>")
+
+
 class Agent:
     def __init__(self, work: Path, director_host: str | None, name: str | None,
                  link: str | None, quiet: bool):
@@ -245,6 +270,7 @@ class Agent:
 
     def connect(self) -> Channel:
         host = self.director_host
+        attempts = 0
         while host is None:
             from shared.discovery import discover_candidates
             print("Αναζήτηση του Director δοκιμής στο δίκτυο...", flush=True)
@@ -252,6 +278,10 @@ class Agent:
             found = discover_candidates(udp_port=BEACON_PORT, timeout=3.0)
             if found:
                 host = found[0][0]
+                break
+            attempts += 1
+            if attempts == 3:
+                print(discovery_hint(), flush=True)
         print(f"Σύνδεση στον Director δοκιμής {host}:{CONTROL_PORT}", flush=True)
         sock = socket.create_connection((host, CONTROL_PORT), timeout=30)
         sock.settimeout(None)

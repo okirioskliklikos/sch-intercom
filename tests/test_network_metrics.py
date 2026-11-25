@@ -253,5 +253,21 @@ class HookTests(unittest.TestCase):
         self.assertEqual(len(MELODY_HZ), 6)
 
 
+class DiscoveryHintTests(unittest.TestCase):
+    """4.4 Εκτέλεση 3: firewalld στο openSUSE έκοβε το beacon."""
+
+    def test_firewalld_hint_gives_command(self):
+        from tools.network_live_test import discovery_hint
+        text = discovery_hint(firewalld=True)
+        self.assertIn("sudo firewall-cmd --add-port=50568/udp", text)
+        self.assertIn("--director-host", text)
+
+    def test_generic_hint(self):
+        from tools.network_live_test import discovery_hint
+        text = discovery_hint(firewalld=False)
+        self.assertNotIn("firewall-cmd", text)
+        self.assertIn("50568", text)
+
+
 if __name__ == "__main__":
     unittest.main()

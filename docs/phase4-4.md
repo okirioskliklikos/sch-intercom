@@ -40,6 +40,12 @@ TLS σε LAN/Wi-Fi, να μη χάνονται τα πρώτα/τελευταί�
 - Θύρες δοκιμής: ήχος TCP 50565, discovery UDP 50566, κανάλι δοκιμής TCP 50567,
   beacon δοκιμής UDP 50568, εγγραφή TCP 50569, proxy TCP 50571. Ο βοηθός βρίσκει τον
   Director με beacon. Αν δεν τον βρει, δίνουμε `--director-host` / `-DirectorHost`.
+- **Client Linux με firewalld (openSUSE, Fedora):** το firewalld κόβει το εισερχόμενο UDP,
+  οπότε ο βοηθός δεν βρίσκει τον Director. Πριν από τη δοκιμή:
+  `sudo firewall-cmd --add-port=50568/udp` (ισχύει μέχρι την επανεκκίνηση). Αν ο βοηθός
+  δεν βρει τον Director σε ~10 s, το λέει μόνος του με την εντολή.
+- **Director Windows:** με την πρώτη εκκίνηση το Windows Firewall ζητά άδεια για το python.
+  Αν δεν δοθεί, οι Clients δεν συνδέονται (TCP 50565/50567/50569/50571).
 - Ο βοηθός αναγνωρίζει αν η κάρτα δικτύου προς τον Director είναι καλώδιο ή Wi-Fi
   (Windows: `Get-NetAdapter`· Linux: `/sys/class/net/<κάρτα>/wireless`). Αλλιώς
   `--link lan|wifi`. Μια διαδρομή θεωρείται «καλώδιο» μόνο αν **και τα δύο άκρα** είναι
@@ -150,17 +156,17 @@ admin ούτε να βγει καλώδιο.
   για τις ριπές του Wi-Fi και σταδιακή επιστροφή σε μικρό στόχο (π.χ. 150 ms), όταν η ουρά
   μένει γεμάτη για ώρα. Το κριτήριο «αύξηση ≤ 100 ms» μένει, γιατί ακριβώς αυτό εντοπίζει.
 
-- **Discovery με Director Windows (Εκτέλεση 3):** ο Linux Client δεν βρήκε τον Director με
-  broadcast, ενώ με Director Linux (Εκτελέσεις 1, 2) ο Windows Client τον έβρισκε. Η δοκιμή
-  έγινε με `--director-host`. Δύο πιθανές αιτίες, που δεν έχουν ξεχωρίσει ακόμη:
-  1. Στα Windows το `255.255.255.255` βγαίνει μόνο από μία κάρτα δικτύου (αυτή με τη
-     χαμηλότερη μετρική, π.χ. Wi-Fi ή εικονική κάρτα Hyper-V/WSL), όχι απαραίτητα από το
-     καλώδιο. **Διόρθωση στον κώδικα:** στα Windows ο Manager στέλνει πλέον το beacon από
-     socket δεμένο σε κάθε IPv4 του υπολογιστή (`BroadcastSenders` στο
-     `shared/discovery.py`, νέα ανάγνωση των διευθύνσεων κάθε 30 s). Ο Client ήδη δοκιμάζει
-     με TLS κάθε υποψήφιο, άρα δύο IP του ίδιου Manager δεν πειράζουν.
-  2. Το firewalld του openSUSE (ζώνη public) κόβει εισερχόμενο UDP. Αφορά μόνο Clients
-     Linux (στην παραγωγή οι Clients είναι Windows) και διορθώνεται με άνοιγμα της θύρας.
+- **Discovery με Director Windows (Εκτέλεση 3):** ο Linux Client (openSUSE) δεν βρήκε τον
+  Director με broadcast. **Αιτία: το firewalld** (ζώνη public) κόβει το εισερχόμενο UDP.
+  Επιβεβαιώθηκε 25/11/2026: χωρίς αλλαγή στο firewall δεν τον βρήκε, με
+  `firewall-cmd --add-port=50568/udp` τον βρήκε αμέσως. Αφορά μόνο Clients Linux (στην
+  παραγωγή οι Clients είναι Windows). Ο βοηθός πλέον το εντοπίζει και τυπώνει την εντολή.
+  Επιπλέον, για ασφάλεια: στα Windows το `255.255.255.255` βγαίνει μόνο από μία κάρτα
+  δικτύου (αυτή με τη χαμηλότερη μετρική, π.χ. Wi-Fi ή εικονική κάρτα Hyper-V/WSL). Ο
+  Manager στα Windows στέλνει πλέον το beacon από socket δεμένο σε κάθε IPv4 του
+  υπολογιστή (`BroadcastSenders` στο `shared/discovery.py`). Στην ίδια δοκιμή του
+  25/11/2026 το beacon με αυτόν τον τρόπο έφτασε κανονικά στον Linux Client. Ο Client ήδη
+  δοκιμάζει με TLS κάθε υποψήφιο, άρα δύο IP του ίδιου Manager δεν πειράζουν.
   Για τον installer: οι Clients Windows χρειάζονται κανόνα firewall για εισερχόμενο UDP
   discovery (50556) και ο Manager για TCP 50555.
 
