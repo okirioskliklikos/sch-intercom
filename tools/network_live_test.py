@@ -246,11 +246,12 @@ class Agent:
     def connect(self) -> Channel:
         host = self.director_host
         while host is None:
-            from shared.discovery import discover
+            from shared.discovery import discover_candidates
             print("Αναζήτηση του Director δοκιμής στο δίκτυο...", flush=True)
-            found = discover(udp_port=BEACON_PORT, timeout=3.0)
-            if found is not None:
-                host = found[0]
+            # Ο Director με καλώδιο και Wi-Fi στέλνει από δύο IP· αρκεί η πρώτη.
+            found = discover_candidates(udp_port=BEACON_PORT, timeout=3.0)
+            if found:
+                host = found[0][0]
         print(f"Σύνδεση στον Director δοκιμής {host}:{CONTROL_PORT}", flush=True)
         sock = socket.create_connection((host, CONTROL_PORT), timeout=30)
         sock.settimeout(None)
