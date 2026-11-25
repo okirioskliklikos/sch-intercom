@@ -34,6 +34,7 @@ import ssl
 import subprocess
 import sys
 import tempfile
+import queue
 import threading
 import time
 import uuid
@@ -109,6 +110,35 @@ def link_type(ip: str) -> str | None:
 
 def link_label(link: str | None) -> str:
     return {"lan": "καλώδιο", "wifi": "Wi-Fi"}.get(link, "άγνωστο (κριτήρια Wi-Fi)")
+
+
+class Inbox:
+    """Λήψη από το κανάλι σε δικό της νήμα, ώστε το Ctrl+C να δουλεύει και στα Windows
+    (εκεί ένα μπλοκαρισμένο recv/accept δεν διακόπτεται από το Ctrl+C)."""
+
+    def __init__(self, channel: Channel):
+        self.channel = channel
+        self.items: queue.Queue = queue.Queue()
+        threading.Thread(target=self._run, daemon=True, name="test-inbox").start()
+
+    def _run(self) -> None:
+        while True:
+            try:
+                self.items.put(self.channel.receive())
+            except (OSError, ValueError) as exc:
+                self.items.put(exc)
+                return
+
+    def get(self) -> dict:
+        while True:
+            try:
+                item = self.items.get(timeout=0.5)
+            except queue.Empty:
+                continue
+            if isinstance(item, Exception):
+                self.items.put(item)        # και οι επόμενες κλήσεις βλέπουν το κλείσιμο
+                raise item if isinstance(item, OSError) else ConnectionError(str(item))
+            return item
 
 
 class TimedProcess(Process):
@@ -298,11 +328,12 @@ class Agent:
 
     def run(self) -> int:
         channel = self.connect()
+        inbox = Inbox(channel)
         summary = "Η δοκιμή διακόπηκε"
         try:
             while True:
                 try:
-                    message = channel.receive()
+                    message = inbox.get()
                 except OSError:      # ConnectionError/10053: ο Director σταμάτησε
                     summary = ("Η σύνδεση με τον Director έκλεισε πριν από το τέλος "
                                "(διακόπηκε η δοκιμή στον Director;)")
@@ -354,6 +385,7 @@ class Peer:
         self.address = address
         self.room = room_for(index)
         self.clock = nm.ClockMap()
+        self.inbox = Inbox(channel)
         self.info: dict = {}
         self.lock = threading.Lock()
 
@@ -368,7 +400,7 @@ class Peer:
     def ask(self, cmd: str, **args) -> dict:
         with self.lock:
             self.channel.send(cmd=cmd, **args)
-            reply = self.channel.receive()
+            reply = self.inbox.get()
         if reply.get("error"):
             raise RuntimeError(f"{self.name}: {reply['error']}")
         return reply
@@ -556,9 +588,12 @@ class NetworkTest:
                       "tools\\network_live_test.ps1\n"
                       "(Αν δεν βρεθεί αυτόματα, προσθέστε --director-host / -DirectorHost "
                       "<IP αυτού του υπολογιστή>.)\n", flush=True)
-            server.settimeout(600)
+            server.settimeout(0.5)          # Ctrl+C και στα Windows
             while len(self.peers) < self.clients:
-                connection, address = server.accept()
+                try:
+                    connection, address = server.accept()
+                except socket.timeout:
+                    continue
                 connection.settimeout(None)
                 connection.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
                 peer = Peer(len(self.peers), Channel(connection), address[0])
