@@ -211,6 +211,8 @@ def play_stream(
         block = jitter.pop()
         if test_report is not None and jitter.underruns > underruns:
             test_report.event("underrun")
+        if test_report is not None and jitter.last_tag is None and jitter.playing:
+            test_report.event("silence")      # ένα block σιωπής μέσα σε ανακοίνωση
         if test_report is not None and jitter.last_tag is not None:
             # Πότε θα ακουστεί το block: τώρα + καθυστέρηση εξόδου που δίνει το PortAudio.
             try:

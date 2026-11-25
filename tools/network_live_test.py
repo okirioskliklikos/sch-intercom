@@ -211,6 +211,7 @@ class Agent:
         self.virtual: list[VirtualClient] = []
         self.room = ""
         self.host = ""
+        self.buffer_ms: int | None = None
 
     def connect(self) -> Channel:
         host = self.director_host
@@ -230,6 +231,7 @@ class Agent:
     def hello(self, message: dict) -> dict:
         self.trust.write_text(message["director_cert"], encoding="ascii")
         self.room = message["room"]
+        self.buffer_ms = message.get("buffer_ms")
         folder = self.work / "real"
         client_id, _ = load_identity(folder / "client.json", room_override=self.room)
         cert, _, _ = create_device_identity(folder / "credentials", client_id)
@@ -256,7 +258,8 @@ class Agent:
              "--registry-seen-file", str(folder / "registry-seen.json"),
              "--volume-recovery-file", str(folder / "volume-recovery.json"),
              "--room", self.room, "--host", self.host, "--port", str(port),
-             "--enrollment-port", str(ENROLL_PORT), "--test-report", str(self.report)],
+             "--enrollment-port", str(ENROLL_PORT), "--test-report", str(self.report),
+             *(["--buffer-ms", str(self.buffer_ms)] if self.buffer_ms else [])],
             label=f"Client {self.name}", show=not self.quiet)
         if self.client.wait_for("Client ID:", timeout=30) is None:
             raise RuntimeError("Ο Client δεν ξεκίνησε· " + " | ".join(self.client.lines[-5:]))
@@ -268,7 +271,7 @@ class Agent:
             self.client = None
 
     def events(self, after: int) -> dict:
-        wanted = ("play", "underrun", "connected", "lost", "stop")
+        wanted = ("play", "underrun", "silence", "connected", "lost", "stop")
         events = [event for event in read_report(self.report)
                   if event.get("t", 0) > after and event.get("ev") in wanted]
         return {"events": events}
@@ -389,7 +392,7 @@ class Peer:
 class NetworkTest:
     def __init__(self, work: Path, *, clients: int, virtual: int, ask: bool,
                  quiet: bool, loopback: bool, link: str | None,
-                 long_seconds: int):
+                 long_seconds: int, buffer_ms: int | None = None):
         self.work = work
         self.clients = clients
         self.virtual = virtual
@@ -398,6 +401,7 @@ class NetworkTest:
         self.loopback = loopback
         self.forced_link = link
         self.long_seconds = long_seconds
+        self.buffer_ms = buffer_ms
         self.cert = work / "tls" / "director-tls.crt"
         self.key = work / "tls" / "director-tls.key"
         self.registry = work / "clients-registry.json"
@@ -572,7 +576,8 @@ class NetworkTest:
         lines = []
         for peer in self.peers:
             peer.info = peer.ask("hello", director_cert=self.cert.read_text(encoding="ascii"),
-                                 room=peer.room, virtual=self.virtual)
+                                 room=peer.room, virtual=self.virtual,
+                                 buffer_ms=self.buffer_ms)
             registry.approve(peer.client_id, peer.room, peer.info["real"]["pem"].encode("ascii"),
                              name=peer.name[:64])
             for index, item in enumerate(peer.info["virtual"]):
@@ -588,7 +593,8 @@ class NetworkTest:
                          f"ρολόι ±{peer.clock.error_ms:.1f} ms")
             if peer.clock.error_ms > 50:
                 bad.append(peer.name)
-        detail = (f"Director: {link_label(self.link)} | " + " | ".join(lines)
+        detail = (f"Director: {link_label(self.link)}"
+                  + (f", ουρά Client {self.buffer_ms} ms" if self.buffer_ms else "") + " | " + " | ".join(lines)
                   + (f" | ασταθές ρολόι: {', '.join(bad)}" if bad else ""))
         return ("FAIL" if bad else "PASS"), detail
 
@@ -894,6 +900,8 @@ def main() -> int:
                         help="director: εικονικοί Clients ανά υπολογιστή Client (default 20)")
     parser.add_argument("--long-seconds", type=int, default=300,
                         help="director: διάρκεια της μεγάλης ανακοίνωσης (default 300)")
+    parser.add_argument("--client-buffer-ms", type=int, default=None,
+                        help="director: --buffer-ms των Clients (προεπιλογή του Client: 250)")
     parser.add_argument("--no-ask", action="store_true",
                         help="director: χωρίς την τελική ερώτηση (SKIP)")
     parser.add_argument("--loopback", action="store_true",
@@ -921,7 +929,8 @@ def main() -> int:
                                ask=not (args.no_ask or args.loopback),
                                quiet=not args.verbose,
                                loopback=args.loopback, link=args.link,
-                               long_seconds=args.long_seconds).run()
+                               long_seconds=args.long_seconds,
+                               buffer_ms=args.client_buffer_ms).run()
         return Agent(work, args.director_host, args.name, args.link, not args.verbose).run()
 
 

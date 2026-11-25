@@ -13,8 +13,6 @@ import statistics
 
 BLOCK_US = 20_000
 EDGE_BLOCKS = 3          # πρώτα/τελευταία blocks κάθε ανακοίνωσης που πρέπει να ακουστούν
-#: Σιωπή που προσθέτει ένα κενό ουράς στον Client (prefill 120 ms = 6 blocks).
-UNDERRUN_BLOCKS = 6
 #: Κριτήρια ανά είδος διαδρομής (Wi-Fi αν οποιοδήποτε άκρο είναι Wi-Fi ή άγνωστο).
 LIMITS = {
     "lan": {"p95_ms": 500, "interrupt": 0.01},
@@ -129,6 +127,7 @@ class ClientResult:
     played: int = 0
     lost: int = 0
     underruns: int = 0
+    silence: int = 0          # blocks σιωπής που έπαιξε ο Client μέσα σε ανακοίνωση
     edges_ok: int = 0
     edges_total: int = 0
     latencies_ms: list[float] = field(default_factory=list)
@@ -139,7 +138,7 @@ class ClientResult:
     def interrupt(self) -> float:
         if not self.blocks:
             return 0.0
-        return min(1.0, (self.lost + UNDERRUN_BLOCKS * self.underruns) / self.blocks)
+        return min(1.0, (self.lost + self.silence) / self.blocks)
 
     def summary(self) -> str:
         if not self.latencies_ms:
@@ -147,7 +146,7 @@ class ClientResult:
         return (f"{self.name}: καθυστέρηση διάμεση {statistics.median(self.latencies_ms):.0f} / "
                 f"p95 {percentile(self.latencies_ms, 0.95):.0f} / "
                 f"max {max(self.latencies_ms):.0f} ms, χαμένα {self.lost}/{self.blocks}, "
-                f"κενά {self.underruns}, άκρα {self.edges_ok}/{self.edges_total}")
+                f"κενά {self.underruns} ({self.silence * 20} ms σιωπή), άκρα {self.edges_ok}/{self.edges_total}")
 
 
 def analyse(name: str, runs: list[Run], events: list[dict], clock: ClockMap) -> ClientResult:
@@ -174,6 +173,8 @@ def analyse(name: str, runs: list[Run], events: list[dict], clock: ClockMap) -> 
         end = clock.offset(run.end_us) + run.end_us + 1_000_000
         result.underruns += sum(1 for event in events if event.get("ev") == "underrun"
                                 and start <= event["t"] <= end)
+        result.silence += sum(1 for event in events if event.get("ev") == "silence"
+                              and start <= event["t"] <= end)
     return result
 
 

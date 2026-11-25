@@ -61,6 +61,12 @@ class JitterBuffer:
         with self._lock:
             return "ανακοίνωση" if self._active else "αναμονή"
 
+    @property
+    def playing(self) -> bool:
+        """Ανακοίνωση σε εξέλιξη μετά το πρώτο block (σιωπή τώρα = κενό, όχι prefill)."""
+        with self._lock:
+            return self._active and self._started and not self._draining
+
     def standby(self) -> None:
         """Καθαρή αναμονή χωρίς underruns ούτε καταχώριση επιπέδων."""
         with self._lock:

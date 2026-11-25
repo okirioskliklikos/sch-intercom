@@ -94,15 +94,35 @@ class AnalyseTests(unittest.TestCase):
         result = nm.analyse("A", runs, plays(range(4), 100_000), clock())
         self.assertEqual(result.edges_total, 4)
 
-    def test_underruns_inside_run_count_as_interruptions(self):
+    def test_silence_inside_run_counts_as_interruption(self):
         runs = nm.runs_from_pubs(pubs(0, 300))
-        events = plays(range(300), 100_000) + [{"ev": "underrun", "t": 1_500_000},
-                                                {"ev": "underrun", "t": 99_000_000}]
+        silence = [{"ev": "silence", "t": 1_500_000 + index * nm.BLOCK_US} for index in range(6)]
+        events = (plays(range(300), 100_000) + [{"ev": "underrun", "t": 1_500_000},
+                                                {"ev": "underrun", "t": 99_000_000},
+                                                {"ev": "silence", "t": 99_000_000}] + silence)
         result = nm.analyse("A", runs, events, clock())
-        self.assertEqual(result.underruns, 1)            # το δεύτερο είναι εκτός ανακοίνωσης
-        self.assertAlmostEqual(result.interrupt, nm.UNDERRUN_BLOCKS / 300)
+        self.assertEqual(result.underruns, 1)            # τα άλλα είναι εκτός ανακοίνωσης
+        self.assertEqual(result.silence, 6)
+        self.assertAlmostEqual(result.interrupt, 6 / 300)
         self.assertTrue(nm.check(result, "wifi")[0])     # 2% ≤ 3%
         self.assertFalse(nm.check(result, "lan")[0])     # 2% > 1%
+        self.assertIn("120 ms σιωπή", result.summary())
+
+    def test_jitter_playing_only_after_first_block(self):
+        jitter = JitterBuffer(5, 4, prefill_blocks=2)
+        jitter.begin_announcement()
+        jitter.push(bytes(4), 1)
+        jitter.pop()                                     # prefill: σιωπή, όχι κενό
+        self.assertFalse(jitter.playing)
+        jitter.push(bytes(4), 2)
+        jitter.pop()
+        self.assertTrue(jitter.playing)
+        jitter.pop()
+        jitter.pop()                                     # άδεια ουρά: κενό μέσα στην ανακοίνωση
+        self.assertIsNone(jitter.last_tag)
+        self.assertTrue(jitter.playing)
+        jitter.finish_announcement()
+        self.assertFalse(jitter.playing)
 
     def test_latency_limit_depends_on_path(self):
         runs = nm.runs_from_pubs(pubs(0, 100))
