@@ -410,13 +410,16 @@ class NetworkTest:
         self.helpers: list[Process] = []
         self.link: str | None = None
         self.collected: dict[str, list[nm.ClientResult]] = {}
+        self.stamp = time.strftime("%d/%m/%Y %H:%M")
 
     # ------------------------------------------------------------ βοηθητικά
     def step(self, title: str, function, minutes: float = 0) -> None:
         number = len(self.results) + 1
-        print(f"\n... {number:02d}/{TOTAL}: {title}"
-              + (f" (περίπου {minutes:g} λεπτ{'ό' if minutes == 1 else 'ά'})" if minutes else "")
-              + time.strftime(" — %H:%M:%S"), flush=True)
+        start = (f"... {number:02d}/{TOTAL}: {title}"
+                 + (f" (περίπου {minutes:g} λεπτ{'ό' if minutes == 1 else 'ά'})" if minutes else "")
+                 + time.strftime(" — %H:%M:%S"))
+        print("\n" + start, flush=True)
+        self.tell_peers(start)
         try:
             answer = function()
             state, detail = answer if isinstance(answer, tuple) else (
@@ -429,6 +432,10 @@ class NetworkTest:
         text = f"{state} {len(self.results):02d}/{TOTAL}: {title}" + (
             f"\n       {detail}" if detail else "")
         print(f"\n{text}\n", flush=True)
+        self.tell_peers(text)
+
+    def tell_peers(self, text: str) -> None:
+        """Ίδια ενημέρωση και στην οθόνη κάθε υπολογιστή Client."""
         for peer in self.peers:
             try:
                 with peer.lock:
@@ -497,10 +504,12 @@ class NetworkTest:
             ended = time.monotonic() + seconds
             while (left := ended - time.monotonic()) > 0:
                 time.sleep(min(60.0, left))
-                if ended - time.monotonic() > 1:
-                    print(f"    ... η μέτρηση συνεχίζεται (σιωπηλά), απομένουν "
-                          f"{(ended - time.monotonic()) / 60:.0f} λεπτ{'ό' if ended - time.monotonic() < 90 else 'ά'}",
-                          flush=True)
+                remaining = ended - time.monotonic()
+                if remaining > 1:
+                    line = (f"    ... η μέτρηση συνεχίζεται (σιωπηλά), απομένουν "
+                            f"{remaining / 60:.0f} λεπτ{'ό' if remaining < 90 else 'ά'}")
+                    print(line, flush=True)
+                    self.tell_peers(line.strip())
         else:
             time.sleep(seconds)
         self.command("none")
@@ -838,10 +847,26 @@ class NetworkTest:
         passed = sum(state == "PASS" for _, state, _ in self.results)
         skipped = sum(state == "SKIP" for _, state, _ in self.results)
         failed = sum(state == "FAIL" for _, state, _ in self.results)
-        print("\n" + "\n".join(f"{state}  {title}" for title, state, _ in self.results))
-        text = (f"ΣΥΝΟΛΟ: {passed}/{TOTAL} PASS" + (f", {skipped} SKIP" if skipped else "")
-                + (f", {failed} FAIL" if failed else "") + f" ({seconds / 60:.1f} λεπτά)")
-        print(text, flush=True)
+        total = (f"ΣΥΝΟΛΟ: {passed}/{TOTAL} PASS" + (f", {skipped} SKIP" if skipped else "")
+                 + (f", {failed} FAIL" if failed else "") + f" ({seconds / 60:.1f} λεπτά)")
+        lines = [f"Δοκιμή 4.4 σε πραγματικό δίκτυο — {self.stamp} — Director "
+                 f"{platform.system()} {platform.release()}, Python {platform.python_version()}",
+                 ""]
+        for number, (title, state, detail) in enumerate(self.results, 1):
+            lines.append(f"{state}  {number:02d}. {title}")
+            lines += [f"       {item.strip()}" for item in detail.splitlines() if item.strip()]
+        lines += ["", total]
+        text = "\n".join(lines)
+        print("\n" + "=" * 70 + "\n" + text, flush=True)
+        saved = None
+        try:
+            folder = Path(__file__).resolve().parents[1] / "test-results"
+            folder.mkdir(exist_ok=True)
+            saved = folder / f"network-{time.strftime('%Y%m%d-%H%M')}.txt"
+            saved.write_text(text + "\n", encoding="utf-8")
+            print(f"Αποθηκεύτηκε: {saved}", flush=True)
+        except OSError as exc:
+            print(f"Δεν αποθηκεύτηκε η αναφορά: {exc}", flush=True)
         for peer in self.peers:
             try:
                 peer.channel.send(cmd="done", text=text)
