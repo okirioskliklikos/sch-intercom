@@ -252,6 +252,43 @@ def discovery_hint(*, firewalld: bool | None = None) -> str:
             f"firewall επιτρέπει εισερχόμενο UDP {BEACON_PORT}, ή ξανά με --director-host <IP>")
 
 
+def own_addresses() -> list[str]:
+    """IPv4 του Director για να τις πληκτρολογήσει ο χρήστης στους Clients."""
+    from shared.discovery import local_ipv4_addresses
+    found = set(local_ipv4_addresses())
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as probe:
+            probe.connect(("192.0.2.1", 9))      # χωρίς αποστολή· μόνο επιλογή κάρτας
+            found.add(probe.getsockname()[0])
+    except OSError:
+        pass
+    return sorted(address for address in found if not address.startswith("127."))
+
+
+def ask_director_host(read=input, interactive=None) -> str | None:
+    """Σχολικό PC (φορητό zip): το firewall κόβει συνήθως το beacon, άρα ρωτάμε την IP.
+
+    Μόνο σε κονσόλα· Enter = συνέχεια αναζήτησης.
+    """
+    if interactive is None:
+        interactive = sys.stdin is not None and sys.stdin.isatty()
+    if not interactive:
+        return None
+    try:
+        answer = read("IP του Director (τη δείχνει ο Director στην αρχή· "
+                      "Enter = συνέχεια αναζήτησης): ").strip()
+    except EOFError:
+        return None
+    if not answer:
+        return None
+    try:
+        socket.getaddrinfo(answer, CONTROL_PORT)
+    except OSError:
+        print(f"Μη έγκυρη διεύθυνση: {answer}", flush=True)
+        return None
+    return answer
+
+
 class Agent:
     def __init__(self, work: Path, director_host: str | None, name: str | None,
                  link: str | None, quiet: bool):
@@ -282,6 +319,7 @@ class Agent:
             attempts += 1
             if attempts == 3:
                 print(discovery_hint(), flush=True)
+                host = ask_director_host()
         print(f"Σύνδεση στον Director δοκιμής {host}:{CONTROL_PORT}", flush=True)
         sock = socket.create_connection((host, CONTROL_PORT), timeout=30)
         sock.settimeout(None)
@@ -617,8 +655,11 @@ class NetworkTest:
                       "    Linux:   tools/network_live_test.sh client\n"
                       "    Windows: powershell -ExecutionPolicy Bypass -File "
                       "tools\\network_live_test.ps1\n"
+                      "    Φορητό zip: διπλό κλικ στο run-client.bat\n"
                       "(Αν δεν βρεθεί αυτόματα, προσθέστε --director-host / -DirectorHost "
-                      "<IP αυτού του υπολογιστή>.)\n", flush=True)
+                      "<IP αυτού του υπολογιστή>.)\n"
+                      f"IP αυτού του υπολογιστή: {', '.join(own_addresses()) or 'άγνωστη'}\n",
+                      flush=True)
             server.settimeout(0.5)          # Ctrl+C και στα Windows
             while len(self.peers) < self.clients:
                 try:

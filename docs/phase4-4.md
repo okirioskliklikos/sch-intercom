@@ -186,11 +186,58 @@ admin ούτε να βγει καλώδιο.
   Το πλήρες όριο ελέγχεται σε loopback στο `failure_live_test` (βήμα 14).
 - Πραγματική αποσύνδεση καλωδίου ή Wi-Fi (εδώ με proxy).
 
-## 6. Βήμα 2: σχολείο (εκκρεμεί)
+## 6. Βήμα 2: σχολείο
 
-Απόφαση χρήστη 25/11/2026: δεν γίνεται τώρα· μένει ως εκκρεμότητα στο σχέδιο.
+Αρχικά αναβλήθηκε (απόφαση χρήστη 25/11/2026). Ξεκίνησε την ίδια μέρα με τη διάταξη:
 
-Φορητό zip σε USB, χωρίς εγκατάσταση, admin ή internet: `tools\make_portable.ps1` (embeddable
-Python, πακέτα, κώδικας) και `run-director` / `run-client` (`.ps1` και `.bat`). Director το
-Linux λάπτοπ, ώστε να μη χρειαστεί άδεια Firewall. Clients ένα PC με καλώδιο και ένα σε
-Wi-Fi. Ο Client συνδέεται μόνο προς τα έξω με `-DirectorHost`.
+- **Director:** το laptop Windows 11 του χρήστη, με τον κώδικα (όπως στο σπίτι).
+- **Clients:** ένα σχολικό PC Windows 11 με **καλώδιο** και ένα Windows 10 σε **Wi-Fi**,
+  στην **ίδια αίθουσα**. Έτσι, μία εκτέλεση μετρά καλώδιο και Wi-Fi, Windows 10 και
+  συγχρονισμό 2 πραγματικών Clients (βήμα 5). Στο βήμα 11 ακούγεται και με το αυτί αν τα
+  δύο ηχεία «πέφτουν» το ένα πάνω στο άλλο. Διαφορετικές αίθουσες δεν αλλάζουν κάτι για το
+  δίκτυο.
+
+### 6.1 Φορητό zip για τους Clients
+
+Στο laptop (με internet), μία φορά:
+
+```
+powershell -ExecutionPolicy Bypass -File tools\make_portable.ps1
+```
+
+Φτιάχνει το `dist\sch-intercom-client.zip` (~15 MB στα Windows) με:
+
+- `python\`: ενσωματωμένη Python ίδιας έκδοσης 3.x με το `.venv`, από το python.org. Αν η
+  έκδοση είναι «μόνο ασφάλειας» και δεν έχει embeddable zip, παίρνει την πιο πρόσφατη
+  του ίδιου κλάδου που έχει. Περιέχει και τα πακέτα sounddevice, cryptography και pycaw
+  (wheels για Windows x64).
+- `app\`: `client`, `shared`, `director` και `tools` (χωρίς tests).
+- `run-client.bat` και `README.txt`.
+
+Στο σχολικό PC: αποσυμπίεση οπουδήποτε (π.χ. Επιφάνεια εργασίας) και διπλό κλικ στο
+`run-client.bat`. Δεν χρειάζεται εγκατάσταση, admin ή internet, και δεν μένει τίποτα εκτός
+από τον φάκελο. Ο βοηθός μόνο συνδέεται προς τον Director, άρα δεν εμφανίζεται ερώτηση
+firewall. Αυτό σημαίνει όμως ότι το beacon συνήθως δεν φτάνει: μετά από ~10 s ο βοηθός ρωτά
+την IP του Director, την οποία ο Director τυπώνει όταν περιμένει τους Clients. Εναλλακτικά:
+`run-client.bat --director-host 192.168.x.y`.
+
+### 6.2 Director στο laptop
+
+```
+powershell -ExecutionPolicy Bypass -File tools\network_live_test.ps1 -Role director -Clients 2
+```
+
+Στο σχολικό δίκτυο τα Windows θα ζητήσουν άδεια firewall για την Python: πρέπει να δοθεί.
+Αν το δίκτυο είναι «Δημόσιο» και οι Clients δεν συνδέονται, σε PowerShell ως διαχειριστής:
+
+```
+New-NetFirewallRule -DisplayName "sch-intercom δοκιμή 4.4" -Direction Inbound -Protocol TCP -LocalPort 50565,50567,50569,50571 -Action Allow -Profile Any
+Remove-NetFirewallRule -DisplayName "sch-intercom δοκιμή 4.4"     # μετά τη δοκιμή
+```
+
+### 6.3 Πρόβα στο σπίτι
+
+Director στο Linux, Client στο laptop από το zip (όχι από τον κώδικα). Έτσι ελέγχεται ότι η
+ενσωματωμένη Python, ο ήχος και η ερώτηση IP δουλεύουν πριν από το σχολείο.
+
+Ρίσκο: το antivirus του σχολείου μπορεί να μπλοκάρει το άγνωστο `python.exe` του zip.
