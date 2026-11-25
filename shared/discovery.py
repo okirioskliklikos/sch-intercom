@@ -124,8 +124,8 @@ def announce(stop, identifier: str, tcp_port: int, *,
     """Broadcast και προαιρετικά loopback test ports, κάθε φορά με live rv."""
     if inst is None:
         inst = str(uuid.uuid4())
-    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sender:
-        sender.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+    senders = BroadcastSenders(udp_port)
+    try:
         while not stop.is_set():
             try:
                 version = registry_version() if callable(registry_version) else (
@@ -133,12 +133,93 @@ def announce(stop, identifier: str, tcp_port: int, *,
                 packet = encode_beacon(identifier, tcp_port, school=school or
                                        "00000000-0000-0000-0000-000000000000",
                                        inst=inst, rv=version, host=host)
-                sender.sendto(packet, ("255.255.255.255", udp_port))
+                senders.send(packet)
                 for target in extra_ports:
-                    sender.sendto(packet, ("127.0.0.1", target))
+                    senders.default.sendto(packet, ("127.0.0.1", target))
             except (OSError, ValueError) as exc:
                 report(f"[Discovery] Αποτυχία broadcast: {exc}")
             stop.wait(interval)
+    finally:
+        senders.close()
+
+
+#: Κάθε πόσο ξαναδιαβάζονται οι διευθύνσεις του υπολογιστή (DHCP, Wi-Fi που αλλάζει).
+INTERFACE_REFRESH_SECONDS = 30.0
+
+
+def local_ipv4_addresses() -> list[str]:
+    """IPv4 όλων των καρτών δικτύου (εκτός loopback), όπως τις δίνει το σύστημα."""
+    try:
+        items = socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET)
+    except OSError:
+        return []
+    return sorted({item[4][0] for item in items if not item[4][0].startswith("127.")})
+
+
+class BroadcastSenders:
+    """Broadcast από κάθε κάρτα δικτύου.
+
+    Στα Windows το 255.255.255.255 βγαίνει μόνο από μία κάρτα (συνήθως αυτή με τη
+    χαμηλότερη μετρική, π.χ. Wi-Fi ή εικονική κάρτα Hyper-V/WSL), οπότε ένας Manager με
+    καλώδιο μπορεί να μη φαίνεται στους Clients (4.4, Εκτέλεση 3). Εκεί στέλνουμε από socket
+    δεμένο σε κάθε IPv4 του υπολογιστή. Στο Linux το broadcast ακολουθεί τον πίνακα
+    δρομολόγησης όπως και πριν, άρα μένει ένα socket.
+    """
+
+    def __init__(self, udp_port: int, *, per_interface: bool | None = None,
+                 addresses=local_ipv4_addresses, clock=time.monotonic) -> None:
+        self.udp_port = udp_port
+        self.per_interface = os.name == "nt" if per_interface is None else per_interface
+        self._addresses = addresses
+        self._clock = clock
+        self.default = self._open()
+        self.bound: dict[str, socket.socket] = {}
+        self._refreshed = None
+
+    @staticmethod
+    def _open(address: str | None = None) -> socket.socket:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+        if address is not None:
+            try:
+                sock.bind((address, 0))
+            except OSError:
+                sock.close()
+                raise
+        return sock
+
+    def refresh(self) -> None:
+        now = self._clock()
+        if self._refreshed is not None and now - self._refreshed < INTERFACE_REFRESH_SECONDS:
+            return
+        self._refreshed = now
+        wanted = set(self._addresses()) if self.per_interface else set()
+        for address in set(self.bound) - wanted:
+            self.bound.pop(address).close()
+        for address in wanted - set(self.bound):
+            try:
+                self.bound[address] = self._open(address)
+            except OSError:
+                continue
+
+    def send(self, packet: bytes) -> int:
+        """Πλήθος καρτών από τις οποίες στάλθηκε· σφάλμα μόνο αν απέτυχαν όλες."""
+        self.refresh()
+        sent, error = 0, None
+        for sock in list(self.bound.values()) or [self.default]:
+            try:
+                sock.sendto(packet, ("255.255.255.255", self.udp_port))
+                sent += 1
+            except OSError as exc:
+                error = exc
+        if not sent and error is not None:
+            raise error
+        return sent
+
+    def close(self) -> None:
+        for sock in [self.default, *self.bound.values()]:
+            sock.close()
+        self.bound.clear()
 
 
 class BeaconWatcher:

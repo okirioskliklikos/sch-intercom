@@ -90,8 +90,12 @@ def pump_frames(
     report_every_s: float = REPORT_EVERY_SECONDS,
     volume: AnnouncementVolume | AudioPolicyWorker | None = None,
     settings_callback=None,
+    test_report=None,
 ) -> None:
-    """PCM/έλεγχος στην ίδια κατεύθυνση TCP, χωρίς reconnect σε αναμονή."""
+    """PCM/έλεγχος στην ίδια κατεύθυνση TCP, χωρίς reconnect σε αναμονή.
+
+    test_report: μόνο στις δοκιμές 4.4 (``--test-report``)· καταγράφει λήψεις και STOP.
+    """
     received = 0
     in_announcement = False
     stop_received_at: float | None = None
@@ -116,8 +120,11 @@ def pump_frames(
                 drained_at = None
                 delay.reset()
                 in_announcement = True
-            delay.record(message.seq, message.timestamp_us, clock_us())
-            jitter.push(message.pcm)
+            arrived_us = clock_us()
+            delay.record(message.seq, message.timestamp_us, arrived_us)
+            if test_report is not None:
+                test_report.event("rx", t=arrived_us, seq=message.seq, ts=message.timestamp_us)
+            jitter.push(message.pcm, message.seq)
             received += 1
         elif message.kind == MESSAGE_CLIENT_SETTINGS:
             if settings_callback is not None:
@@ -127,6 +134,8 @@ def pump_frames(
                     print(f"[Client] Αποτυχία τοπικής αποθήκευσης στοιχείων: {exc}",
                           flush=True)
         elif message.kind == MESSAGE_STREAM_STOP:
+            if test_report is not None:
+                test_report.event("stop", underruns=jitter.underruns, dropped=jitter.dropped)
             if in_announcement:
                 jitter.finish_announcement()
                 in_announcement = False
@@ -171,6 +180,7 @@ def play_stream(
     mute_others: bool = False,
     recovery_path: Path | None = None,
     settings_callback=None,
+    test_report=None,
 ) -> None:
     import sounddevice as sd
 
@@ -192,10 +202,25 @@ def play_stream(
             apps=ApplicationAudio(log=lambda msg: print(msg, flush=True))
             if mute_others else None))
 
+    output_latency_us = int(DEFAULT_LATENCY * 1_000_000)
+
     def on_audio(outdata, frames, timestamp, status):
         if status:
             print(f"[ήχος] {status}", flush=True)
+        underruns = jitter.underruns
         block = jitter.pop()
+        if test_report is not None and jitter.underruns > underruns:
+            test_report.event("underrun")
+        if test_report is not None and jitter.last_tag is None and jitter.playing:
+            test_report.event("silence")      # ένα block σιωπής μέσα σε ανακοίνωση
+        if test_report is not None and jitter.last_tag is not None:
+            # Πότε θα ακουστεί το block: τώρα + καθυστέρηση εξόδου που δίνει το PortAudio.
+            try:
+                ahead = timestamp.outputBufferDacTime - timestamp.currentTime
+            except AttributeError:
+                ahead = 0.0
+            ahead_us = int(ahead * 1_000_000) if 0 < ahead < 1 else output_latency_us
+            test_report.event("play", t=now_us() + ahead_us, seq=jitter.last_tag)
         if frames == BLOCK_SAMPLES:
             outdata[:] = block
         else:
@@ -210,6 +235,7 @@ def play_stream(
         latency=latency,
         callback=on_audio,
     ) as output:
+        output_latency_us = int(output.latency * 1_000_000)
         print(
             f"Λήψη και αναπαραγωγή ήχου... όριο ουράς {jitter.max_blocks * BLOCK_MS} ms, "
             f"καθυστέρηση κάρτας ήχου {output.latency * 1000:.0f} ms",
@@ -218,7 +244,7 @@ def play_stream(
         try:
             pump_frames(connection, jitter, delay,
                         report=lambda line: print(line, flush=True), volume=volume,
-                        settings_callback=settings_callback)
+                        settings_callback=settings_callback, test_report=test_report)
         finally:
             if volume is not None:
                 # Δίκτυο/τερματισμός: καλύτερα αποκατάσταση παρά παραμονή σε
@@ -465,6 +491,8 @@ def main() -> None:
     # Μόνο για αυτόματες δοκιμές: αρχείο ανάκαμψης έντασης εκτός της κανονικής εγκατάστασης.
     parser.add_argument("--volume-recovery-file", type=Path, default=None,
                         help=argparse.SUPPRESS)
+    # Μόνο για τις αυτόματες δοκιμές 4.4: γεγονότα λήψης/αναπαραγωγής σε αρχείο JSONL.
+    parser.add_argument("--test-report", type=Path, default=None, help=argparse.SUPPRESS)
     args = parser.parse_args()
     if args.mute_others and args.announcement_volume is None:
         parser.error("--mute-others απαιτεί --announcement-volume")
@@ -580,6 +608,8 @@ def main() -> None:
                     print(f"[Client] Μητρώο Manager v{welcome['rv']}", flush=True)
             except OSError as exc:
                 print(f"[Client] Δεν αποθηκεύτηκε η έκδοση μητρώου: {exc}", flush=True)
+        if test_report is not None:
+            test_report.event("connected")
         heartbeat_stop = threading.Event()
         sender = threading.Thread(target=heartbeat_sender, args=(connection, heartbeat_stop),
                                   name="client-heartbeat", daemon=True)
@@ -593,11 +623,18 @@ def main() -> None:
                         recovery_path=args.volume_recovery_file,
                         settings_callback=lambda info: save_hints(
                             args.client_hints_file, info["room"],
-                            info["name"] or socket.gethostname()[:64]))
+                            info["name"] or socket.gethostname()[:64]),
+                        test_report=test_report)
         finally:
+            if test_report is not None:
+                test_report.event("lost")
             heartbeat_stop.set()
             sender.join(timeout=1)
 
+    test_report = None
+    if args.test_report is not None:
+        from shared.test_report import TestReport
+        test_report = TestReport(args.test_report)
     try:
         run_with_reconnect(args.host, args.port, session,
                            discovery_port=args.discovery_port, pin_file=pin_file,
@@ -605,6 +642,9 @@ def main() -> None:
                            tls_server_name=args.tls_server_name)
     except KeyboardInterrupt:
         print("\nΟ Client τερματίστηκε.", flush=True)
+    finally:
+        if test_report is not None:
+            test_report.close()
 
 
 if __name__ == "__main__":

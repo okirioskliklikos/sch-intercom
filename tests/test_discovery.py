@@ -322,3 +322,100 @@ class OversizedPacketTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class FakeSender:
+    def __init__(self, fail=False):
+        self.sent, self.fail, self.closed = [], fail, False
+
+    def sendto(self, packet, target):
+        if self.fail:
+            raise OSError("down")
+        self.sent.append(target)
+
+    def close(self):
+        self.closed = True
+
+
+class BroadcastSendersTests(unittest.TestCase):
+    """4.4 Εκτέλεση 3: στα Windows broadcast από κάθε κάρτα δικτύου."""
+
+    def make(self, addresses, *, per_interface=True):
+        from shared import discovery
+        now = [0.0]
+        opened = {}
+
+        def fake_open(address=None):
+            opened[address] = FakeSender(fail=address == "10.0.0.9")
+            return opened[address]
+
+        with mock.patch.object(discovery.BroadcastSenders, "_open", staticmethod(fake_open)):
+            senders = discovery.BroadcastSenders(50556, per_interface=per_interface,
+                                                 addresses=lambda: list(addresses),
+                                                 clock=lambda: now[0])
+            senders.refresh()
+        senders._open = fake_open
+        return senders, opened, now
+
+    def test_sends_from_every_interface(self):
+        senders, opened, _ = self.make(["192.168.2.58", "172.20.0.1"])
+        self.assertEqual(senders.send(b"x"), 2)
+        for address in ("192.168.2.58", "172.20.0.1"):
+            self.assertEqual(opened[address].sent, [("255.255.255.255", 50556)])
+        self.assertEqual(opened[None].sent, [])
+
+    def test_linux_keeps_single_socket(self):
+        senders, opened, _ = self.make(["192.168.2.58"], per_interface=False)
+        self.assertEqual(senders.send(b"x"), 1)
+        self.assertEqual(list(opened), [None])
+
+    def test_no_addresses_falls_back_to_default(self):
+        senders, opened, _ = self.make([])
+        self.assertEqual(senders.send(b"x"), 1)
+        self.assertEqual(len(opened[None].sent), 1)
+
+    def test_one_failing_interface_does_not_stop_others(self):
+        senders, opened, _ = self.make(["10.0.0.9", "192.168.2.58"])
+        self.assertEqual(senders.send(b"x"), 1)
+
+    def test_all_failing_raises(self):
+        senders, _, _ = self.make(["10.0.0.9"])
+        with self.assertRaises(OSError):
+            senders.send(b"x")
+
+    def test_addresses_refreshed_after_interval(self):
+        from shared import discovery
+        addresses = ["192.168.2.58"]
+        senders, opened, now = self.make(addresses)
+        senders._addresses = lambda: list(addresses)
+        addresses[:] = ["192.168.2.77"]
+        senders.send(b"x")
+        self.assertEqual(set(senders.bound), {"192.168.2.58"})   # ακόμη μέσα στο διάστημα
+        now[0] = discovery.INTERFACE_REFRESH_SECONDS + 1
+        senders.send(b"x")
+        self.assertEqual(set(senders.bound), {"192.168.2.77"})
+        self.assertTrue(opened["192.168.2.58"].closed)
+
+    def test_local_addresses_skip_loopback(self):
+        from shared import discovery
+        fake = [(socket.AF_INET, 0, 0, "", ("127.0.1.1", 0)),
+                (socket.AF_INET, 0, 0, "", ("192.168.2.58", 0)),
+                (socket.AF_INET, 0, 0, "", ("192.168.2.58", 0))]
+        with mock.patch.object(discovery.socket, "getaddrinfo", return_value=fake):
+            self.assertEqual(discovery.local_ipv4_addresses(), ["192.168.2.58"])
+
+    def test_real_announce_still_reaches_listener(self):
+        from shared.discovery import announce, discover
+        stop = threading.Event()
+        worker = threading.Thread(target=announce, args=(stop, str(uuid.uuid4()), 50599),
+                                  kwargs={"udp_port": 50598, "interval": 0.2,
+                                          "extra_ports": (50597,), "report": lambda *_: None},
+                                  daemon=True)
+        worker.start()
+        try:
+            found = discover(udp_port=50597, timeout=2.0)
+        finally:
+            stop.set()
+            worker.join(2)
+        self.assertIsNotNone(found)
+        self.assertEqual(found[1], 50599)

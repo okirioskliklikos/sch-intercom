@@ -31,7 +31,10 @@ class JitterBuffer:
         self.max_blocks = max_blocks
         self.prefill_blocks = max(1, min(max_blocks, prefill_blocks if prefill_blocks else (max_blocks + 1) // 2))
         self._silence = bytes(block_bytes)
-        self._blocks: deque[bytes] = deque()
+        # (block, tag): tag = αύξων αριθμός πακέτου, μόνο για τις μετρήσεις δοκιμών 4.4.
+        self._blocks: deque[tuple[bytes, object]] = deque()
+        #: Ετικέτα του block που επέστρεψε το τελευταίο pop() (None = σιωπή).
+        self.last_tag: object = None
         self._lock = threading.Lock()
         self._filling = True
         self.dropped = 0
@@ -57,6 +60,12 @@ class JitterBuffer:
     def mode(self) -> str:
         with self._lock:
             return "ανακοίνωση" if self._active else "αναμονή"
+
+    @property
+    def playing(self) -> bool:
+        """Ανακοίνωση σε εξέλιξη μετά το πρώτο block (σιωπή τώρα = κενό, όχι prefill)."""
+        with self._lock:
+            return self._active and self._started and not self._draining
 
     def standby(self) -> None:
         """Καθαρή αναμονή χωρίς underruns ούτε καταχώριση επιπέδων."""
@@ -88,9 +97,9 @@ class JitterBuffer:
             if self._active:
                 self._draining = True
 
-    def push(self, block: bytes) -> None:
+    def push(self, block: bytes, tag: object = None) -> None:
         with self._lock:
-            self._blocks.append(block)
+            self._blocks.append((block, tag))
             while len(self._blocks) > self.max_blocks:
                 self._blocks.popleft()
                 self.dropped += 1
@@ -98,7 +107,8 @@ class JitterBuffer:
     def pop(self) -> bytes:
         """Επιστρέφει το επόμενο block ή σιωπή αν η ουρά δεν έχει αρκετά δεδομένα."""
         with self._lock:
-            block, fade_in, fade_out = self._pop_locked()
+            item, fade_in, fade_out = self._pop_locked()
+            block, self.last_tag = item
         if fade_in is not None:
             block = apply_gain_ramp(block, *fade_in)
         if fade_out is not None:
@@ -128,7 +138,7 @@ class JitterBuffer:
 
     def _pop_locked(self):
         if not self._active:
-            return self._silence, None, None
+            return (self._silence, None), None, None
         if self._draining:
             if self._blocks:
                 if not self._started:
@@ -149,17 +159,17 @@ class JitterBuffer:
             self._active = False
             self._draining = False
             self._filling = True
-            return self._silence, None, None
+            return (self._silence, None), None, None
         self._levels.append(len(self._blocks))
         if self._filling:
             if len(self._blocks) < self.prefill_blocks:
-                return self._silence, None, None
+                return (self._silence, None), None, None
             self._filling = False
             self._start_fade_in()
         if not self._blocks:
             self.underruns += 1
             self._filling = True
-            return self._silence, None, None
+            return (self._silence, None), None, None
         return self._blocks.popleft(), self._next_fade_in(), None
 
     def take_level_stats(self) -> tuple[int, float, int] | None:

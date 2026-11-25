@@ -103,13 +103,15 @@ class Volume:
 class FreezableProxy:
     """TCP proxy: κανονικά προωθεί· «παγωμένο» δεν προωθεί τίποτα και δεν κλείνει."""
 
-    def __init__(self, port: int, upstream: int):
+    def __init__(self, port: int, upstream: int, *, listen: str = HOST,
+                 source: str | None = SECOND_IP):
         self.upstream = upstream
+        self.source = source
         self.frozen = threading.Event()
         self.closed = threading.Event()
         self.pairs: list[tuple[socket.socket, socket.socket]] = []
         self.lock = threading.Lock()
-        self.server = socket.create_server((HOST, port))
+        self.server = socket.create_server((listen, port))
         self.server.settimeout(0.2)
         threading.Thread(target=self._accept, daemon=True).start()
 
@@ -129,8 +131,10 @@ class FreezableProxy:
                 # Από 127.0.0.2: για τον Manager ο Client του proxy είναι «άλλος
                 # υπολογιστής» (βήμα 17, ίδια ταυτότητα από δύο IP).
                 try:
+                    if self.source is None:
+                        raise OSError("χωρίς δεύτερη διεύθυνση πηγής")
                     upstream = socket.create_connection((HOST, self.upstream), timeout=3,
-                                                        source_address=(SECOND_IP, 0))
+                                                        source_address=(self.source, 0))
                 except OSError:
                     upstream = socket.create_connection((HOST, self.upstream), timeout=3)
             except OSError:
@@ -167,6 +171,10 @@ class FreezableProxy:
 
     def freeze(self):
         self.frozen.set()
+
+    def resume(self):
+        """Σύντομο κόλλημα (4.4): οι συνδέσεις μένουν και τα δεδομένα συνεχίζουν."""
+        self.frozen.clear()
 
     def thaw(self):
         """Το «καλώδιο» ξαναμπαίνει: οι παλιές συνδέσεις είναι ήδη νεκρές και στις δύο άκρες."""
