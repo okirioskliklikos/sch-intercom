@@ -269,5 +269,26 @@ class DiscoveryHintTests(unittest.TestCase):
         self.assertIn("50568", text)
 
 
+class LoadCarrierTests(unittest.TestCase):
+    """Σχολείο 26/11/2026: οι εικονικοί Clients μόνο σε βοηθούς με καλώδιο, αν υπάρχουν."""
+
+    def carriers(self, *links):
+        from types import SimpleNamespace
+        from tools.network_live_test import NetworkTest
+        test = NetworkTest.__new__(NetworkTest)
+        test.peers = [SimpleNamespace(name=f"P{index}", info={"link": link})
+                      for index, link in enumerate(links)]
+        return [peer.name for peer in test.load_carriers()]
+
+    def test_only_wired_when_mixed(self):
+        self.assertEqual(self.carriers("lan", "wifi"), ["P0"])
+
+    def test_all_when_no_wired(self):
+        self.assertEqual(self.carriers("wifi", None), ["P0", "P1"])
+
+    def test_all_wired(self):
+        self.assertEqual(self.carriers("lan", "lan"), ["P0", "P1"])
+
+
 if __name__ == "__main__":
     unittest.main()
