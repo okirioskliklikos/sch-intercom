@@ -44,7 +44,13 @@ FULL_RETRY_SECONDS = 30
 # των μηνυμάτων για 3 s ενεργοποιεί τον υπάρχοντα μηχανισμό επανασύνδεσης.
 RECEIVE_TIMEOUT_SECONDS = 3.0
 CONNECT_TIMEOUT_SECONDS = 5
-DEFAULT_BUFFER_MS = 250
+#: Στόχος καθυστέρησης της ουράς. Ήταν 250 ms ως σκληρό όριο (τα παραπάνω πετιούνταν).
+#: Με την προσαρμοζόμενη ουρά (4.4, απόφαση χρήστη 26/11/2026) οι ριπές μετά από κόλλημα
+#: δικτύου κρατιούνται έως DEFAULT_MAX_BUFFER_MS και η καθυστέρηση επιστρέφει σε αυτόν
+#: τον στόχο (λίγο πάνω από το prefill) μέσα στις παύσεις της ομιλίας.
+DEFAULT_BUFFER_MS = 160
+#: Ανώτατο κράτημα ριπών. 0 = παλιά συμπεριφορά (σκληρό όριο = buffer_ms).
+DEFAULT_MAX_BUFFER_MS = 1500
 ANNOUNCEMENT_PREFILL_MS = 120
 # Fade-in/fade-out αρχής/τέλους ανακοίνωσης και σύντομο fade-in μετά από κενό
 # δικτύου, ώστε να μην ακούγεται «κλικ» στα απότομα περάσματα σιωπή ↔ φωνή.
@@ -76,6 +82,7 @@ def format_report(jitter: JitterBuffer, delay: DelayTracker, received: int,
         f"[Client] κατάσταση: ανακοίνωση | blocks {received} | "
         f"ουρά min/μέση/max {queue_text} | "
         f"πεταμένα {jitter.dropped} | κενά {jitter.underruns} | "
+        f"παύσεις που κόντυναν {jitter.skipped * BLOCK_MS} ms | "
         f"επιπλέον καθυστέρηση δικτύου μέση/max {net_text}"
     )
 
@@ -160,9 +167,13 @@ def pump_frames(
 
 
 def make_jitter_buffer(buffer_ms: int = DEFAULT_BUFFER_MS, fade_ms: int = DEFAULT_FADE_MS,
-                       resume_fade_ms: int = DEFAULT_RESUME_FADE_MS) -> JitterBuffer:
+                       resume_fade_ms: int = DEFAULT_RESUME_FADE_MS,
+                       max_buffer_ms: int = DEFAULT_MAX_BUFFER_MS) -> JitterBuffer:
     fade_samples = max(0, fade_ms) * SAMPLE_RATE // 1000
-    return JitterBuffer(max(1, buffer_ms // BLOCK_MS), BLOCK_BYTES,
+    target = max(1, buffer_ms // BLOCK_MS)
+    adaptive = max_buffer_ms > buffer_ms
+    return JitterBuffer(max(target, max_buffer_ms // BLOCK_MS) if adaptive else target,
+                        BLOCK_BYTES, target_blocks=target if adaptive else None,
                         prefill_blocks=max(1, ANNOUNCEMENT_PREFILL_MS // BLOCK_MS),
                         fade_in_samples=fade_samples, fade_out_samples=fade_samples,
                         resume_fade_samples=max(0, resume_fade_ms) * SAMPLE_RATE // 1000)
@@ -173,6 +184,7 @@ def play_stream(
     *,
     device: int | None = None,
     buffer_ms: int = DEFAULT_BUFFER_MS,
+    max_buffer_ms: int = DEFAULT_MAX_BUFFER_MS,
     latency: str | float = DEFAULT_LATENCY,
     fade_ms: int = DEFAULT_FADE_MS,
     resume_fade_ms: int = DEFAULT_RESUME_FADE_MS,
@@ -184,7 +196,7 @@ def play_stream(
 ) -> None:
     import sounddevice as sd
 
-    jitter = make_jitter_buffer(buffer_ms, fade_ms, resume_fade_ms)
+    jitter = make_jitter_buffer(buffer_ms, fade_ms, resume_fade_ms, max_buffer_ms)
     jitter.standby()
     delay = DelayTracker()
     journal = recovery_path or Path.home() / ".school-intercom" / "volume-recovery.json"
@@ -211,6 +223,8 @@ def play_stream(
         block = jitter.pop()
         if test_report is not None and jitter.underruns > underruns:
             test_report.event("underrun")
+        if test_report is not None and jitter.skipped_tag is not None:
+            test_report.event("skip", seq=jitter.skipped_tag)   # σιωπή που παραλείφθηκε
         if test_report is not None and jitter.last_tag is None and jitter.playing:
             test_report.event("silence")      # ένα block σιωπής μέσα σε ανακοίνωση
         if test_report is not None and jitter.last_tag is not None:
@@ -464,7 +478,12 @@ def main() -> None:
     parser.add_argument("--device", type=int, default=None, help="Αριθμός συσκευής εξόδου PortAudio")
     parser.add_argument(
         "--buffer-ms", type=int, default=DEFAULT_BUFFER_MS,
-        help=f"Μέγιστος ήχος σε αναμονή πριν πεταχτούν παλιά blocks (default {DEFAULT_BUFFER_MS})",
+        help=f"Στόχος καθυστέρησης ουράς σε ms (default {DEFAULT_BUFFER_MS})",
+    )
+    parser.add_argument(
+        "--max-buffer-ms", type=int, default=DEFAULT_MAX_BUFFER_MS,
+        help=("Μέγιστο κράτημα ριπών μετά από κόλλημα δικτύου· η καθυστέρηση επιστρέφει "
+              f"στο --buffer-ms στις παύσεις (default {DEFAULT_MAX_BUFFER_MS}, 0 = όχι)"),
     )
     parser.add_argument(
         "--latency", type=parse_latency, default=DEFAULT_LATENCY,
@@ -616,7 +635,8 @@ def main() -> None:
         sender.start()
         try:
             play_stream(connection, device=args.device,
-                        buffer_ms=args.buffer_ms, latency=args.latency,
+                        buffer_ms=args.buffer_ms, max_buffer_ms=args.max_buffer_ms,
+                        latency=args.latency,
                         fade_ms=args.fade_ms, resume_fade_ms=args.resume_fade_ms,
                         announcement_volume=args.announcement_volume,
                         mute_others=args.mute_others,

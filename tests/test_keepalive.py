@@ -267,7 +267,7 @@ class ControlProtocolTests(unittest.TestCase):
             receiver.close()
 
     def test_playback_defaults_remain(self):
-        self.assertEqual(DEFAULT_BUFFER_MS, 250)
+        self.assertEqual(DEFAULT_BUFFER_MS, 160)       # στόχος· κράτημα έως 1,5 s (4.4)
         self.assertEqual(DEFAULT_LATENCY, 0.04)
         self.assertEqual(ANNOUNCEMENT_PREFILL_MS, 120)
 

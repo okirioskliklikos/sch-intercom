@@ -55,6 +55,9 @@ from tools.failure_live_test import FreezableProxy  # noqa: E402
 from tools.mtls_live_test import Channel, Process  # noqa: E402
 
 TOTAL = 11
+#: Βήμα 10: μετά από κόλλημα 0,5 s η καθυστέρηση επιστρέφει στο κανονικό μέσα σε τόσα s
+#: (προσαρμοζόμενη ουρά: μόνο στις παύσεις της «ομιλίας» δοκιμής, 0,5 s ανά 2 s).
+RECOVERY_LIMIT_S = 10.0
 AUDIO_PORT, DISCOVERY_PORT, CONTROL_PORT = 50565, 50566, 50567
 BEACON_PORT, ENROLL_PORT, PROXY_PORT = 50568, 50569, 50571
 VIRTUAL_ROOM = "C2627-Δ9"
@@ -551,7 +554,7 @@ class NetworkTest:
     def kind(self, peer: Peer) -> str:
         return nm.path_kind(self.link, peer.info.get("link"))
 
-    def start_director(self, tone: str = "silent") -> TimedProcess:
+    def start_director(self, tone: str = "speech") -> TimedProcess:
         self.starts += 1
         self.report_file = self.work / f"director-report-{self.starts}.jsonl"
         self.director = TimedProcess(
@@ -900,11 +903,11 @@ class NetworkTest:
         self.proxy.freeze()
         time.sleep(0.5)
         self.proxy.resume()
-        time.sleep(8)
+        time.sleep(RECOVERY_LIMIT_S + 2)
         self.command("none")
-        time.sleep(1.5)
+        _, results = self.measure(frozen - 2_000_000, after, "short-freeze")
         details, oks = [], []
-        for peer in self.peers:
+        for peer, result in zip(self.peers, results):
             peer.sync()
             events = peer.events(after[peer.index])
             dropped = self.director.first_time(peer.client_id, "αποσυνδέθηκε", since=mark)
@@ -912,9 +915,13 @@ class NetworkTest:
             later = sum(1 for event in events if event["ev"] == "play"
                         and peer.clock.to_director(event["t"]) > frozen + 2_000_000)
             gaps = sum(1 for event in events if event["ev"] == "underrun")
-            oks.append(dropped is None and not lost and later > 100)
+            back = nm.recovery_s(result, frozen + 500_000)
+            oks.append(dropped is None and not lost and later > 100
+                       and back is not None and back <= RECOVERY_LIMIT_S)
             details.append(f"{peer.name}: αποσύνδεση {'ναι' if dropped or lost else 'όχι'}, "
-                           f"blocks μετά το κόλλημα {later}, κενά {gaps}")
+                           f"blocks μετά το κόλλημα {later}, κενά {gaps}, επιστροφή "
+                           f"καθυστέρησης {'—' if back is None else f'{back:.1f} s'} "
+                           f"(όριο {RECOVERY_LIMIT_S:.0f} s)")
         return all(oks), "\n       ".join(details)
 
     def s11_listen(self):
