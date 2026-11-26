@@ -252,6 +252,43 @@ def discovery_hint(*, firewalld: bool | None = None) -> str:
             f"firewall επιτρέπει εισερχόμενο UDP {BEACON_PORT}, ή ξανά με --director-host <IP>")
 
 
+def own_addresses() -> list[str]:
+    """IPv4 του Director για να τις πληκτρολογήσει ο χρήστης στους Clients."""
+    from shared.discovery import local_ipv4_addresses
+    found = set(local_ipv4_addresses())
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as probe:
+            probe.connect(("192.0.2.1", 9))      # χωρίς αποστολή· μόνο επιλογή κάρτας
+            found.add(probe.getsockname()[0])
+    except OSError:
+        pass
+    return sorted(address for address in found if not address.startswith("127."))
+
+
+def ask_director_host(read=input, interactive=None) -> str | None:
+    """Σχολικό PC (φορητό zip): το firewall κόβει συνήθως το beacon, άρα ρωτάμε την IP.
+
+    Μόνο σε κονσόλα· Enter = συνέχεια αναζήτησης.
+    """
+    if interactive is None:
+        interactive = sys.stdin is not None and sys.stdin.isatty()
+    if not interactive:
+        return None
+    try:
+        answer = read("IP του Director (τη δείχνει ο Director στην αρχή· "
+                      "Enter = συνέχεια αναζήτησης): ").strip()
+    except EOFError:
+        return None
+    if not answer:
+        return None
+    try:
+        socket.getaddrinfo(answer, CONTROL_PORT)
+    except OSError:
+        print(f"Μη έγκυρη διεύθυνση: {answer}", flush=True)
+        return None
+    return answer
+
+
 class Agent:
     def __init__(self, work: Path, director_host: str | None, name: str | None,
                  link: str | None, quiet: bool):
@@ -282,6 +319,7 @@ class Agent:
             attempts += 1
             if attempts == 3:
                 print(discovery_hint(), flush=True)
+                host = ask_director_host()
         print(f"Σύνδεση στον Director δοκιμής {host}:{CONTROL_PORT}", flush=True)
         sock = socket.create_connection((host, CONTROL_PORT), timeout=30)
         sock.settimeout(None)
@@ -617,8 +655,11 @@ class NetworkTest:
                       "    Linux:   tools/network_live_test.sh client\n"
                       "    Windows: powershell -ExecutionPolicy Bypass -File "
                       "tools\\network_live_test.ps1\n"
+                      "    Φορητό zip: διπλό κλικ στο run-client.bat\n"
                       "(Αν δεν βρεθεί αυτόματα, προσθέστε --director-host / -DirectorHost "
-                      "<IP αυτού του υπολογιστή>.)\n", flush=True)
+                      "<IP αυτού του υπολογιστή>.)\n"
+                      f"IP αυτού του υπολογιστή: {', '.join(own_addresses()) or 'άγνωστη'}\n",
+                      flush=True)
             server.settimeout(0.5)          # Ctrl+C και στα Windows
             while len(self.peers) < self.clients:
                 try:
@@ -740,13 +781,24 @@ class NetworkTest:
             + ", ".join(f"{value:+.0f} ms" for value in drifts)
             + f" (όριο +{nm.DRIFT_LIMIT_MS})\n       {detail}")
 
+    def load_carriers(self) -> list[Peer]:
+        """Ποιοι βοηθοί τρέχουν εικονικούς Clients στο βήμα 7.
+
+        Στην πράξη κάθε υπολογιστής λαμβάνει μία ροή. 20 εικονικοί πάνω από ένα Wi-Fi
+        φορτώνουν εκείνη τη μία σύνδεση 21 φορές (σχολείο 26/11/2026: Wi-Fi πίσω από δύο
+        τοίχους). Αν υπάρχει βοηθός με καλώδιο, το φορτίο πάει μόνο εκεί· αλλιώς σε όλους.
+        """
+        wired = [peer for peer in self.peers if peer.info.get("link") == "lan"]
+        return wired or list(self.peers)
+
     def s07_load(self):
         if self.virtual <= 0:
             return "SKIP", "χωρίς εικονικούς Clients (--virtual 0)"
+        carriers = self.load_carriers()
         mark = self.director.mark()
-        connected = sum(peer.ask("vstart", port=AUDIO_PORT)["connected"] for peer in self.peers)
-        expected = self.virtual * len(self.peers)
-        ids = [item["id"] for peer in self.peers for item in peer.info["virtual"]]
+        connected = sum(peer.ask("vstart", port=AUDIO_PORT)["connected"] for peer in carriers)
+        expected = self.virtual * len(carriers)
+        ids = [item["id"] for peer in carriers for item in peer.info["virtual"]]
         found = self.wait_joined(ids, mark, timeout=20)
         joined = sum(value is not None for value in found.values())
         after, since = self.marks(), now_us()
@@ -758,7 +810,7 @@ class NetworkTest:
         runs, results = self.measure(since, after, "load")
         ok, detail = self.check_all(results, edges=True)
         worst, errors = 1.0, []
-        for peer in self.peers:
+        for peer in carriers:
             reply = peer.ask("vseqs")
             errors += reply.get("errors", [])
             for seqs in reply["seqs"]:
@@ -767,8 +819,11 @@ class NetworkTest:
             peer.ask("vstop")
         bitrate = (len(self.peers) + joined) * 0.3
         virtual_ok = joined == expected and worst >= 0.99
+        where = ("" if len(carriers) == len(self.peers) else
+                 f" από {', '.join(peer.name for peer in carriers)} (καλώδιο· οι Clients Wi-Fi "
+                 "μόνο με τη δική τους ροή, όπως στην πράξη)")
         return ok and virtual_ok, (
-            f"εικονικοί {joined}/{expected} (συνδέθηκαν {connected}), ο χειρότερος έλαβε "
+            f"εικονικοί {joined}/{expected}{where} (συνδέθηκαν {connected}), ο χειρότερος έλαβε "
             f"{worst * 100:.1f}% των blocks, ~{bitrate:.0f} Mbps από τον Director"
             + (f", σφάλματα: {'; '.join(sorted(set(errors))[:3])}" if errors else "")
             + f"\n       {detail}")
