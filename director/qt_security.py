@@ -316,8 +316,14 @@ class RoomHeader(QWidget):
         self.name = ElidedLabel(room.room)
         self.name.setObjectName("roomTitle")
         self.count = _label(computers_text(len(room.computers)), "small")
+        # ✓ «ενημερωμένη»: ≥1 online υπολογιστής έχει την τρέχουσα έκδοση πακέτου.
+        self.updated = QLabel()
+        self.updated.setPixmap(icons.pixmap("check", theme.CONNECTED, px(18)))
+        self.updated.setVisible(False)
         layout.addWidget(self.dot)
-        layout.addWidget(self.name, 1)
+        layout.addWidget(self.name)
+        layout.addWidget(self.updated)
+        layout.addStretch(1)
         layout.addWidget(self.count)
         # Μενού αίθουσας: μετονομασία για όλους τους υπολογιστές της μαζί.
         name = room.room
@@ -332,6 +338,12 @@ class RoomHeader(QWidget):
         self.dot.set_color(theme.ROOM_DOT_ONLINE if room.online else theme.ROOM_DOT_OFFLINE)
         # Για την αίθουσα μετρά ο πιο πρόσφατος υπολογιστής της.
         self.setToolTip("Online" if room.online else f"Τελευταία σύνδεση: {room.state(now)}")
+        self.updated.setVisible(room.updated)
+        self.updated.setToolTip(updated_tooltip(room) if room.updated else "")
+
+
+def updated_tooltip(room: RoomView) -> str:
+    return f"Ενημερωμένη: {room.version} ({', '.join(room.updated_by)})"
 
 
 class RoomCard(QFrame):

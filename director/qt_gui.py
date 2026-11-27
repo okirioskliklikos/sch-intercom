@@ -1737,6 +1737,7 @@ class GuiRuntime:
             updates_model = UpdatesModel(
                 self.updates.store, self.updates.status, rooms=security.rooms,
                 primary=lambda: load_manager_role(state_file).role == "primary")
+            security.update_versions = updates_model.versions
         options = {"stop_serving": self.stop_serving, "restart": self.request_restart,
                    **self.maintenance_options}
         self.window = DirectorWindow(

@@ -303,8 +303,10 @@ def build_updates(root: Path, model, broadcaster, scenario: str):
             entry["seen_at"] = int(time.time() - age)
         status.update(client_id, **entry)
     state_file = path_for(model.trust.registry.path)
-    return UpdatesModel(store, status, rooms=model.rooms,
-                        primary=lambda: load_state(state_file).role == "primary")
+    updates = UpdatesModel(store, status, rooms=model.rooms,
+                           primary=lambda: load_state(state_file).role == "primary")
+    model.update_versions = updates.versions  # ✓ στις αίθουσες (Υπολογιστές)
+    return updates
 
 
 def main() -> None:
