@@ -263,6 +263,12 @@ Client δεν περνά το mTLS.
   αναβολή κατά την ανακοίνωση, εναλλαγή ≥ 10 s μετά, commit με ίδια ταυτότητα, Run/.cmd, «installed» στον
   Manager, rollback σε crash, σε 20 s χωρίς σύνδεση και σε kill του supervisor, failed δεν ξανακατεβαίνουν,
   καθαρισμός παλιών). Το `.ps1` χρησιμοποιεί τον πραγματικό εγκαταστάτη (`--installer`). Linux 27/11/2026: 13/13 PASS.
+  **Windows 27/11/2026 (χρήστης): `tools\update_install_live_test.py --installer` 13/13 PASS** (πραγματικός
+  εγκαταστάτης Inno Setup, embeddable Python), μετά από μία διόρθωση (η αναφορά «installed» στέλνεται με νέο
+  έλεγχο μετά το commit) και αναμονή στο βήμα 07 της δοκιμής.
+- Antivirus (χρήστης, Avast ενεργό): το `setup.exe` χωρίς ψηφιακή υπογραφή ελέγχεται και η εκτέλεση περιμένει
+  να κλείσει το ενημερωτικό παράθυρο. Αφορά μόνο την εγκατάσταση με setup.exe· οι αυτόματες ενημερώσεις δεν
+  τρέχουν setup.exe. Έλεγχος με το antivirus του σχολείου πριν από τη διανομή.
 
 ### 5.5 Γραμμή εντολών Client
 `%LOCALAPPDATA%\sch-intercom\sch-intercom-client.cmd` (υλοποιήθηκε στο 5A):
