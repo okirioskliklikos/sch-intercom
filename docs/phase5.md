@@ -156,6 +156,7 @@
   είναι στο `TRUSTED_KEYS`), `tools/release_verify.py`, `tools/build_release.py --sign <κλειδί.pem>`
   (ρωτά τον κωδικό πριν από το build, βγάζει `setup.exe` και `.sicu` από το ίδιο δέντρο).
 - Δοκιμές: `tests/test_release_package.py` (13), `tools/release_sign_live_test.{py,sh,ps1}` (10 βήματα).
+  **Windows 27/11/2026 (χρήστης): `tools\release_sign_live_test.ps1` 10/10 PASS** (πραγματική embeddable Python).
 
 ### 5.2 Manager (5B2)
 - `python -m director.updates import <αρχείο.sicu>`: επαληθεύει υπογραφή και hashes, απορρίπτει
