@@ -1637,8 +1637,11 @@ class GuiRuntime:
                  release_lock: Callable[[], None] | None = None,
                  maintenance_options: dict | None = None,
                  role_options: dict | None = None,
-                 quit_app: Callable[[], None] | None = None):
+                 quit_app: Callable[[], None] | None = None,
+                 updates=None):
         self.args = args
+        # Φάση 5B2: θύρα ενημερώσεων Client (το GUI «Ενημερώσεις» έρχεται στο 5B3).
+        self.updates = updates
         # Αφήνει το manager.lock πριν από επαναφορά μέσα από το GUI (Ρυθμίσεις → Συντήρηση).
         self.release_lock = release_lock
         self.maintenance_options = maintenance_options or {}
@@ -1687,7 +1690,7 @@ class GuiRuntime:
             self.network = SocketServingService(
                 args, identifier=identifier, inst=inst, registry=registry,
                 accept_clients=self.accept_clients, broadcaster=self.broadcaster,
-                enrollment=self.enrollment)
+                enrollment=self.enrollment, updates=self.updates)
             self.controller = ServingController(
                 manager_state_path(args.registry_file), self.watcher,
                 start_network=self.network.start, stop_network=self.network.stop,
@@ -1793,12 +1796,13 @@ class GuiRuntime:
 
 
 def run_qt_gui(args, *, accept_clients, stream_microphone, enrollment=None, trust=None,
-               last_seen=None, release_lock=None) -> bool:
+               last_seen=None, release_lock=None, updates=None) -> bool:
     """Επιστρέφει True αν ζητήθηκε επανεκκίνηση (επαναφορά backup ή νέα κλίμακα)."""
     app = create_application(ui_scale=load_ui_scale(gui_settings_path(args)))
     runtime = GuiRuntime(args, accept_clients=accept_clients,
                          stream_microphone=stream_microphone, enrollment=enrollment,
-                         trust=trust, last_seen=last_seen, release_lock=release_lock)
+                         trust=trust, last_seen=last_seen, release_lock=release_lock,
+                         updates=updates)
     try:
         window = runtime.start()
         window.show()

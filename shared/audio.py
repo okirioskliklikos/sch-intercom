@@ -2,7 +2,10 @@
 
 20-byte header: magic SI (2) | audio version (1) | type (1) |
 length (4) | sequence (4) | Director monotonic timestamp µs (8).
-Type 0 = PCM (640 bytes), 1 = KEEPALIVE, 2 = STREAM_STOP (χωρίς payload).
+Type 0 = PCM (640 bytes), 1 = KEEPALIVE, 2 = STREAM_STOP (χωρίς payload),
+3 = CLIENT_SETTINGS, 4 = UPDATE_CHECK (Φάση 5B2: «κάνε CHECK ενημέρωσης τώρα»).
+Από τη Φάση 5B2 ο Client δέχεται και αγνοεί άγνωστα μικρά μηνύματα ελέγχου, ώστε
+νέα μηνύματα να μη χρειάζονται αλλαγή πρωτοκόλλου.
 Η έκδοση σύνδεσης ελέγχεται χωριστά στο shared.identity.
 """
 
@@ -28,6 +31,7 @@ MESSAGE_PCM = 0
 MESSAGE_KEEPALIVE = 1
 MESSAGE_STREAM_STOP = 2
 MESSAGE_CLIENT_SETTINGS = 3
+MESSAGE_UPDATE_CHECK = 4
 MAX_SETTINGS_BYTES = 512
 _HEADER = struct.Struct("!2sBBIIQ")
 HEADER_BYTES = _HEADER.size
@@ -82,8 +86,8 @@ def encode_frame(pcm: bytes, seq: int, timestamp_us: int) -> bytes:
 
 
 def encode_control(kind: int) -> bytes:
-    """Μόνο τα δύο γνωστά μηνύματα ελέγχου, χωρίς payload."""
-    if kind not in (MESSAGE_KEEPALIVE, MESSAGE_STREAM_STOP):
+    """Μόνο τα γνωστά μηνύματα ελέγχου χωρίς payload."""
+    if kind not in (MESSAGE_KEEPALIVE, MESSAGE_STREAM_STOP, MESSAGE_UPDATE_CHECK):
         raise ValueError("Άγνωστος τύπος μηνύματος ελέγχου")
     return _HEADER.pack(PROTOCOL_MAGIC, PROTOCOL_VERSION, kind, 0, 0, 0)
 
@@ -126,7 +130,7 @@ def send_frame(connection: socket.socket, pcm: bytes, seq: int = 0,
 
 def receive_message(connection: socket.socket, *,
                     deadline: float | None = None) -> Frame | ControlMessage:
-    """Ένα πλήρες PCM, KEEPALIVE ή STREAM_STOP. Άκυρο μήνυμα απορρίπτεται."""
+    """Ένα πλήρες PCM ή μήνυμα ελέγχου (και άγνωστο μικρό). Άκυρο μήνυμα απορρίπτεται."""
     magic, version, kind, length, seq, timestamp_us = _HEADER.unpack(
         read_exact(connection, HEADER_BYTES, deadline=deadline))
     if magic != PROTOCOL_MAGIC:
@@ -143,11 +147,15 @@ def receive_message(connection: socket.socket, *,
         payload = read_exact(connection, length, deadline=deadline)
         decode_client_settings(payload)
         return ControlMessage(kind, payload)
-    if kind in (MESSAGE_KEEPALIVE, MESSAGE_STREAM_STOP):
+    if kind in (MESSAGE_KEEPALIVE, MESSAGE_STREAM_STOP, MESSAGE_UPDATE_CHECK):
         if length != 0 or seq != 0 or timestamp_us != 0:
             raise ValueError("Μη έγκυρο μήνυμα ελέγχου")
         return ControlMessage(kind)
-    raise ValueError(f"Άγνωστος τύπος μηνύματος: {kind}")
+    # Νεότερο μήνυμα ελέγχου που δεν γνωρίζει αυτή η έκδοση: διαβάζεται και αγνοείται
+    # από τον καλούντα. Μεγάλο ή με seq/timestamp δεν είναι μήνυμα ελέγχου: σφάλμα.
+    if length > MAX_SETTINGS_BYTES or seq != 0 or timestamp_us != 0:
+        raise ValueError(f"Άγνωστος τύπος μηνύματος: {kind}")
+    return ControlMessage(kind, read_exact(connection, length, deadline=deadline))
 
 
 def receive_frame(connection: socket.socket) -> Frame:

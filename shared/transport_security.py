@@ -45,6 +45,9 @@ class TLSConnection:
     def fileno(self) -> int:
         return self._stream.fileno()
 
+    def getpeername(self):
+        return self._stream.getpeername()
+
     def getpeercert(self, *, binary_form: bool = False):
         """Verified TLS peer certificate; available only after the handshake."""
         with self._lock:
