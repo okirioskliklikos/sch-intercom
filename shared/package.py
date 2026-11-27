@@ -31,7 +31,8 @@ from shared.version import parse_version
 PRODUCT = "sch-intercom-client"
 FORMAT = 1
 #: Έκδοση του μηχανισμού ενημέρωσης του Client (UPDATE_PROTOCOL, §5.3).
-UPDATER_VERSION = 1
+#: 2 = λήψη μόνο των αρχείων που άλλαξαν (5B2c).
+UPDATER_VERSION = 2
 MANIFEST = "manifest.json"
 SIGNATURE = "manifest.sig"
 FILES_PREFIX = "files/"
@@ -210,7 +211,7 @@ def write_package(tree: Path, out: Path, key: Ed25519PrivateKey, version: str, *
     return manifest
 
 
-def _check_version(manifest: dict, installed_version: str | None, updater_version: int) -> None:
+def check_version(manifest: dict, installed_version: str | None, updater_version: int) -> None:
     if manifest["min_updater"] > updater_version:
         raise PackageError(f"Το πακέτο θέλει updater v{manifest['min_updater']}· "
                            f"εδώ υπάρχει v{updater_version} (χειροκίνητη εγκατάσταση)")
@@ -220,22 +221,12 @@ def _check_version(manifest: dict, installed_version: str | None, updater_versio
                            f"εγκατεστημένη {installed_version}")
 
 
-def read_manifest(path: Path, *, trusted_keys=None) -> dict:
-    """Ελέγχει μόνο υπογραφή και manifest (γρήγορο, πριν από την πλήρη επαλήθευση)."""
+def verify_manifest(data: bytes, signature: bytes, *, trusted_keys=None) -> dict:
+    """Υπογραφή και μορφή του manifest (5B2c: ο Client το παίρνει χωρίς το πακέτο)."""
     if trusted_keys is None:
         from shared.release_keys import TRUSTED_KEYS
         trusted_keys = TRUSTED_KEYS
-    keys = _public_keys(trusted_keys)
-    path = Path(path)
-    try:
-        if path.stat().st_size > MAX_PACKAGE_BYTES:
-            raise PackageError("Το πακέτο ξεπερνά τα 300 MB")
-        with zipfile.ZipFile(path) as archive:
-            data = archive.read(MANIFEST)
-            signature = archive.read(SIGNATURE)
-    except (OSError, KeyError, zipfile.BadZipFile) as exc:
-        raise PackageError(f"Μη αναγνώσιμο πακέτο: {exc}") from exc
-    for key in keys:
+    for key in _public_keys(trusted_keys):
         try:
             key.verify(signature, data)
             break
@@ -252,12 +243,34 @@ def read_manifest(path: Path, *, trusted_keys=None) -> dict:
     return validate_manifest(manifest)
 
 
+def read_signed_manifest(path: Path) -> tuple[bytes, bytes]:
+    """Τα bytes του manifest.json και του manifest.sig, χωρίς έλεγχο."""
+    path = Path(path)
+    try:
+        if path.stat().st_size > MAX_PACKAGE_BYTES:
+            raise PackageError("Το πακέτο ξεπερνά τα 300 MB")
+        with zipfile.ZipFile(path) as archive:
+            return archive.read(MANIFEST), archive.read(SIGNATURE)
+    except (OSError, KeyError, zipfile.BadZipFile) as exc:
+        raise PackageError(f"Μη αναγνώσιμο πακέτο: {exc}") from exc
+
+
+def read_manifest(path: Path, *, trusted_keys=None) -> dict:
+    """Ελέγχει μόνο υπογραφή και manifest (γρήγορο, πριν από την πλήρη επαλήθευση)."""
+    if trusted_keys is None:
+        from shared.release_keys import TRUSTED_KEYS
+        trusted_keys = TRUSTED_KEYS
+    keys = _public_keys(trusted_keys)
+    data, signature = read_signed_manifest(path)
+    return verify_manifest(data, signature, trusted_keys=keys)
+
+
 def verify_package(path: Path, *, trusted_keys=None, installed_version: str | None = None,
                    updater_version: int = UPDATER_VERSION) -> dict:
     """Πλήρης έλεγχος: υπογραφή, έκδοση, ότι τα περιεχόμενα είναι ακριβώς τα αρχεία
     του manifest με το σωστό μέγεθος και SHA-256. Επιστρέφει το manifest."""
     manifest = read_manifest(path, trusted_keys=trusted_keys)
-    _check_version(manifest, installed_version, updater_version)
+    check_version(manifest, installed_version, updater_version)
     wanted = {FILES_PREFIX + item["path"]: item for item in manifest["files"]}
     try:
         with zipfile.ZipFile(path) as archive:

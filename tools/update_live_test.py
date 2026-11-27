@@ -196,12 +196,14 @@ class Raw:
         plain = socket.create_connection((HOST, UPDATE_PORT), timeout=5)
         self.stream = self.context.wrap_socket(plain, server_hostname=DEFAULT_SERVER_NAME)
         self.stream.settimeout(10)
-        send_message(self.stream, check_message(self.client_id, INSTALLED, updater=1,
+        send_message(self.stream, check_message(self.client_id, INSTALLED,
+                                                updater=pkg.UPDATER_VERSION,
                                                 protocol=7))
         offer = read_message(self.stream)
         if offer.get("type") != "offer" or offer.get("version") != version:
             return f"offer {offer}"
-        send_message(self.stream, {"type": "get", "version": version, "offset": 0})
+        send_message(self.stream, {"type": "get-file", "version": version,
+                                   "path": "app/blob.bin", "offset": 0})
         reply = read_message(self.stream)
         if reply.get("type") == "data":
             remaining = reply["size"]
@@ -303,6 +305,16 @@ class LiveTest:
         self.director.send("none")
         return self.director
 
+    def part_size(self, board: Board) -> int:
+        """Μέγεθος του μισού αρχείου της λήψης (5B2c: staging\\<έκδοση>\\partial)."""
+        sizes = [0]
+        for part in (board.layout.home / "staging").rglob("*.part"):
+            try:
+                sizes.append(part.stat().st_size)
+            except OSError:
+                pass   # μόλις ολοκληρώθηκε και μετακινήθηκε
+        return max(sizes)
+
     def joined(self, board: Board, since: int, timeout: float = 30) -> bool:
         return self.director.wait_for(board.client_id, JOINED, since=since,
                                       timeout=timeout) is not None
@@ -362,15 +374,14 @@ class LiveTest:
 
     def s04(self):
         """Board2 κατεβάζει αργά· «all» = ανακοίνωση: παύση, «none»: συνέχεια."""
-        part = self.b2.layout.home / "staging" / "1.0.1.part"
-        started = self.wait(lambda: part.is_file() and part.stat().st_size > 1_000_000, 20)
+        started = self.wait(lambda: self.part_size(self.b2) > 1_000_000, 20)
         mark = self.b2.process.mark()
         self.director.send("all")
         paused = self.b2.process.wait_for("Παύση λήψης", since=mark, timeout=10) is not None
         waiting = self.wait(lambda: self.status(self.b2).get("state") == "waiting", 5)
-        size = part.stat().st_size if part.exists() else -1
+        size = self.part_size(self.b2)
         time.sleep(2)
-        still = (part.stat().st_size if part.exists() else -2) == size
+        still = self.part_size(self.b2) == size > 0
         self.director.send("none")
         resumed = self.b2.process.wait_for("Συνέχιση λήψης 1.0.1", since=mark,
                                            timeout=20) is not None
@@ -380,13 +391,13 @@ class LiveTest:
 
     def s05(self):
         """Κόψιμο της σύνδεσης ενημερώσεων στη μέση· συνέχιση από offset, μετά έτοιμη."""
-        part = self.b2.layout.home / "staging" / "1.0.1.part"
         mark = self.b2.process.mark()
-        self.wait(lambda: part.is_file() and part.stat().st_size > 4_000_000, 20)
-        before = part.stat().st_size if part.exists() else 0
+        self.wait(lambda: self.part_size(self.b2) > 4_000_000, 20)
+        before = self.part_size(self.b2)
         cut = self.proxy.cut()
         broken = self.b2.process.wait_for("Η λήψη διακόπηκε", since=mark, timeout=15)
-        line = self.b2.process.wait_for("Συνέχιση λήψης 1.0.1 από", since=mark, timeout=30)
+        line = self.b2.process.wait_for("Συνέχιση λήψης 1.0.1: app/blob.bin από", since=mark,
+                                        timeout=30)
         ready = self.wait(lambda: self.b2.ready("1.0.1"), 60)
         percent = line.rsplit(" ", 1)[-1] if line else "—"
         return cut > 0 and broken is not None and line is not None and ready, \
@@ -515,7 +526,7 @@ class LiveTest:
         self.director.stop(quit_command="quit")
         self.director = None
         staging = [p.name for b in self.boards
-                   for p in (b.layout.home / "staging").glob("*") if p.suffix == ".part"]
+                   for p in (b.layout.home / "staging").rglob("*") if p.suffix == ".part"]
         installed = {b.layout.current_version() for b in self.boards}
         status = json.loads(self.status_file.read_text(encoding="utf-8"))
         return not staging and installed == {INSTALLED} and len(status["clients"]) >= 3, \

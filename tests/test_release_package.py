@@ -131,10 +131,11 @@ class PackageTests(unittest.TestCase):
                 self.verify(installed_version=installed)
         self.verify(installed_version="0.9.9")
         newer = self.root / "newer.sicu"
-        pkg.write_package(self.tree, newer, self.key, "1.0.2", min_updater=2)
-        with self.assertRaisesRegex(pkg.PackageError, "updater v2"):
-            self.verify(newer)
-        self.verify(newer, updater_version=2)
+        later = pkg.UPDATER_VERSION + 1
+        pkg.write_package(self.tree, newer, self.key, "1.0.2", min_updater=later)
+        with self.assertRaisesRegex(pkg.PackageError, f"updater v{later}"):
+            self.verify(newer, updater_version=pkg.UPDATER_VERSION)
+        self.verify(newer, updater_version=later)
 
     def test_not_a_package(self):
         junk = self.root / "junk.sicu"

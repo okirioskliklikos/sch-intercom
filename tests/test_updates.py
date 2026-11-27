@@ -1,4 +1,4 @@
-"""Φάση 5B2a: διανομή ενημερώσεων από τον Manager και λήψη στον Client (πραγματικό mTLS)."""
+"""Φάση 5B2a/5B2c: διανομή ενημερώσεων από τον Manager και λήψη στον Client (πραγματικό mTLS)."""
 from __future__ import annotations
 
 import json
@@ -10,6 +10,7 @@ import time
 import unittest
 from unittest import mock
 import uuid
+import zipfile
 
 from client.install_paths import Layout
 from client.main import pump_frames
@@ -26,7 +27,7 @@ from shared.jitter import DelayTracker
 from shared.transport_security import DEFAULT_SERVER_NAME, client_context
 from shared.update_protocol import check_message, read_message, send_message
 from tests.test_failure_scenarios import ROOM, RegistryFixture, wait_until
-from tests.test_release_package import make_tree
+from tests.test_release_package import make_tree, rewrite
 
 
 class Packages:
@@ -231,28 +232,34 @@ class ServerTests(ServerFixture, unittest.TestCase):
         self.assertEqual(old.run_once("127.0.0.1"), "ready")
 
     def test_resume_from_partial_download(self):
-        source = self.packages.make("1.0.1", size=20)
-        entry = self.store.import_package(source)
+        self.store.import_package(self.packages.make("1.0.1", size=20))
         self.open_server()
         updater = self.client()
-        updater.staging.mkdir(parents=True)
-        data = self.store.package_path("1.0.1").read_bytes()
-        (updater.staging / "1.0.1.part").write_bytes(data[:300_000])
-        (updater.staging / "1.0.1.json").write_text(json.dumps(
-            {"sha256": entry["sha256"], "size": entry["size"]}))
+        index = self.updates.index(self.store.current())
+        work = updater.staging / "1.0.1"
+        work.mkdir(parents=True)
+        (updater.staging / "1.0.1.json").write_text(json.dumps({"sha256": index.sha256}))
+        item = index.files["app/blob.bin"]
+        with zipfile.ZipFile(index.path) as archive:
+            data = archive.read(pkg.FILES_PREFIX + "app/blob.bin")
+        (work / "partial").mkdir()
+        (work / "partial" / f"{item['sha256']}.part").write_bytes(data[:300_000])
         self.assertEqual(updater.run_once("127.0.0.1"), "ready")
-        self.assertTrue(any("Συνέχιση λήψης 1.0.1" in line for line in self.logs))
+        self.assertTrue(any("Συνέχιση λήψης 1.0.1: app/blob.bin" in line for line in self.logs))
 
     def test_partial_for_other_package_is_discarded(self):
         self.store.import_package(self.packages.make("1.0.1"))
         self.open_server()
         updater = self.client()
-        updater.staging.mkdir(parents=True)
-        (updater.staging / "1.0.1.part").write_bytes(b"x" * 1000)
-        (updater.staging / "1.0.1.json").write_text('{"sha256": "00", "size": 5}')
+        work = updater.staging / "1.0.1"
+        work.mkdir(parents=True)
+        (work / "partial").mkdir()
+        (work / "partial" / ("0" * 64 + ".part")).write_bytes(b"x" * 1000)
+        (updater.staging / "1.0.1.json").write_text('{"sha256": "00"}')
         (updater.staging / "0.9.9.part").write_bytes(b"old")
         self.assertEqual(updater.run_once("127.0.0.1"), "ready")
         self.assertFalse(any("Συνέχιση" in line for line in self.logs))
+        self.assertEqual(list(updater.staging.iterdir()), [])
 
     def test_tampered_package_rejected_by_client_and_not_retried(self):
         self.store.import_package(self.packages.make("1.0.1"))
@@ -275,15 +282,21 @@ class ServerTests(ServerFixture, unittest.TestCase):
         self.assertIn("Άκυρη υπογραφή", entry["detail"])
         self.assertEqual(updater.run_once("127.0.0.1"), "none")
 
-    def test_wrong_hash_from_manager_is_failed_download(self):
+    def test_wrong_file_from_manager_is_failed_download(self):
         self.store.import_package(self.packages.make("1.0.1"))
-        config = json.loads(self.store.config_file.read_text())
-        config["current"]["sha256"] = "0" * 64
-        self.store.config_file.write_text(json.dumps(config))
+        path = self.store.package_path("1.0.1")
+        changed = path.with_name("changed.sicu")
+        # Σωστή υπογραφή/manifest, αλλά ο Manager (ή το δίσκος του) στέλνει άλλα bytes.
+        rewrite(path, changed, lambda name, data:
+                bytes(len(data)) if name.endswith("blob.bin") else data)
+        changed.replace(path)
         self.open_server()
         updater = self.client()
         self.assertEqual(updater.run_once("127.0.0.1"), "failed")
         self.assertEqual(updater.layout.read_current()["failed"], [])   # ξαναδοκιμάζεται
+        self.assertIn("Λάθος SHA-256 λήψης: app/blob.bin",
+                      self.status.snapshot()[updater.client_id]["detail"])
+        self.assertFalse(updater.layout.version_dir("1.0.1").exists())
 
     def test_downgrade_offer_ignored_by_client(self):
         self.store.import_package(self.packages.make("1.0.1"))
@@ -316,7 +329,8 @@ class ServerTests(ServerFixture, unittest.TestCase):
         self.addCleanup(stream.close)
         send_message(stream, check_message(holder.client_id, "1.0.0", updater=1, protocol=7))
         offer = read_message(stream)
-        send_message(stream, {"type": "get", "version": "1.0.1", "offset": 0})
+        send_message(stream, {"type": "get-file", "version": "1.0.1", "path": "app/blob.bin",
+                              "offset": 0})
         reply = read_message(stream)
         self.assertEqual(reply["type"], "data")
         waiting = self.client("waiting")

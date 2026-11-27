@@ -22,11 +22,14 @@ import socket
 import sys
 import threading
 import time
+import zipfile
 
-from shared.package import PRODUCT, PackageError, verify_package
+from shared.package import (FILES_PREFIX, PRODUCT, PackageError, read_signed_manifest,
+                            validate_manifest, verify_package)
 from shared.update_protocol import (CHUNK_BYTES, IDLE_TIMEOUT, MAX_DOWNLOADS, UPDATE_PORT,
                                     UpdateProtocolError, busy_retry, parse_check,
-                                    parse_get, parse_report, read_message, send_message)
+                                    parse_get_file, parse_get_manifest, parse_report,
+                                    read_message, send_message)
 from shared.version import parse_version
 
 FOLDER = "updates"
@@ -213,6 +216,57 @@ class UpdateStore:
         return current
 
 
+class PackageIndex:
+    """Το manifest ενός εισηγμένου πακέτου (5B2c): τι προσφέρεται και ποια αρχεία υπάρχουν.
+
+    Ο Manager δεν ξαναελέγχει την υπογραφή εδώ (έγινε στην εισαγωγή)· την ελέγχει ο Client.
+    """
+
+    def __init__(self, path: Path):
+        self.path = Path(path)
+        self.manifest_data, self.signature = read_signed_manifest(self.path)
+        try:
+            manifest = validate_manifest(json.loads(self.manifest_data.decode("utf-8")))
+        except (UnicodeDecodeError, ValueError) as exc:
+            raise PackageError("Μη αναγνώσιμο manifest") from exc
+        self.version = manifest["version"]
+        self.files = {item["path"]: item for item in manifest["files"]}
+        self.size = sum(item["size"] for item in manifest["files"])
+        self.sha256 = hashlib.sha256(self.manifest_data).hexdigest()
+
+
+class FileReader:
+    """Ανάγνωση αρχείων από το .sicu μιας σύνδεσης· η σειριακή ανάγνωση συνεχίζει χωρίς
+    να ξαναποσυμπιέζεται το αρχείο από την αρχή."""
+
+    def __init__(self, path: Path):
+        self.path = Path(path)
+        self.archive = zipfile.ZipFile(path)
+        self._name: str | None = None
+        self._stream = None
+        self._position = 0
+
+    def read(self, name: str, offset: int, size: int) -> bytes:
+        if self._name != name or self._position != offset:
+            self._close_stream()
+            self._stream = self.archive.open(FILES_PREFIX + name)
+            if offset:
+                self._stream.seek(offset)
+            self._name, self._position = name, offset
+        data = self._stream.read(size)
+        self._position += len(data)
+        return data
+
+    def _close_stream(self) -> None:
+        if self._stream is not None:
+            self._stream.close()
+        self._stream, self._name = None, None
+
+    def close(self) -> None:
+        self._close_stream()
+        self.archive.close()
+
+
 class UpdateStatus:
     """Κατάσταση ανά Client, στη μνήμη και στο updates-status.json (με όριο εγγραφών)."""
 
@@ -285,6 +339,18 @@ class UpdateServer:
         self._push: Callable | None = None
         self.start_error: str | None = None
         self.active_downloads = 0
+        self._indexes: dict[tuple[str, str], PackageIndex] = {}
+
+    def index(self, entry: dict) -> PackageIndex:
+        """Manifest του πακέτου της ρύθμισης (μία ανάγνωση ανά εισηγμένο πακέτο)."""
+        key = (entry["version"], entry["sha256"])
+        with self._lock:
+            index = self._indexes.get(key)
+        if index is None:
+            index = PackageIndex(self.store.package_path(entry["version"]))
+            with self._lock:
+                self._indexes = {key: index}
+        return index
 
     # -- άνοιγμα / κλείσιμο ---------------------------------------------------
     @property
@@ -407,12 +473,23 @@ class UpdateServer:
                             if check["client_id"] != client_id:
                                 raise UpdateProtocolError("Άλλο client_id στην ίδια σύνδεση")
                             offer = self._answer_check(stream, check)
-                        elif kind == "get":
-                            request = parse_get(message)
-                            if offer is None or request["version"] != offer["version"] or \
-                                    request["offset"] >= offer["size"]:
+                        elif kind == "get-manifest":
+                            request = parse_get_manifest(message)
+                            if offer is None or request["version"] != offer.version:
                                 send_message(stream, {"type": "error",
                                                       "reason": "Το πακέτο δεν διατίθεται"})
+                                continue
+                            send_message(stream, {"type": "manifest",
+                                                  "size": len(offer.manifest_data),
+                                                  "sig_size": len(offer.signature)},
+                                         offer.manifest_data + offer.signature)
+                        elif kind == "get-file":
+                            request = parse_get_file(message)
+                            item = offer.files.get(request["path"]) if offer else None
+                            if item is None or request["version"] != offer.version or \
+                                    request["offset"] >= item["size"]:
+                                send_message(stream, {"type": "error",
+                                                      "reason": "Το αρχείο δεν διατίθεται"})
                                 continue
                             if not holding:
                                 if not self._downloads.acquire(False):
@@ -424,15 +501,19 @@ class UpdateServer:
                                 holding = True
                                 with self._lock:
                                     self.active_downloads += 1
-                                handle = open(self.store.package_path(offer["version"]), "rb")
-                            handle.seek(request["offset"])
-                            data = handle.read(CHUNK_BYTES)
-                            send_message(stream, {"type": "data", "offset": request["offset"],
+                            if handle is None or handle.path != offer.path:
+                                if handle is not None:
+                                    handle.close()
+                                handle = FileReader(offer.path)
+                            data = handle.read(request["path"], request["offset"],
+                                               CHUNK_BYTES)
+                            send_message(stream, {"type": "data", "path": request["path"],
+                                                  "offset": request["offset"],
                                                   "size": len(data)}, data)
-                            done = request["offset"] + len(data)
-                            self.status.update(client_id, state="downloading",
-                                               available=offer["version"], detail="",
-                                               progress=int(done * 100 // offer["size"]))
+                            fields = {"state": "downloading", "available": offer.version}
+                            if request["progress"] is not None:
+                                fields["progress"] = request["progress"]
+                            self.status.update(client_id, **fields)
                         elif kind == "report":
                             report = parse_report(message)
                             fields = {"state": report["state"], "detail": report["detail"]}
@@ -460,15 +541,21 @@ class UpdateServer:
                 self._downloads.release()
             self._connections.release()
 
-    def _answer_check(self, stream, check: dict) -> dict | None:
-        offer = self.store.offer_for(check)
+    def _answer_check(self, stream, check: dict) -> PackageIndex | None:
+        entry = self.store.offer_for(check)
         client_id = check["client_id"]
         current = self.store.current()
         fields = {"app": check["app"], "seen_at": int(time.time())}
+        offer = None
+        if entry is not None:
+            try:
+                offer = self.index(entry)
+            except PackageError as exc:
+                self.log(f"[Ενημερώσεις] Το πακέτο {entry['version']} δεν διαβάζεται: {exc}")
         if offer is not None:
-            fields.update(state="available", available=offer["version"], detail="")
-            send_message(stream, {"type": "offer", "version": offer["version"],
-                                  "size": offer["size"], "sha256": offer["sha256"]})
+            fields.update(state="available", available=offer.version, detail="")
+            send_message(stream, {"type": "offer", "version": offer.version,
+                                  "size": offer.size, "sha256": offer.sha256})
         else:
             if current is None or parse_version(check["app"]) >= parse_version(current["version"]):
                 fields.update(state="current", available=None, detail="", progress=None)

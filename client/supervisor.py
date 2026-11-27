@@ -197,11 +197,13 @@ class Supervisor:
     def __init__(self, layout: Layout, *, spawn=default_spawn, clock=time.monotonic,
                  backoff=BACKOFF_SECONDS, stable_after: float = STABLE_AFTER_SECONDS,
                  client_args: tuple[str, ...] = (), trial_seconds: float = TRIAL_SECONDS,
-                 registry=None):
+                 registry=None, uninstall=None):
         self.layout = layout
         self.trial_seconds = trial_seconds
-        # Για τα tests: αντικατάσταση του HKCU\Run (None = winreg στα Windows).
+        # Για τα tests: αντικατάσταση του HKCU\Run και της έκδοσης στις «Εφαρμογές»
+        # (None = winreg στα Windows).
         self.registry = registry
+        self.uninstall = uninstall
         self.trial: str | None = None
         self.trial_started = 0.0
         self._trial_ok = threading.Event()
@@ -416,6 +418,13 @@ class Supervisor:
                 set_run_value(self.layout.run_name, command)
         except OSError as exc:
             self.log.info(f"[supervisor] Δεν ενημερώθηκε το HKCU\\Run: {exc}")
+        try:
+            if self.uninstall is not None:
+                self.uninstall(version)
+            elif os.name == "nt":
+                set_uninstall_version(version)
+        except OSError as exc:
+            self.log.info(f"[supervisor] Δεν ενημερώθηκε η έκδοση στις «Εφαρμογές»: {exc}")
 
     def _cleanup_versions(self, state: dict) -> None:
         """Μένουν μόνο current και previous (και η έκδοση από την οποία τρέχω)."""
@@ -622,6 +631,23 @@ def set_run_value(name: str, command: str) -> None:
         except FileNotFoundError:
             return
         winreg.SetValueEx(key, name, 0, winreg.REG_SZ, command)
+
+
+#: Κλειδί απεγκατάστασης του Inno Setup (AppId του installer/sch-intercom-client.iss).
+APP_ID = "{6B0E7C55-2F3D-4C41-9E0B-5C1D2A7E9F10}"
+UNINSTALL_KEY = rf"Software\Microsoft\Windows\CurrentVersion\Uninstall\{APP_ID}_is1"
+
+
+def set_uninstall_version(version: str) -> None:
+    """5B2c: η έκδοση στις «Εφαρμογές» των Windows μετά από ενημέρωση (μόνο αν υπάρχει)."""
+    import winreg
+    try:
+        key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, UNINSTALL_KEY, 0,
+                             winreg.KEY_SET_VALUE)
+    except FileNotFoundError:
+        return   # χωρίς εγκαταστάτη (φορητό ή δοκιμή)
+    with key:
+        winreg.SetValueEx(key, "DisplayVersion", 0, winreg.REG_SZ, version)
 
 
 def main(argv: list[str] | None = None) -> int:
