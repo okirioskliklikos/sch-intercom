@@ -298,6 +298,8 @@ Client δεν περνά το mTLS.
   `tools/update_install_live_test.{py,sh,ps1}` 17 βήματα: +λήψη 1 από N αρχεία με την 1.0.0 ανέπαφη,
   «Εφαρμογές», νέα εκκίνηση από την 1.0.5, 1.0.6 με σβήσιμο όλων των παλιών, απεγκατάσταση μετά από
   ενημερώσεις (Windows). Linux 27/11/2026: 17/17 PASS, `update_live_test` 15/15 PASS, σουίτα 679 OK.
+  **Windows 27/11/2026 (χρήστης): `tools\update_install_live_test.ps1` 17/17 PASS (πραγματικός εγκαταστάτης)
+  και `tools\update_live_test.ps1` 15/15 PASS.**
 
 ### 5.5 Γραμμή εντολών Client
 `%LOCALAPPDATA%\sch-intercom\sch-intercom-client.cmd` (υλοποιήθηκε στο 5A):
