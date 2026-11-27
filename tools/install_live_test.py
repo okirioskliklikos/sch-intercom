@@ -255,7 +255,7 @@ class LiveTest:
 
     def s09_start(self):
         result = self.cli("--start")
-        info = wait_for(self.status, 20) or {}
+        wait_for(self.status, 20)
         pid = wait_for(self.client_pid, 15)
         return result.returncode == 0 and pid_alive(pid), result.stdout.strip()
 

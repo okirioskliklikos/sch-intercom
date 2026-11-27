@@ -16,7 +16,7 @@ import subprocess
 import sys
 import time
 
-from client.install_paths import (CLI_NAME, DEFAULT_RUN_NAME, MANAGER_CERT, Layout,
+from client.install_paths import (DEFAULT_RUN_NAME, MANAGER_CERT, Layout,
                                   atomic_write_json, load_settings, save_settings)
 from client.single_instance import is_locked
 from client.supervisor import send_command
