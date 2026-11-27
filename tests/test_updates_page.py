@@ -130,6 +130,13 @@ class LogicTests(Fixture, unittest.TestCase):
                          [(1, "ενημερωμένοι"), (1, "διαθέσιμη"), (4, "σε εξέλιξη"),
                           (1, "αποτυχία"), (2, "εκτός σύνδεσης")])
 
+    def test_versions_for_room_check(self):
+        a = self.add("a", app="1.0.6", state="current")
+        self.add("never")
+        self.assertEqual(self.model.versions(), (None, {a: "1.0.6"}))
+        self.import_versions("1.0.6")
+        self.assertEqual(self.model.versions(), ("1.0.6", {a: "1.0.6"}))
+
     def test_without_package_counts_versions(self):
         self.add("a", app="1.0.0", state="current")
         self.add("b", online=False, last_seen=NOW - 600, app="1.0.0", state="current")

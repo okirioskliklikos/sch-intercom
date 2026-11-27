@@ -26,6 +26,7 @@ from shared.enrollment import (MAX_PENDING, REQUEST_TTL, EnrollmentError,
 from director.notices import TEXT_DUPLICATE_STATE
 from shared.identity import ROOM_PATTERN
 from shared.ui import theme
+from shared.version import parse_version
 
 LAST_SEEN_VERSION = 1
 #: Χωρίς αλλαγή κατάστασης online/offline, αποθήκευση το πολύ μία φορά ανά λεπτό.
@@ -274,6 +275,14 @@ class ComputerView:
 class RoomView:
     room: str
     computers: list[ComputerView] = field(default_factory=list)
+    #: Ένδειξη «ενημερωμένη»: η τρέχουσα έκδοση πακέτου και οι online υπολογιστές
+    #: της αίθουσας που την έχουν (κενό = χωρίς ✓, π.χ. χωρίς εισαγωγή πακέτου).
+    version: str | None = None
+    updated_by: tuple[str, ...] = ()
+
+    @property
+    def updated(self) -> bool:
+        return self.version is not None and bool(self.updated_by)
 
     @property
     def online(self) -> bool:
@@ -305,6 +314,15 @@ class Decision:
     hint: str = ""
 
 
+def _at_least(version: str | None, wanted) -> bool:
+    if not version:
+        return False
+    try:
+        return parse_version(version) >= wanted
+    except ValueError:
+        return False
+
+
 def _sort_key(text: str) -> str:
     return text.casefold()
 
@@ -324,6 +342,9 @@ class SecurityModel:
         self.broadcaster = broadcaster
         self.last_seen = last_seen
         self.clock = clock
+        #: () -> (τρέχουσα έκδοση πακέτου ή None, {client_id: αναφερόμενη έκδοση}).
+        #: Το ορίζει το GUI όταν υπάρχουν ενημερώσεις (director.updates_view).
+        self.update_versions: Callable[[], tuple[str | None, dict[str, str]]] | None = None
 
     # --- θύρα εγγραφής ------------------------------------------------------
     def port_notice(self) -> str | None:
@@ -397,7 +418,21 @@ class SecurityModel:
             groups.setdefault(entry["room"], RoomView(entry["room"])).computers.append(computer)
         for group in groups.values():
             group.computers.sort(key=lambda c: (_sort_key(c.name), c.client_id))
+        self._mark_updated(groups.values())
         return [groups[room] for room in sorted(groups, key=_sort_key)]
+
+    def _mark_updated(self, rooms) -> None:
+        """✓ αίθουσας: ≥1 online υπολογιστής έχει (τουλάχιστον) την τρέχουσα έκδοση."""
+        if self.update_versions is None:
+            return
+        target, versions = self.update_versions()
+        if target is None:
+            return
+        wanted = parse_version(target)
+        for room in rooms:
+            room.version = target
+            room.updated_by = tuple(c.name for c in room.computers
+                                    if c.online and _at_least(versions.get(c.client_id), wanted))
 
     @staticmethod
     def totals(rooms: list[RoomView]) -> str:

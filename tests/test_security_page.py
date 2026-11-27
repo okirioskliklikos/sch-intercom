@@ -541,6 +541,50 @@ class SecurityPageTests(SecurityFixture, unittest.TestCase):
                            header.dot.mapTo(self.page, header.dot.rect().topLeft()).x() + 15)
         self.assertEqual(self.page.totals.text(), "2 υπολογιστές · 1 online")
 
+    def test_room_check_when_online_computer_has_current_version(self):
+        # Michail 27/11/2026: ✓ δίπλα στην αίθουσα αν ≥1 online έχει την τρέχουσα έκδοση.
+        a = self.approved("C2627-Γ1", "Board1", "a")
+        b = self.approved("C2627-Γ1", "PC", "b")
+        c = self.approved("C2627-Γ2", "Board1", "c")
+        versions = {a: "1.0.6", b: "1.0.6", c: "1.0.6"}
+        target = ["1.0.6"]
+        self.model.update_versions = lambda: (target[0], dict(versions))
+        self.broadcaster.online[a] = ("C2627-Γ1", 0.1)
+        self.broadcaster.offline[b] = ("C2627-Γ1", 60.0)
+        self.broadcaster.offline[c] = ("C2627-Γ2", 60.0)  # μόνο offline → χωρίς ✓
+        self.page.refresh()
+        g1, g2 = self.page.room_headers["C2627-Γ1"], self.page.room_headers["C2627-Γ2"]
+        self.assertFalse(g1.updated.isHidden())
+        self.assertEqual(g1.updated.toolTip(), "Ενημερωμένη: 1.0.6 (Board1)")
+        self.assertTrue(g2.updated.isHidden())
+        # Δεξιά από το όνομα, πριν από το «N υπολογιστές».
+        QApplication.processEvents()
+        self.assertGreaterEqual(g1.updated.geometry().left(), g1.name.geometry().right())
+        self.assertLess(g1.updated.geometry().right(), g1.count.geometry().left())
+        # Δύο online με την έκδοση: και τα δύο ονόματα στο tooltip.
+        self.broadcaster.online[b] = self.broadcaster.offline.pop(b)
+        self.page.refresh()
+        self.assertEqual(g1.updated.toolTip(), "Ενημερωμένη: 1.0.6 (Board1, PC)")
+        # Νεότερη έκδοση από την τρέχουσα μετρά ως ενημερωμένη· παλαιότερη όχι.
+        versions[a], versions[b] = "1.0.7", "1.0.5"
+        self.page.refresh()
+        self.assertEqual(g1.updated.toolTip(), "Ενημερωμένη: 1.0.6 (Board1)")
+        versions[a] = "1.0.5"
+        self.page.refresh()
+        self.assertTrue(g1.updated.isHidden())
+        # Χωρίς εισαγωγή πακέτου: τίποτα.
+        versions[a] = "1.0.6"
+        target[0] = None
+        self.page.refresh()
+        self.assertTrue(g1.updated.isHidden())
+
+    def test_room_check_hidden_without_updates(self):
+        a = self.approved("C2627-Γ1", "Board1", "a")
+        self.broadcaster.online[a] = ("C2627-Γ1", 0.1)
+        self.page.refresh()
+        self.assertIsNone(self.model.update_versions)
+        self.assertTrue(self.page.room_headers["C2627-Γ1"].updated.isHidden())
+
     def test_menu_actions_change_room_rename_and_revoke(self):
         client_id = self.approved("C2627-Γ1", "Board1", "a")
         self.page.refresh()

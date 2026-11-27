@@ -196,6 +196,13 @@ class UpdatesModel:
         return [(counts[key], label) for key, label in COUNTER_LABELS if counts[key]]
 
     # --- ενέργειες ----------------------------------------------------------------
+    def versions(self) -> tuple[str | None, dict[str, str]]:
+        """Για το ✓ των αιθουσών: (τρέχουσα έκδοση ή None, {client_id: έκδοση})."""
+        current = self.store.config()["current"]
+        snapshot = self.status.snapshot()
+        return (None if current is None else current["version"],
+                {cid: entry["app"] for cid, entry in snapshot.items() if entry.get("app")})
+
     def set_auto(self, enabled: bool) -> None:
         self._require_primary()
         self.store.set_auto(enabled)
