@@ -1,7 +1,7 @@
 # Φάση 5 — Εγκαταστάτης Client, αυτόματες ενημερώσεις, tray
 
-**Κατάσταση:** προδιαγραφές (μόνο τεκμηρίωση). Καμία υλοποίηση ή δοκιμή ακόμη. Οι αποφάσεις του §1
-εγκρίθηκαν από τον χρήστη 27/11/2026. Κάθε επόμενο PR ξεκινά με σύντομη πρόταση και έγκριση.
+**Κατάσταση:** προδιαγραφές εγκεκριμένες 27/11/2026 (PR 80). **5A υλοποιήθηκε** (§4.5)· επόμενο 5B1.
+Κάθε επόμενο PR ξεκινά με σύντομη πρόταση και έγκριση.
 
 Πηγές: `development.md` §3 (Φάση 5), `requirements.md` §7 και §10, `architecture.md` §9,
 `phase4-3.md` §5.5 (νέα ταυτότητα από τον Manager), `ui-design.md` (Client).
@@ -92,6 +92,41 @@
 `logs\client.log`, `logs\updater.log`, `logs\supervisor.log`, περιστροφή 5 × 1 MB, UTF-8. Χωρίς προσωπικά
 δεδομένα μαθητών.
 
+### 4.5 Υλοποίηση 5A (27/11/2026)
+| Αρχείο | Ρόλος |
+|---|---|
+| `shared/version.py` | `APP_VERSION`, έλεγχος μορφής X.Y.Z |
+| `client/install_paths.py` | φάκελοι, `current.json`, `install.json`, `client-settings.json` |
+| `client/single_instance.py` | κλείδωμα αρχείου (ένα αντίγραφο) |
+| `client/supervisor.py` | εκκίνηση/επανεκκίνηση Client, logs, κανάλι εντολών, Job object |
+| `client/ctl.py` | γραμμή εντολών (§5.5) και τελικό βήμα εγκατάστασης (`--install-finish`) |
+| `installer/sch-intercom-client.iss` | Inno Setup (UTF-8 με BOM) |
+| `tools/build_release.{py,ps1}` | δέντρο έκδοσης + `setup.exe` |
+| `tools/install_live_test.{py,ps1}` | πραγματική δοκιμή στα Windows, 15 βήματα |
+
+**Πραγματική δοκιμή Windows 27/11/2026 (χρήστης): `tools\install_live_test.ps1` 15/15 PASS** με Inno Setup 7
+(και τα 22 unit tests), **με το Avast απενεργοποιημένο** (καθυστερούσε τους ελέγχους). Δεν δοκιμάστηκαν:
+η συμπεριφορά με ενεργό antivirus, εξαίρεση Defender (admin), εκκίνηση μετά από πραγματική
+επανεκκίνηση των Windows, εγγραφή με κωδικό από το παράθυρο του εγκαταστάτη.
+
+Λεπτομέρειες που προέκυψαν στην υλοποίηση:
+- Η τιμή στο `HKCU\...\Run` δείχνει το `pythonw.exe` της εγκατεστημένης έκδοσης
+  (`versions\<έκδοση>\python\pythonw.exe -m client.supervisor --home …`). Το ίδιο και το
+  `sch-intercom-client.cmd`. Στο 5B η εναλλαγή έκδοσης ξαναγράφει και τα δύο.
+- `install.json` στον φάκελο προγράμματος: φάκελος δεδομένων και όνομα της τιμής Run, ώστε
+  supervisor, γραμμή εντολών και απεγκατάσταση να μη χρειάζονται παραμέτρους.
+- Ο `client.main` διαβάζει πλέον από τον φάκελο δεδομένων το `manager-ca.pem` (το `--tls-ca`
+  δεν είναι υποχρεωτικό) και το `client-settings.json` (Manager, συσκευή ήχου). Ό,τι δίνεται
+  στη γραμμή εντολών υπερισχύει.
+- Ο Client τρέχει ως `python.exe` χωρίς παράθυρο (`CREATE_NO_WINDOW`) σε Job object με
+  `KILL_ON_JOB_CLOSE`: αν τερματιστεί ο supervisor, τερματίζεται και ο Client.
+- Αν το Inno Setup δεν έχει `Languages\Greek.isl`, τα κουμπιά του οδηγού είναι στα αγγλικά·
+  οι δικές μας σελίδες και τα μηνύματα είναι πάντα ελληνικά.
+- Το PySide6 μπαίνει στο πακέτο με το 5C (tray). Το build περιέχει ήδη pycaw/comtypes/psutil/winrt.
+- Η εξαίρεση Defender δεν αφαιρείται στην απεγκατάσταση (θέλει ξανά admin).
+- Η εγγραφή (κωδικός) γίνεται στο τέλος της εγκατάστασης μόνο για νέα ταυτότητα· αν αποτύχει
+  (Manager κλειστός), ξανά με `sch-intercom-client --enroll`.
+
 ## 5. 5B — Αυτόματες ενημερώσεις μέσω LAN
 
 ### 5.1 Πακέτο και υπογραφή (5B1)
@@ -158,9 +193,11 @@ Client δεν περνά το mTLS.
 Απόσυρση κακής έκδοσης: δεν υπάρχει downgrade· βγαίνει νεότερη έκδοση (π.χ. 1.0.2 με το περιεχόμενο της 1.0.0).
 
 ### 5.5 Γραμμή εντολών Client
-`%LOCALAPPDATA%\sch-intercom\sch-intercom-client.cmd`:
+`%LOCALAPPDATA%\sch-intercom\sch-intercom-client.cmd` (υλοποιήθηκε στο 5A):
 `--status`, `--restart`, `--stop`, `--start`, `--set-director-host <IP|auto>`, `--set-device <αριθμός|auto>`,
-`--set-room`/`--set-name` (μόνο ως πρόταση, ο Manager είναι η πηγή), `--new-identity`, `--purge`.
+`--show-settings`, `--enroll [--room … --computer-name …]`, `--purge --yes`.
+Αίθουσα/όνομα: ο Manager είναι η πηγή· στην εγγραφή δίνονται ως πρόταση. `--new-identity` παραμένει
+στον `client.main` (θα το καλεί η εντολή του Manager στο 5C).
 
 ## 6. 5C — Tray, παράθυρο Client, νέα ταυτότητα από τον Manager
 

@@ -27,6 +27,7 @@ from shared.device_identity import create_device_identity, replace_device_identi
 from shared.transport_security import client_context, connect_tls, DEFAULT_SERVER_NAME
 from shared.discovery import discover_candidates, DISCOVERY_PORT
 from shared.manager_pin import load_pin, save_pin
+from client.install_paths import MANAGER_CERT, data_dir, load_settings
 from client.identity_reset import (CLONED, PREVIOUS, archive_identity, check_clone,
                                    previous_room, remember_machine)
 from shared.control import heartbeat_sender
@@ -199,7 +200,7 @@ def play_stream(
     jitter = make_jitter_buffer(buffer_ms, fade_ms, resume_fade_ms, max_buffer_ms)
     jitter.standby()
     delay = DelayTracker()
-    journal = recovery_path or Path.home() / ".school-intercom" / "volume-recovery.json"
+    journal = recovery_path or data_dir() / "volume-recovery.json"
     # Αν προηγούμενος Client έπεσε, ανάκαμψη και χωρίς νέα ενεργοποίηση
     # της λειτουργίας από CLI. Δεν επιχειρούμε αλλαγές σε Linux.
     # Κανένα πρόβλημα έντασης/ανάκαμψης δεν σταματά τον Client: μόνο προειδοποίηση.
@@ -438,7 +439,9 @@ def run_with_reconnect(
             sleep(delay)
 
 
-def main() -> None:
+def build_parser() -> argparse.ArgumentParser:
+    # Φάση 5A: ο φάκελος δεδομένων αλλάζει με SCH_INTERCOM_DATA (εγκαταστάτης, δοκιμές).
+    data = data_dir()
     parser = argparse.ArgumentParser(description="School Intercom — Classroom Client (πρωτότυπο)")
     parser.add_argument("--host", default=None,
                         help="Προαιρετική IP Director (παρακάμπτει το UDP discovery)")
@@ -446,13 +449,14 @@ def main() -> None:
                         help="UDP θύρα Discovery (default 50556)")
     parser.add_argument("--room", default=None, help="Αίθουσα, π.χ. C2627-Γ1 (αποθηκεύεται)")
     parser.add_argument("--identity-file", type=Path,
-                        default=Path.home() / ".school-intercom" / "client.json",
+                        default=data / "client.json",
                         help="Τοπικό αρχείο σταθερής ταυτότητας")
     parser.add_argument("--port", type=int, default=DEFAULT_PORT)
-    parser.add_argument("--tls-ca", type=Path, required=True,
-                        help="Έμπιστο πιστοποιητικό/CA Director (PEM)")
+    parser.add_argument("--tls-ca", type=Path, default=data / MANAGER_CERT,
+                        help="Έμπιστο πιστοποιητικό/CA Director (PEM)· προεπιλογή "
+                             "manager-ca.pem στον φάκελο δεδομένων")
     parser.add_argument("--client-credentials-dir", type=Path,
-                        default=Path.home() / ".school-intercom" / "credentials",
+                        default=data / "credentials",
                         help="Φάκελος κρυπτογραφημένου κλειδιού Client")
     parser.add_argument("--new-client-key", action="store_true",
                         help="Δημιουργία νέου κλειδιού για τον ίδιο UUID (μετά από ανάκληση)· "
@@ -468,10 +472,10 @@ def main() -> None:
     parser.add_argument("--computer-name", default=None,
                         help="Προτεινόμενο όνομα υπολογιστή στην εγγραφή")
     parser.add_argument("--client-hints-file", type=Path,
-                        default=Path.home() / ".school-intercom" / "client-hints.json",
+                        default=data / "client-hints.json",
                         help="Τελευταία στοιχεία που όρισε ο Manager")
     parser.add_argument("--registry-seen-file", type=Path,
-                        default=Path.home() / ".school-intercom" / "registry-seen.json",
+                        default=data / "registry-seen.json",
                         help="Μεγαλύτερη έκδοση μητρώου που έχει δει ο Client ανά Manager")
     parser.add_argument("--tls-server-name", default=DEFAULT_SERVER_NAME,
                         help="DNS όνομα στο SAN του πιστοποιητικού Director")
@@ -512,7 +516,26 @@ def main() -> None:
                         help=argparse.SUPPRESS)
     # Μόνο για τις αυτόματες δοκιμές 4.4: γεγονότα λήψης/αναπαραγωγής σε αρχείο JSONL.
     parser.add_argument("--test-report", type=Path, default=None, help=argparse.SUPPRESS)
+    return parser
+
+
+def apply_local_settings(args, settings: dict) -> None:
+    """Φάση 5A: --host/--device από τις ρυθμίσεις της γραμμής εντολών, αν δεν δόθηκαν."""
+    if args.host is None and settings.get("director_host"):
+        args.host = settings["director_host"]
+    if args.device is None and settings.get("device") is not None:
+        args.device = settings["device"]
+
+
+def main() -> None:
+    parser = build_parser()
     args = parser.parse_args()
+    try:
+        apply_local_settings(args, load_settings(args.identity_file.parent))
+    except ValueError as exc:
+        print(f"[Client] Αγνοούνται οι τοπικές ρυθμίσεις: {exc}", flush=True)
+    if not args.tls_ca.exists():
+        parser.error(f"Λείπει το πιστοποιητικό του Manager: {args.tls_ca} (δώστε --tls-ca)")
     if args.mute_others and args.announcement_volume is None:
         parser.error("--mute-others απαιτεί --announcement-volume")
     if args.announcement_volume is not None and not 0 <= args.announcement_volume <= 100:
