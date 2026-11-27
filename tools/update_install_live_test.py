@@ -376,11 +376,14 @@ class LiveTest:
 
     def s07(self):
         """Ο Manager βλέπει «installed» και την έκδοση 1.0.1."""
-        ok = self.wait(lambda: self.manager_status().get("state") in ("installed", "current")
-                       and self.manager_status().get("app") == "1.0.1", 30)
+        # Η αναφορά «installed» έρχεται με τον έλεγχο μετά το commit (λίγο μετά το CHECK
+        # της σύνδεσης, που ήδη δίνει «current»): αναμονή για την ίδια την αναφορά.
+        installed_seen = self.director.wait_for(self.client_id, ": installed 1.0.1",
+                                                timeout=40) is not None
+        ok = self.wait(lambda: self.manager_status().get("state") == "installed"
+                       and self.manager_status().get("app") == "1.0.1", 10)
         status = self.manager_status()
-        installed_seen = any("installed 1.0.1" in line for line in self.director.lines)
-        return bool(ok) and installed_seen, f"Manager: {status.get('state')} v{status.get('app')}"
+        return installed_seen and bool(ok), f"Manager: {status.get('state')} v{status.get('app')}"
 
     def trial_fails(self, version: str, reason: str, timeout: float) -> tuple[bool, str]:
         mark = self.sup_log.mark()
