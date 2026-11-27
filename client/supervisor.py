@@ -365,12 +365,20 @@ class Supervisor:
                 except OSError:
                     pass
 
+    def close(self) -> None:
+        """Κλείνει τα αρχεία log (στα Windows ένα ανοιχτό αρχείο δεν σβήνεται)."""
+        for logger in (self.log, self.client_log):
+            for handler in list(logger.handlers):
+                logger.removeHandler(handler)
+                handler.close()
+
     def run(self, *, poll: float = 0.5) -> int:
         lock = InstanceLock(self.layout.lock_file)
         try:
             lock.acquire()
         except AlreadyRunning:
             self.log.info("[supervisor] Εκτελείται ήδη· έξοδος.")
+            self.close()
             return EXIT_ALREADY_RUNNING
         try:
             self._open_control()
@@ -385,6 +393,7 @@ class Supervisor:
         finally:
             self._close_control()
             lock.release()
+            self.close()
 
 
 def main(argv: list[str] | None = None) -> int:

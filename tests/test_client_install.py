@@ -222,7 +222,9 @@ class SupervisorStepTests(TempTest):
             return child
 
         self.layout.set_installed("1.0.0")
-        return Supervisor(self.layout, spawn=spawn, clock=self.clock)
+        sup = Supervisor(self.layout, spawn=spawn, clock=self.clock)
+        self.addCleanup(sup.close)
+        return sup
 
     def test_starts_and_restarts_with_backoff(self):
         sup = self.make()
