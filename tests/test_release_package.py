@@ -188,7 +188,7 @@ class KeyToolTests(unittest.TestCase):
             self.assertEqual(release_verify.main([str(package), "--public-key", public]), 0)
             self.assertEqual(release_verify.main([str(package), "--public-key", public,
                                                   "--installed", "1.2.0"]), 1)
-            self.assertEqual(release_verify.main([str(package)]), 1)   # κενό TRUSTED_KEYS
+            self.assertEqual(release_verify.main([str(package)]), 1)   # όχι το κλειδί του repo
         self.assertIn("ΕΓΚΥΡΟ: έκδοση 1.2.0", printed.getvalue())
         with mock.patch.dict(os.environ, {"TEST_PASS": "wrong passphrase!"}), \
                 mock.patch("sys.stderr", new=io.StringIO()):
@@ -201,8 +201,10 @@ class KeyToolTests(unittest.TestCase):
             release_keygen.main(["--out", str(release_keygen.ROOT / "keys")])
 
     def test_trusted_keys_are_valid_hex(self):
+        self.assertEqual(len(TRUSTED_KEYS), 1)
         for key in TRUSTED_KEYS:
             self.assertRegex(key, r"^[0-9a-f]{64}$")
+        pkg._public_keys(TRUSTED_KEYS)                  # έγκυρα σημεία Ed25519
 
 
 if __name__ == "__main__":
