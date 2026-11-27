@@ -31,6 +31,7 @@ from director.serving import ServingConflict, ServingController, SocketServingSe
 from director.registry_sync import (apply_from_file, examine, export_registry,
                                     status as registry_export_status, _display as show_registry_preview)
 from shared.discovery import BeaconWatcher
+from shared.update_protocol import UPDATE_PORT
 from shared.enrollment import (EnrollmentError, EnrollmentServer, ENROLL_PORT,
                                IncorrectCodeError)
 from shared.discovery import announce, director_id, DISCOVERY_PORT
@@ -725,6 +726,11 @@ def main() -> None:
     parser.add_argument("--test-report", type=Path, default=None, help=argparse.SUPPRESS)
     parser.add_argument("--extra-beacon-port", type=int, default=None,
                         help=argparse.SUPPRESS)
+    parser.add_argument("--update-port", type=int, default=UPDATE_PORT,
+                        help="TLS θύρα ενημερώσεων Client (Φάση 5B2, default 50560)")
+    # Μόνο για τις αυτόματες δοκιμές 5B2: κλειδί δοκιμής αντί του ενσωματωμένου.
+    parser.add_argument("--update-trusted-key", action="append", default=None,
+                        help=argparse.SUPPRESS)
     parser.add_argument("--start-check-seconds", type=float, default=3.0,
                         help=argparse.SUPPRESS)
     parser.add_argument("--registry-file", type=Path,
@@ -811,12 +817,13 @@ def main() -> None:
                                       pending_file=args.registry_file.with_name(
                                           "enrollment-pending.json"))
         last_seen = LastSeenStore(last_seen_path(args.registry_file))
+        updates = make_update_server(args, trust)
         if args.gui:
             from director.gui import run_gui
             restart = bool(run_gui(args, accept_clients=secure_accept,
                                    stream_microphone=stream_microphone,
                                    enrollment=enrollment, trust=trust, last_seen=last_seen,
-                                   release_lock=lock.close))
+                                   release_lock=lock.close, updates=updates))
             return
 
         broadcaster = AudioBroadcaster(max_clients=MAX_CLIENTS, on_event=lambda s: print(s, flush=True))
@@ -831,7 +838,7 @@ def main() -> None:
         network = SocketServingService(
             args, identifier=identifier, inst=instance_id,
             registry=registry, accept_clients=secure_accept,
-            broadcaster=broadcaster, enrollment=enrollment)
+            broadcaster=broadcaster, enrollment=enrollment, updates=updates)
         controller = ServingController(
             manager_state_path(args.registry_file), watcher,
             start_network=network.start, stop_network=network.stop,
@@ -903,6 +910,15 @@ def main() -> None:
         runtime.close()
         if restart:  # μετά το runtime.close(): όλα τα sockets και το κλείδωμα είναι ελεύθερα
             restart_manager()
+
+
+def make_update_server(args, trust):
+    """Φάση 5B2: θύρα ενημερώσεων Client· ανοίγει μόνο όταν εξυπηρετεί ο Κύριος."""
+    from director.updates import STATUS_FILE, UpdateServer, UpdateStatus, UpdateStore, updates_dir
+    folder = updates_dir(args.registry_file.parent)
+    return UpdateServer(trust, UpdateStore(folder, trusted_keys=args.update_trusted_key),
+                        UpdateStatus(folder / STATUS_FILE), host=args.host,
+                        port=args.update_port)
 
 
 def _ask_gui_rollback() -> bool:

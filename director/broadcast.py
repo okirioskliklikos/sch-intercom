@@ -11,7 +11,7 @@ import time
 from collections.abc import Callable
 
 from shared.audio import (encode_frame, encode_control, encode_client_settings, MESSAGE_KEEPALIVE,
-                          MESSAGE_STREAM_STOP)
+                          MESSAGE_STREAM_STOP, MESSAGE_UPDATE_CHECK)
 from shared.control import (HEARTBEAT_TIMEOUT_SECONDS, KEEPALIVE_INTERVAL_SECONDS,
                             heartbeat_receiver)
 from shared.identity import validate_identity
@@ -242,6 +242,16 @@ class AudioBroadcaster:
             session.name = name
             session.set_selected(self._is_selected(session))
             session.enqueue(frame)
+
+    def request_update_check(self, client_ids=None) -> int:
+        """Φάση 5B2: «κάνε CHECK ενημέρωσης τώρα» (None = όλοι). Επιστρέφει πόσοι το πήραν."""
+        frame = encode_control(MESSAGE_UPDATE_CHECK)
+        with self._lock:
+            sessions = [s for cid, s in self._sessions.items()
+                        if client_ids is None or cid in client_ids]
+            for session in sessions:
+                session.enqueue(frame)
+        return len(sessions)
 
     def disconnect_client(self, client_id: str) -> None:
         """Drop an authenticated Client immediately on registry revocation."""

@@ -122,12 +122,14 @@ class SocketServingService:
     """Ανοιγοκλείνει κοινές TCP/UDP/registration θύρες για CLI και GUI."""
 
     def __init__(self, args, *, identifier: str, inst: str, registry,
-                 accept_clients, broadcaster, enrollment):
+                 accept_clients, broadcaster, enrollment, updates=None):
         import socket
         from director.broadcast import MAX_CLIENTS
         self.args, self.identifier, self.inst = args, identifier, inst
         self.registry, self.accept_clients = registry, accept_clients
         self.broadcaster, self.enrollment = broadcaster, enrollment
+        # Φάση 5B2: θύρα ενημερώσεων Client, όπως η εγγραφή μόνο στον Κύριο.
+        self.updates = updates
         self.server = None
         self.stop_event = None
         self.threads: list[threading.Thread] = []
@@ -164,7 +166,11 @@ class SocketServingService:
                 worker.start()
             if role == "primary" and self.enrollment is not None:
                 self.enrollment.open()
+            if role == "primary" and self.updates is not None:
+                self.updates.open(push=self.broadcaster.request_update_check)
         except BaseException:
+            if self.updates is not None:
+                self.updates.stop()
             if self.stop_event is not None:
                 self.stop_event.set()
             server.close()
@@ -173,6 +179,11 @@ class SocketServingService:
             raise
 
     def change_enrollment(self, enabled: bool) -> None:
+        if self.updates is not None:
+            if enabled:
+                self.updates.open(push=self.broadcaster.request_update_check)
+            else:
+                self.updates.stop()
         if self.enrollment is None:
             return
         if enabled:
@@ -181,6 +192,8 @@ class SocketServingService:
             self.enrollment.stop()
 
     def stop(self) -> None:
+        if self.updates is not None:
+            self.updates.stop()
         if self.enrollment is not None:
             self.enrollment.stop()
         if self.stop_event is not None:

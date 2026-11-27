@@ -16,10 +16,11 @@ from collections.abc import Callable
 
 from shared.audio import (BLOCK_BYTES, BLOCK_MS, BLOCK_SAMPLES, CHANNELS, DEFAULT_PORT,
                           DTYPE, SAMPLE_RATE, Frame, MESSAGE_STREAM_STOP,
-                          MESSAGE_CLIENT_SETTINGS, decode_client_settings,
-                          receive_message)
+                          MESSAGE_CLIENT_SETTINGS, MESSAGE_UPDATE_CHECK,
+                          decode_client_settings, receive_message)
 from shared.jitter import DelayTracker, JitterBuffer
-from shared.identity import ManagerFull, load_identity, receive_welcome, send_hello
+from shared.identity import (ManagerFull, ProtocolMismatch, load_identity, receive_welcome,
+                             send_hello)
 from shared.enrollment import ENROLL_PORT, make_request, enroll_client
 from shared.client_hints import load_hints, save_hints
 from shared.registry_seen import load_seen, manager_key, record_seen
@@ -27,7 +28,9 @@ from shared.device_identity import create_device_identity, replace_device_identi
 from shared.transport_security import client_context, connect_tls, DEFAULT_SERVER_NAME
 from shared.discovery import discover_candidates, DISCOVERY_PORT
 from shared.manager_pin import load_pin, save_pin
-from client.install_paths import MANAGER_CERT, data_dir, load_settings
+from client.install_paths import MANAGER_CERT, Layout, data_dir, load_settings
+from client.updater import AnnouncementState, Updater, peer_host
+from shared.update_protocol import UPDATE_PORT
 from client.identity_reset import (CLONED, PREVIOUS, archive_identity, check_clone,
                                    previous_room, remember_machine)
 from shared.control import heartbeat_sender
@@ -99,10 +102,15 @@ def pump_frames(
     volume: AnnouncementVolume | AudioPolicyWorker | None = None,
     settings_callback=None,
     test_report=None,
+    announcement: AnnouncementState | None = None,
+    update_check: Callable[[], None] | None = None,
 ) -> None:
     """PCM/έλεγχος στην ίδια κατεύθυνση TCP, χωρίς reconnect σε αναμονή.
 
     test_report: μόνο στις δοκιμές 4.4 (``--test-report``)· καταγράφει λήψεις και STOP.
+    announcement: 5B2, η λήψη ενημέρωσης σταματά όσο παίζει ανακοίνωση.
+    update_check: 5B2, ο Manager ζήτησε CHECK ενημέρωσης τώρα («Έναρξη τώρα»).
+    Άγνωστα μικρά μηνύματα ελέγχου (νεότερου Manager) αγνοούνται.
     """
     received = 0
     in_announcement = False
@@ -128,6 +136,8 @@ def pump_frames(
                 drained_at = None
                 delay.reset()
                 in_announcement = True
+                if announcement is not None:
+                    announcement.set(True)
             arrived_us = clock_us()
             delay.record(message.seq, message.timestamp_us, arrived_us)
             if test_report is not None:
@@ -141,12 +151,17 @@ def pump_frames(
                 except (OSError, ValueError) as exc:
                     print(f"[Client] Αποτυχία τοπικής αποθήκευσης στοιχείων: {exc}",
                           flush=True)
+        elif message.kind == MESSAGE_UPDATE_CHECK:
+            if update_check is not None:
+                update_check()
         elif message.kind == MESSAGE_STREAM_STOP:
             if test_report is not None:
                 test_report.event("stop", underruns=jitter.underruns, dropped=jitter.dropped)
             if in_announcement:
                 jitter.finish_announcement()
                 in_announcement = False
+                if announcement is not None:
+                    announcement.set(False)
                 stop_received_at = time.monotonic()
                 drained_at = None
         # Μετά το STREAM_STOP περιμένουμε να αδειάσει η ουρά από το callback.
@@ -194,6 +209,8 @@ def play_stream(
     recovery_path: Path | None = None,
     settings_callback=None,
     test_report=None,
+    announcement: AnnouncementState | None = None,
+    update_check: Callable[[], None] | None = None,
 ) -> None:
     import sounddevice as sd
 
@@ -259,7 +276,8 @@ def play_stream(
         try:
             pump_frames(connection, jitter, delay,
                         report=lambda line: print(line, flush=True), volume=volume,
-                        settings_callback=settings_callback, test_report=test_report)
+                        settings_callback=settings_callback, test_report=test_report,
+                        announcement=announcement, update_check=update_check)
         finally:
             if volume is not None:
                 # Δίκτυο/τερματισμός: καλύτερα αποκατάσταση παρά παραμονή σε
@@ -514,6 +532,13 @@ def build_parser() -> argparse.ArgumentParser:
     # Μόνο για αυτόματες δοκιμές: αρχείο ανάκαμψης έντασης εκτός της κανονικής εγκατάστασης.
     parser.add_argument("--volume-recovery-file", type=Path, default=None,
                         help=argparse.SUPPRESS)
+    parser.add_argument("--update-port", type=int, default=UPDATE_PORT,
+                        help=argparse.SUPPRESS)
+    # Μόνο για τις αυτόματες δοκιμές 5B2: κλειδί υπογραφής δοκιμής αντί του ενσωματωμένου.
+    parser.add_argument("--update-trusted-key", action="append", default=None,
+                        help=argparse.SUPPRESS)
+    parser.add_argument("--update-retry-seconds", type=float, default=None,
+                        help=argparse.SUPPRESS)
     # Μόνο για τις αυτόματες δοκιμές 4.4: γεγονότα λήψης/αναπαραγωγής σε αρχείο JSONL.
     parser.add_argument("--test-report", type=Path, default=None, help=argparse.SUPPRESS)
     return parser
@@ -633,12 +658,39 @@ def main() -> None:
     print("Απαιτείται μία αρχική έγκριση του PEM από τον Director.", flush=True)
     print(f"Client ID: {client_id} | Αίθουσα: {room}", flush=True)
 
+    # 5B2: ενημερώσεις μόνο σε εγκατεστημένο Client (current.json του εγκαταστάτη).
+    announcement = AnnouncementState()
+    updater = None
+    layout = Layout()
+    try:
+        installed = layout.current_version()
+    except ValueError as exc:
+        installed = None
+        print(f"[Ενημέρωση] Αγνοείται το {layout.current_file}: {exc}", flush=True)
+    if installed is not None:
+        updater = Updater(layout, client_id, trusted_director,
+                          server_name=args.tls_server_name, port=args.update_port,
+                          trusted_keys=args.update_trusted_key,
+                          announcement=announcement,
+                          **({} if args.update_retry_seconds is None
+                             else {"error_retry": args.update_retry_seconds})).start()
+        print(f"[Ενημέρωση] Εγκατεστημένη έκδοση {installed}", flush=True)
+
     def session(connection: socket.socket) -> None:
         # 4.2D3: αναφορά «έχω δει vN» στον Manager που πέρασε τον έλεγχο TLS.
         key = manager_key(connection.getpeercert(binary_form=True) or b"")
         seen = load_seen(args.registry_seen_file, key)
+        manager_host = peer_host(connection)
         send_hello(connection, client_id, room, seen=seen)
-        welcome = receive_welcome(connection)
+        try:
+            welcome = receive_welcome(connection)
+        except ProtocolMismatch:
+            # Ασύμβατο πρωτόκολλο ήχου: η ενημέρωση είναι ο τρόπος να ξανασυνδεθεί.
+            if updater is not None:
+                updater.trigger(manager_host)
+            raise
+        if updater is not None:
+            updater.trigger(manager_host)   # σε κάθε σύνδεση και επανασύνδεση
         if welcome is not None:
             if seen is not None and (seen["rv"] > welcome["rv"] or (
                     seen["rv"] == welcome["rv"] and seen["hash"] != welcome["hash"])):
@@ -667,8 +719,11 @@ def main() -> None:
                         settings_callback=lambda info: save_hints(
                             args.client_hints_file, info["room"],
                             info["name"] or socket.gethostname()[:64]),
-                        test_report=test_report)
+                        test_report=test_report, announcement=announcement,
+                        update_check=None if updater is None
+                        else lambda: updater.trigger(manager_host))
         finally:
+            announcement.set(False)
             if test_report is not None:
                 test_report.event("lost")
             heartbeat_stop.set()
