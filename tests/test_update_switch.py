@@ -32,6 +32,7 @@ class SwitchTests(TempTest):
         self.clock = Clock()
         self.spawned = []
         self.run_values = []
+        self.display_versions = []
 
         def spawn(command, env, cwd):
             child = FakeChild()
@@ -39,7 +40,8 @@ class SwitchTests(TempTest):
             return child
 
         self.sup = Supervisor(self.layout, spawn=spawn, clock=self.clock, trial_seconds=90,
-                              registry=lambda name, value: self.run_values.append((name, value)))
+                              registry=lambda name, value: self.run_values.append((name, value)),
+                              uninstall=self.display_versions.append)
         self.addCleanup(self.sup.close)
         self.sup.step()
 
@@ -82,6 +84,7 @@ class SwitchTests(TempTest):
         self.assertEqual(self.run_values, [("TestRun", run_command(self.layout, "1.0.1"))])
         self.assertIn(str(self.layout.version_dir("1.0.1") / "python" / "pythonw.exe"),
                       self.run_values[0][1])
+        self.assertEqual(self.display_versions, ["1.0.1"])       # «Εφαρμογές» των Windows
         self.assertFalse(self.layout.version_dir("0.9.0").exists())
         self.assertTrue(self.layout.version_dir("1.0.0").exists())    # previous για rollback
         self.assertEqual(self.layout.install_info()["installed_version"], "1.0.1")
@@ -104,7 +107,7 @@ class SwitchTests(TempTest):
         self.assertEqual(self.spawned[-1][1][VERSION_ENV], "1.0.0")
         self.assertNotIn(TRIAL_ENV, self.spawned[-1][1])
         self.assertIn("τερματίστηκε", self.result()["reason"])
-        self.assertEqual(self.run_values, [])
+        self.assertEqual((self.run_values, self.display_versions), ([], []))
         self.assertIn("απέτυχε ήδη", self.sup.handle("switch", {"version": "1.0.1"})["error"])
 
     def test_no_connection_within_90_s_rolls_back(self):
@@ -129,6 +132,15 @@ class SwitchTests(TempTest):
         self.assertEqual((state["current"], state["trial"], state["failed"]),
                          ("1.0.0", None, ["1.0.1"]))
         self.assertIn("διακόπηκε", self.result()["reason"])
+
+
+class InstallerKeyTests(unittest.TestCase):
+    def test_uninstall_key_matches_installer_app_id(self):
+        from client.supervisor import APP_ID, UNINSTALL_KEY
+        iss = (Path(__file__).resolve().parents[1] / "installer" /
+               "sch-intercom-client.iss").read_text(encoding="utf-8-sig")
+        self.assertIn("AppId={" + APP_ID + "\n", iss)
+        self.assertTrue(UNINSTALL_KEY.endswith("\\" + APP_ID + "_is1"))
 
 
 class UpdaterSwitchTests(TempTest):

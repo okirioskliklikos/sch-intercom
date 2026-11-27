@@ -1,4 +1,5 @@
-"""Φάση 5B2b: πραγματική δοκιμή εναλλαγής έκδοσης και rollback (docs/phase5.md §5.4, §7).
+"""Φάσεις 5B2b/5B2c: πραγματική δοκιμή εναλλαγής έκδοσης, rollback, λήψης μόνο των αρχείων
+που άλλαξαν και απεγκατάστασης μετά από ενημερώσεις (docs/phase5.md §5.4, §7).
 
 Πραγματικοί Manager, supervisor και Client ως διεργασίες, μόνο σε loopback και σε
 προσωρινούς φακέλους. Τα πακέτα υπογράφονται με κλειδί δοκιμής (κρυφές επιλογές)·
@@ -12,7 +13,8 @@
   ελέγχεται μόνο στα Windows (αλλού SKIP).
 
 Εκδόσεις: 1.0.1 κανονική, 1.0.2 πέφτει αμέσως, 1.0.3 και 1.0.4 κολλάνε (δεν
-συνδέονται), 1.0.5 κανονική.
+συνδέονται), 1.0.5 και 1.0.6 κανονικές. Οι κανονικές διαφέρουν από την 1.0.0 μόνο στο
+``VERSION``, οι χαλασμένες και στο ``app\\client\\main.py``.
 
     Windows:  powershell -ExecutionPolicy Bypass -File tools\\update_install_live_test.ps1
     Linux:    tools/update_install_live_test.sh
@@ -44,7 +46,7 @@ from shared.identity import load_identity  # noqa: E402
 from tools import build_release  # noqa: E402
 from tools.mtls_live_test import JOINED, Process, child_env  # noqa: E402
 
-TOTAL = 13
+TOTAL = 17
 HOST = "127.0.0.1"
 PORT = 51955
 DISCOVERY_PORT = 51956
@@ -55,6 +57,7 @@ UPDATE_PORT = 51960
 ROOM = "C2627-Γ1"
 RUN_NAME = "SchIntercomUpdateTest"
 RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
+NORMAL = ("1.0.1", "1.0.5", "1.0.6")
 TRIAL_SECONDS = 20
 BASE = "1.0.0"
 CRASH = "import sys\nprint('δοκιμαστική χαλασμένη έκδοση')\nsys.exit(7)\n"
@@ -71,6 +74,36 @@ def run_value() -> str | None:
             return winreg.QueryValueEx(key, RUN_NAME)[0]
     except FileNotFoundError:
         return None
+
+
+def display_version() -> str | None:
+    """Η έκδοση που δείχνουν οι «Εφαρμογές» των Windows (κλειδί του Inno Setup)."""
+    if os.name != "nt":
+        return None
+    import winreg
+    from client.supervisor import UNINSTALL_KEY
+    try:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, UNINSTALL_KEY) as key:
+            return winreg.QueryValueEx(key, "DisplayVersion")[0]
+    except FileNotFoundError:
+        return None
+
+
+def uninstall_entry_exists() -> bool:
+    if os.name != "nt":
+        return False
+    import winreg
+    from client.supervisor import UNINSTALL_KEY
+    try:
+        winreg.OpenKey(winreg.HKEY_CURRENT_USER, UNINSTALL_KEY).Close()
+        return True
+    except FileNotFoundError:
+        return False
+
+
+def tree_hashes(folder: Path) -> dict[str, str]:
+    return {path.relative_to(folder).as_posix(): pkg._sha256_file(path)
+            for path in pkg.tree_files(folder)}
 
 
 def set_test_run_value(value: str) -> None:
@@ -302,10 +335,11 @@ class LiveTest:
                 from client.supervisor import run_command
                 set_test_run_value(run_command(self.layout, BASE))
         for version, code in (("1.0.1", None), ("1.0.2", CRASH), ("1.0.3", HANG),
-                              ("1.0.4", HANG), ("1.0.5", None)):
+                              ("1.0.4", HANG), ("1.0.5", None), ("1.0.6", None)):
             self.make_package(version, code)
+        self.base_hashes = tree_hashes(self.layout.version_dir(BASE))
         return self.state().get("current") == BASE, \
-            f"εγκατεστημένη {self.state().get('current')}, 5 πακέτα δοκιμής"
+            f"εγκατεστημένη {self.state().get('current')}, 6 πακέτα δοκιμής"
 
     def s02(self):
         self.director = Process([
@@ -363,6 +397,23 @@ class LiveTest:
             f"current {state.get('current')}, previous {state.get('previous')}, " \
             f"ίδιο UUID {same}, Client v{version}"
 
+    def delta(self):
+        """5B2c: η 1.0.1 κατέβηκε με μόνο τα αρχεία που άλλαξαν· η 1.0.0 έμεινε ανέπαφη."""
+        line = self.client_log.find("Λήψη έκδοσης 1.0.1:") or ""
+        try:
+            words = line.split("Λήψη έκδοσης 1.0.1:", 1)[1].split()
+            needed, count = int(words[0]), int(words[2])
+        except (IndexError, ValueError):
+            return False, f"δεν βρέθηκε η γραμμή λήψης: «{line}»"
+        amounts = line[line.find("(") + 1:line.find(")")]
+        intact = tree_hashes(self.layout.version_dir(BASE)) == self.base_hashes
+        built = tree_hashes(self.layout.version_dir("1.0.1"))
+        same = {k: v for k, v in built.items() if k != "VERSION"} == \
+            {k: v for k, v in self.base_hashes.items() if k != "VERSION"}
+        return needed == 1 and count == len(self.base_hashes) and intact and same, \
+            f"κατέβηκαν {needed} από {count} αρχεία ({amounts}), 1.0.0 ανέπαφη {intact}, " \
+            f"1.0.1 πλήρης {same}"
+
     def s06(self):
         """Run και .cmd δείχνουν στη νέα έκδοση."""
         cmd = self.layout.cli_file.read_text(encoding="ascii")
@@ -372,7 +423,10 @@ class LiveTest:
         value = run_value() or ""
         run_ok = f"\\versions\\1.0.1\\python\\pythonw.exe" in value and \
             f'--home "{self.home}"' in value
-        return cmd_ok and run_ok, f"Run: {value}"
+        if not self.installer:
+            return cmd_ok and run_ok, f"Run: {value} · «Εφαρμογές»: SKIP (χωρίς εγκαταστάτη)"
+        shown = display_version()
+        return cmd_ok and run_ok and shown == "1.0.1", f"Run: {value} · «Εφαρμογές»: {shown}"
 
     def s07(self):
         """Ο Manager βλέπει «installed» και την έκδοση 1.0.1."""
@@ -471,12 +525,64 @@ class LiveTest:
         return BASE if not self.installer else (self.state().get("previous") or BASE)
 
     def s13(self):
-        """--stop, και ο Client κλείνει μαζί του."""
+        """Νέα εκκίνηση, όπως σε νέα σύνδεση στα Windows: ο supervisor από την 1.0.5."""
         self.stop_supervisor()
         stopped = self.wait(lambda: not self.client_status(), 10)
-        self.director.stop(quit_command="quit")
-        self.director = None
-        return bool(stopped), "supervisor και Client σταμάτησαν"
+        mark = self.director.mark()
+        self.start_supervisor()
+        back = self.joined(mark)
+        version = self.wait(lambda: self.client_status().get("version"), 10)
+        return bool(stopped) and back and version == "1.0.5", \
+            f"σταμάτησε {bool(stopped)}, ξεκίνησε από {self.state().get('current')}, " \
+            f"Client v{version}"
+
+    def s14(self):
+        """Η 1.0.6 εγκαθίσταται· μένουν μόνο 1.0.6 και 1.0.5 (σβήνεται και η 1.0.1)."""
+        mark = self.sup_log.mark()
+        code, _ = self.updates("import", str(self.packages["1.0.6"]))
+        done = self.sup_log.wait("Η έκδοση 1.0.6 εγκαταστάθηκε", since=mark,
+                                 timeout=TRIAL_SECONDS + 90)
+        folders = sorted(p.name for p in self.layout.versions.iterdir() if p.is_dir())
+        cmd = self.layout.cli_file.read_text(encoding="ascii")
+        return code == 0 and done is not None and folders == ["1.0.5", "1.0.6"] and \
+            "versions\\1.0.6\\" in cmd, f"εκδόσεις στον δίσκο: {', '.join(folders)}"
+
+    def s15(self):
+        """«Εφαρμογές» των Windows: η έκδοση μετά από ενημέρωση."""
+        if not self.installer:
+            return True, "SKIP (μόνο με εγκαταστάτη στα Windows)"
+        shown = display_version()
+        return shown == "1.0.6", f"«Εφαρμογές»: {shown}"
+
+    def s16(self):
+        """Απεγκατάσταση μετά από ενημερώσεις (η αρχική έκδοση δεν υπάρχει πια)."""
+        child = self.client_status().get("client_pid")
+        supervisor = self.supervisor
+        if not self.installer:
+            self.stop_supervisor()
+            stopped = self.wait(lambda: not self.client_status(), 10)
+            return bool(stopped), "SKIP απεγκατάστασης (μόνο Windows) · supervisor και " \
+                                  f"Client σταμάτησαν {bool(stopped)}"
+        from tools.install_live_test import pid_alive
+        base_gone = not self.layout.version_dir(BASE).exists()
+        subprocess.run([str(self.home / "unins000.exe"), "/VERYSILENT", "/SUPPRESSMSGBOXES",
+                        "/NORESTART"], capture_output=True, timeout=300)
+        # Ο uninstaller του Inno Setup τρέχει από αντίγραφο στο TEMP: αναμονή να τελειώσει.
+        removed = self.wait(lambda: not self.home.exists(), 120)
+        exited = True
+        try:
+            supervisor.wait(30)
+        except subprocess.TimeoutExpired:
+            exited = False
+        self.supervisor = None
+        processes = exited and not pid_alive(child)
+        run_gone = run_value() is None
+        entry_gone = not uninstall_entry_exists()
+        identity = (self.data / "client.json").is_file()
+        return base_gone and bool(removed) and processes and run_gone and entry_gone and \
+            identity, f"1.0.0 είχε σβηστεί {base_gone}, διεργασίες έκλεισαν {processes}, " \
+                      f"φάκελος σβήστηκε {bool(removed)}, HKCU\\Run {run_gone}, " \
+                      f"«Εφαρμογές» {entry_gone}, ταυτότητα έμεινε {identity}"
 
     def close(self):
         self.stop_supervisor()
@@ -497,7 +603,8 @@ class LiveTest:
             ("Νέα έκδοση κατά την ανακοίνωση: η λήψη περιμένει, καμία εναλλαγή", self.s03),
             ("Εναλλαγή μόνο 10 s μετά το τέλος της ανακοίνωσης", self.s04),
             ("Η 1.0.1 συνδέεται: commit, ίδια ταυτότητα", self.s05),
-            ("HKCU\\Run και .cmd δείχνουν στην 1.0.1", self.s06),
+            ("Λήψη μόνο των αρχείων που άλλαξαν, η 1.0.0 ανέπαφη", self.delta),
+            ("HKCU\\Run, .cmd και «Εφαρμογές» δείχνουν την 1.0.1", self.s06),
             ("Ο Manager βλέπει «installed» 1.0.1", self.s07),
             ("Η 1.0.2 πέφτει: rollback στην 1.0.1, ο Manager βλέπει αποτυχία", self.s08),
             (f"Η 1.0.3 δεν συνδέεται σε {TRIAL_SECONDS} s: rollback", self.s09),
@@ -505,7 +612,11 @@ class LiveTest:
              self.s10),
             ("Οι αποτυχημένες εκδόσεις δεν ξανακατεβαίνουν", self.s11),
             ("Η 1.0.5 εγκαθίσταται, οι παλιές εκδόσεις σβήνονται", self.s12),
-            ("Τερματισμός: supervisor και Client σταματούν", self.s13),
+            ("Νέα εκκίνηση (όπως σε νέα σύνδεση): ο supervisor από την 1.0.5", self.s13),
+            ("Η 1.0.6 εγκαθίσταται: μένουν μόνο 1.0.6 και 1.0.5", self.s14),
+            ("«Εφαρμογές» των Windows: έκδοση 1.0.6", self.s15),
+            ("Απεγκατάσταση μετά από ενημερώσεις: δεν μένει τίποτα εκτός από την ταυτότητα",
+             self.s16),
         ]
         try:
             for index, (name, action) in enumerate(actions):

@@ -1,17 +1,23 @@
-"""Πρωτόκολλο ενημερώσεων Client (Φάση 5B2, docs/phase5.md §5.3).
+"""Πρωτόκολλο ενημερώσεων Client (Φάση 5B2, docs/phase5.md §5.3· v2 από το 5B2c).
 
 Ξεχωριστή θύρα TCP 50560 με mTLS (ίδια διαπιστευτήρια Client με τον ήχο). Ανεξάρτητο από
 το CONNECTION_PROTOCOL του ήχου, ώστε να ενημερώνεται και Client με παλιό πρωτόκολλο ήχου.
 
 Κάθε μήνυμα: 4 bytes μήκος (big endian) + κανονικό JSON (UTF-8, ταξινομημένα κλειδιά).
-Μετά από ``data`` ακολουθούν ακριβώς ``size`` bytes του πακέτου.
+Μετά από ``manifest`` και ``data`` ακολουθούν ακριβώς τα bytes που δηλώνουν.
 
-    C → M  check   client_id, app, updater, protocol, failed
-    M → C  offer   version, size, sha256       |  none
-    C → M  get     version, offset
-    M → C  data    offset, size + bytes        |  busy retry  |  error reason
-    C → M  report  state, version, detail, progress
+    C → M  check         v, client_id, app, updater, protocol, failed
+    M → C  offer         version, size (όλα τα αρχεία), sha256 (του manifest.json)  |  none
+    C → M  get-manifest  version
+    M → C  manifest      size, sig_size + manifest.json + manifest.sig
+    C → M  get-file      version, path, offset, progress
+    M → C  data          path, offset, size + bytes    |  busy retry  |  error reason
+    C → M  report        state, version, detail, progress
     M → C  ok
+
+v2 (5B2c): ο Client κατεβάζει μόνο τα αρχεία του manifest που δεν έχει ήδη (ίδιο SHA-256
+στην έκδοση που τρέχει)· τα υπόλοιπα τα αντιγράφει τοπικά. Το v1 (λήψη όλου του .sicu)
+αφαιρέθηκε: δεν υπήρξε εγκατάσταση με αυτό.
 """
 from __future__ import annotations
 
@@ -23,8 +29,11 @@ import struct
 from shared.version import parse_version
 
 UPDATE_PORT = 50560
-UPDATE_PROTOCOL = 1
+UPDATE_PROTOCOL = 2
 MAX_MESSAGE = 4096
+#: manifest.json έως 20000 αρχεία (§5.1) χωρά άνετα.
+MAX_MANIFEST_BYTES = 8 * 1024 * 1024
+MAX_SIGNATURE_BYTES = 512
 #: Bytes ανά «data»: ο Client ζητά το επόμενο κομμάτι μόνο όταν δεν παίζει ανακοίνωση.
 CHUNK_BYTES = 256 * 1024
 #: Χρονικό όριο αδράνειας σύνδεσης (§5.3).
@@ -112,6 +121,8 @@ def check_message(client_id: str, app: str, *, updater: int, protocol: int,
 def parse_check(message: dict) -> dict:
     if message.get("type") != "check":
         raise UpdateProtocolError("Αναμενόταν check")
+    if message.get("v") != UPDATE_PROTOCOL:
+        raise UpdateProtocolError(f"Παλιός μηχανισμός ενημέρωσης (v{message.get('v')})")
     failed = message.get("failed", [])
     if not isinstance(failed, list) or len(failed) > 20:
         raise UpdateProtocolError("Άκυρη λίστα failed")
@@ -130,17 +141,29 @@ def parse_offer(message: dict) -> dict | None:
     digest = message.get("sha256")
     if not isinstance(digest, str) or not _HASH.fullmatch(digest):
         raise UpdateProtocolError("Άκυρο SHA-256 στο offer")
-    from shared.package import MAX_PACKAGE_BYTES
+    from shared.package import MAX_UNPACKED_BYTES
     return {"version": _version(message.get("version")),
-            "size": _int(message.get("size"), 1, MAX_PACKAGE_BYTES), "sha256": digest}
+            "size": _int(message.get("size"), 0, MAX_UNPACKED_BYTES), "sha256": digest}
 
 
-def parse_get(message: dict) -> dict:
-    if message.get("type") != "get":
-        raise UpdateProtocolError("Αναμενόταν get")
-    from shared.package import MAX_PACKAGE_BYTES
-    return {"version": _version(message.get("version")),
-            "offset": _int(message.get("offset"), 0, MAX_PACKAGE_BYTES)}
+def parse_get_manifest(message: dict) -> dict:
+    if message.get("type") != "get-manifest":
+        raise UpdateProtocolError("Αναμενόταν get-manifest")
+    return {"version": _version(message.get("version"))}
+
+
+def parse_get_file(message: dict) -> dict:
+    if message.get("type") != "get-file":
+        raise UpdateProtocolError("Αναμενόταν get-file")
+    from shared.package import MAX_UNPACKED_BYTES, PackageError, safe_path
+    try:
+        path = safe_path(message.get("path"))
+    except PackageError as exc:
+        raise UpdateProtocolError(str(exc)) from exc
+    progress = message.get("progress")
+    return {"version": _version(message.get("version")), "path": path,
+            "offset": _int(message.get("offset"), 0, MAX_UNPACKED_BYTES),
+            "progress": None if progress is None else _int(progress, 0, 100)}
 
 
 def report_message(state: str, version: str | None, detail: str = "",
