@@ -104,6 +104,10 @@
 | `tools/build_release.{py,ps1}` | δέντρο έκδοσης + `setup.exe` |
 | `tools/install_live_test.{py,ps1}` | πραγματική δοκιμή στα Windows, 15 βήματα |
 
+**Πραγματική δοκιμή Windows 27/11/2026 (χρήστης): `tools\install_live_test.ps1` 15/15 PASS** με Inno Setup 7
+(και τα 22 unit tests). Δεν δοκιμάστηκαν: εξαίρεση Defender (admin), εκκίνηση μετά από πραγματική
+επανεκκίνηση των Windows, εγγραφή με κωδικό από το παράθυρο του εγκαταστάτη.
+
 Λεπτομέρειες που προέκυψαν στην υλοποίηση:
 - Η τιμή στο `HKCU\...\Run` δείχνει το `pythonw.exe` της εγκατεστημένης έκδοσης
   (`versions\<έκδοση>\python\pythonw.exe -m client.supervisor --home …`). Το ίδιο και το
