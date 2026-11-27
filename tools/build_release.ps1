@@ -1,6 +1,6 @@
 ﻿# Φάση 5A: φτιάχνει το δέντρο έκδοσης του Client και το dist\sch-intercom-client-<έκδοση>-setup.exe.
 #   powershell -ExecutionPolicy Bypass -File tools\build_release.ps1 [-Version 1.0.0] [-NoSetup]
-# Χρειάζεται internet και Inno Setup 6. Βλ. tools/build_release.py και docs/phase5.md §4.1.
+# Χρειάζεται internet και Inno Setup 7 ή 6. Βλ. tools/build_release.py και docs/phase5.md §4.1.
 param(
     [string]$Version = '',
     [string]$PythonVersion = '',

@@ -1,6 +1,6 @@
 """Αυτόματη πραγματική δοκιμή του εγκαταστάτη Client (Φάση 5A, docs/phase5.md §7).
 
-Μόνο Windows, με Inno Setup 6 εγκατεστημένο. Φτιάχνει δύο setup.exe (η έκδοση του
+Μόνο Windows, με Inno Setup 7 (ή 6) εγκατεστημένο. Φτιάχνει δύο setup.exe (η έκδοση του
 repository και μία «νεότερη» +1 από τον ίδιο κώδικα) και τα εγκαθιστά αθόρυβα σε
 προσωρινούς φακέλους, με δικό της όνομα στο HKCU\\...\\Run (SchIntercomInstallTest):
 η πραγματική ταυτότητα (%USERPROFILE%\\.school-intercom) δεν αγγίζεται. Ο Client
@@ -187,7 +187,7 @@ class LiveTest:
     def s01_build(self):
         iscc = build_release.find_iscc()
         if iscc is None:
-            raise RuntimeError("Δεν βρέθηκε το Inno Setup 6 (ISCC.exe)· εγκαταστήστε το από "
+            raise RuntimeError("Δεν βρέθηκε το Inno Setup 7 ή 6 (ISCC.exe)· εγκαταστήστε το από "
                                "https://jrsoftware.org/isdl.php")
         for version in (self.v1, self.v2):
             tree = build_release.build_tree(self.dist, version,

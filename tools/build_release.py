@@ -10,7 +10,7 @@
     dist/sch-intercom-client-<έκδοση>-setup.exe   (Inno Setup· παραλείπεται χωρίς ISCC)
 
 Η έκδοση είναι από προεπιλογή η shared/version.py. Το δέντρο φτιάχνεται και στο Linux
-(--embed-zip, --no-setup) για τα tests· το setup.exe μόνο στα Windows με Inno Setup 6.
+(--embed-zip, --no-setup) για τα tests· το setup.exe μόνο στα Windows με Inno Setup 7 ή 6.
 """
 from __future__ import annotations
 
@@ -36,11 +36,11 @@ REQUIREMENTS = ("sounddevice>=0.5,<1", "cryptography>=42", "pycaw", "comtypes", 
                 "winrt-runtime", "winrt-Windows.Media.Control", "winrt-Windows.Foundation",
                 "winrt-Windows.Foundation.Collections")
 ISS = ROOT / "installer" / "sch-intercom-client.iss"
-ISCC_CANDIDATES = (
-    r"%ProgramFiles(x86)%\Inno Setup 6\ISCC.exe",
-    r"%ProgramFiles%\Inno Setup 6\ISCC.exe",
-    r"%LOCALAPPDATA%\Programs\Inno Setup 6\ISCC.exe",
-)
+#: Inno Setup 7 (τρέχουσα) ή 6· προτιμάται η νεότερη.
+ISCC_CANDIDATES = tuple(
+    rf"{base}\Inno Setup {major}\ISCC.exe"
+    for major in (7, 6)
+    for base in ("%ProgramFiles%", "%ProgramFiles(x86)%", r"%LOCALAPPDATA%\Programs"))
 
 
 def code_files(root: Path = ROOT) -> list[Path]:
@@ -116,7 +116,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--python-version", default=platform.python_version())
     parser.add_argument("--embed-zip", type=Path, help="Τοπικό python-3.x.y-embed-amd64.zip")
     parser.add_argument("--out", type=Path, default=ROOT / "dist")
-    parser.add_argument("--iscc", default=None, help="Διαδρομή ISCC.exe (Inno Setup 6)")
+    parser.add_argument("--iscc", default=None, help="Διαδρομή ISCC.exe (Inno Setup 7 ή 6)")
     parser.add_argument("--no-setup", action="store_true", help="Μόνο το δέντρο, χωρίς setup.exe")
     args = parser.parse_args(argv)
     try:
@@ -130,7 +130,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     iscc = find_iscc(args.iscc)
     if iscc is None:
-        print("Δεν βρέθηκε το Inno Setup 6 (ISCC.exe)· δεν φτιάχτηκε setup.exe. "
+        print("Δεν βρέθηκε το Inno Setup 7 ή 6 (ISCC.exe)· δεν φτιάχτηκε setup.exe. "
               "Εγκαταστήστε το από https://jrsoftware.org/isdl.php ή δώστε --iscc.", flush=True)
         return 2
     subprocess.run(iscc_command(iscc, tree, args.version, args.out), check=True)
