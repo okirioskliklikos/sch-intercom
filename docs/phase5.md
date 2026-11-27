@@ -238,6 +238,7 @@ Client δεν περνά το mTLS.
 - Δεν έγινε ακόμη: εναλλαγή έκδοσης και rollback (5B2b), manifest πακέτων στο backup και GUI (5B3).
 - Δοκιμές: `tests/test_updates.py` (21), `tools/update_live_test.{py,sh,ps1}` (15 βήματα, loopback, πακέτα
   με κλειδί δοκιμής μέσω κρυφών επιλογών `--update-trusted-key`). Linux 27/11/2026: 15/15 PASS.
+  **Windows 27/11/2026 (χρήστης): `tools\update_live_test.ps1` 15/15 PASS.**
 
 ### 5.5 Γραμμή εντολών Client
 `%LOCALAPPDATA%\sch-intercom\sch-intercom-client.cmd` (υλοποιήθηκε στο 5A):
