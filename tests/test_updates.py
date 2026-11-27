@@ -71,6 +71,9 @@ class StoreTests(unittest.TestCase):
                          ("1.0.3", "1.0.2"))
         names = sorted(p.name for p in self.store.folder.glob("*.sicu"))
         self.assertEqual(names, ["sch-intercom-client-1.0.2.sicu", "sch-intercom-client-1.0.3.sicu"])
+        self.assertFalse(self.store.package_missing())
+        self.store.package_path("1.0.3").unlink()
+        self.assertTrue(self.store.package_missing())
 
     def test_import_rejects_wrong_key(self):
         with self.assertRaisesRegex(UpdateError, "Άκυρη υπογραφή"):

@@ -62,7 +62,13 @@ FILES = {
 JSON_SECTIONS = {"enrollment_pending", "last_seen", "gui_settings"}
 LAST_BACKUP = "last-backup.json"
 LAST_RESTORE = "last-restore.json"
-SECTION_NAMES = frozenset({"tls_identity", "client_registry", *FILES, "media_manifest"})
+SECTION_NAMES = frozenset({"tls_identity", "client_registry", *FILES, "media_manifest",
+                           "updates_manifest"})
+#: 5B3: ρύθμιση ενημερώσεων Client (auto, τρέχον/προηγούμενο πακέτο). Τα .sicu ΔΕΝ μπαίνουν
+#: στο κρυπτογραφημένο backup (16 MiB όριο)· προαιρετικό αντίγραφο στον φάκελο «<όνομα>-updates».
+UPDATES_LABELS = ("current", "previous")
+UPDATE_ENTRY_KEYS = {"version", "file", "size", "sha256", "min_updater",
+                     "connection_protocol", "created_at", "imported_at"}
 
 
 class BackupError(ValueError):
@@ -174,6 +180,38 @@ def _media_entries(media_dir: Path) -> list[dict]:
     return entries
 
 
+def _updates_config(base: Path) -> dict | None:
+    """Η ρύθμιση ενημερώσεων του Manager, ή None αν δεν έχει γίνει ποτέ εισαγωγή πακέτου."""
+    from director.updates import CONFIG_FILE, updates_dir
+    path = updates_dir(base) / CONFIG_FILE
+    if not path.exists():
+        return None
+    config = _json(path.read_bytes())
+    return {"auto": bool(config.get("auto", True)),
+            **{label: config.get(label) for label in UPDATES_LABELS}}
+
+
+def update_packages(section: dict | None) -> list[dict]:
+    """Τα πακέτα (τρέχον πρώτα) που αναφέρει η ενότητα «updates_manifest»."""
+    if not section:
+        return []
+    return [section["config"][label] for label in UPDATES_LABELS
+            if section["config"].get(label)]
+
+
+def updates_copy_dir(path: Path) -> Path:
+    path = Path(path)
+    return path.with_name(path.stem + "-updates")
+
+
+def _valid_update_entry(entry) -> bool:
+    return (isinstance(entry, dict) and UPDATE_ENTRY_KEYS <= set(entry)
+            and isinstance(entry["version"], str) and isinstance(entry["file"], str)
+            and Path(entry["file"]).name == entry["file"] and entry["file"].endswith(".sicu")
+            and isinstance(entry["sha256"], str) and len(entry["sha256"]) == 64
+            and type(entry["size"]) is int and entry["size"] > 0)
+
+
 def _validate_contents(contents: dict) -> tuple[dict, dict, list[str]]:
     manifest = contents["manifest"]
     sections = contents["sections"]
@@ -215,6 +253,13 @@ def _validate_contents(contents: dict) -> tuple[dict, dict, list[str]]:
                     or type(e.get("size")) is not int or e["size"] < 0
                     for e in entries):
                 raise BackupError("Μη έγκυρο manifest MP3.")
+        elif name == "updates_manifest":
+            config = section.get("config")
+            if (not isinstance(config, dict) or not isinstance(config.get("auto"), bool)
+                    or any(config.get(label) is not None
+                           and not _valid_update_entry(config.get(label))
+                           for label in UPDATES_LABELS)):
+                raise BackupError("Μη έγκυρη ενότητα ενημερώσεων.")
         else:
             if not isinstance(section.get("files"), dict):
                 raise BackupError("Μη έγκυρα αρχεία ενότητας.")
@@ -265,13 +310,16 @@ def _replace_with_retry(source: Path, target: Path) -> None:
 
 def create(out: Path, password: str, *, registry_file: Path, tls_cert: Path,
            tls_key: Path, media_dir: Path, media_copy: str = "no",
-           kdf_n: int = KDF_N) -> tuple[Path, list[str]]:
+           updates_copy: str = "no", kdf_n: int = KDF_N) -> tuple[Path, list[str]]:
     secret = _password(password)
     sections, info = _read_sections(registry_file, tls_cert, tls_key)
     media = _media_entries(media_dir)
     if media:
         sections["media_manifest"] = {
             "schema": 1, "folder": str(media_dir), "files": media}
+    updates = _updates_config(registry_file.parent)
+    if updates is not None:
+        sections["updates_manifest"] = {"schema": 1, "config": updates}
     created = _now()
     manifest = {
         "backup_format": FORMAT, "created_at": created, "app_version": _app_version(),
@@ -321,12 +369,59 @@ def create(out: Path, password: str, *, registry_file: Path, tls_cert: Path,
                 shutil.copyfile(media_dir / entry["name"], destination)
                 if hashlib.sha256(destination.read_bytes()).hexdigest() != entry["sha256"]:
                     raise BackupError("Αποτυχία επαλήθευσης αντιγράφου MP3.")
+    packages = update_packages(sections.get("updates_manifest"))
+    if packages and updates_copy == "yes":
+        from director.updates import updates_dir
+        source_dir, target_dir = updates_dir(registry_file.parent), updates_copy_dir(out)
+        target_dir.mkdir(exist_ok=False)
+        missing = []
+        for entry in packages:
+            source = source_dir / entry["file"]
+            if not source.is_file():
+                missing.append(entry["version"])
+                continue
+            destination = target_dir / entry["file"]
+            shutil.copyfile(source, destination)
+            if _file_sha256(destination) != entry["sha256"]:
+                raise BackupError("Αποτυχία επαλήθευσης αντιγράφου πακέτου ενημέρωσης.")
+        if missing:
+            warnings.append("Λείπει το αρχείο του πακέτου " + ", ".join(missing)
+                            + "· δεν αντιγράφηκε.")
     from shared.client_registry import _atomic_write
     last = registry_file.parent / LAST_BACKUP
     _atomic_write(last, canonical({"time": created, "file_name": out.name,
                                    "registry_version": manifest["registry_version"],
                                    "registry_hash": manifest["registry_hash"]}))
     return out, warnings
+
+
+def _file_sha256(path: Path) -> str:
+    digest_ = hashlib.sha256()
+    with open(path, "rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest_.update(chunk)
+    return digest_.hexdigest()
+
+
+def _updates_diff(section: dict | None, base: Path, copy_dir: Path) -> dict:
+    """Ποια πακέτα του backup λείπουν εδώ και αν υπάρχουν στον φάκελο «-updates»."""
+    from director.updates import updates_dir
+    folder = updates_dir(base)
+    packages = update_packages(section)
+    missing = [e for e in packages if not _package_present(folder / e["file"], e)]
+    return {"versions": [e["version"] for e in packages],
+            "current": (section["config"].get("current") or {}).get("version") if section
+            else None,
+            "missing": [e["version"] for e in missing],
+            "copy_available": [e["version"] for e in missing
+                               if _package_present(copy_dir / e["file"], e)]}
+
+
+def _package_present(path: Path, entry: dict) -> bool:
+    try:
+        return path.stat().st_size == entry["size"]
+    except OSError:
+        return False
 
 
 def _read_backup(path: Path, password: str | None = None) -> tuple[dict, dict | None]:
@@ -386,6 +481,7 @@ def _summary(manifest: dict, sections: dict, warnings: list[str]) -> dict:
             "tls_fingerprint": manifest["tls_fingerprint"],
             "sections": sorted(sections),
             "mp3": len(sections.get("media_manifest", {}).get("files", [])),
+            "updates": [e["version"] for e in update_packages(sections.get("updates_manifest"))],
             "warnings": warnings}
 
 
@@ -512,6 +608,7 @@ def rollback(base: Path) -> bool:
 def restore(path: Path, password: str, *, registry_file: Path, tls_cert: Path,
             tls_key: Path, media_dir: Path, replace_identity: bool = False,
             accept_older: bool = False, restore_media: bool = False,
+            restore_updates: bool = False, update_trusted_keys=None,
             fail_after: int | None = None) -> dict:
     base = registry_file.parent
     with manager_lock(base):
@@ -570,6 +667,21 @@ def restore(path: Path, password: str, *, registry_file: Path, tls_cert: Path,
                         moves.append({"target": str(target.resolve()), "stage": None,
                                       "previous": str((previous_dir / name / filename).resolve()),
                                       "had_previous": target.exists()})
+            # 5B3: η ρύθμιση ενημερώσεων γράφεται από την ενότητα· παλιό backup χωρίς
+            # ενότητα = προεπιλογή (καμία εισαγωγή). Τα .sicu μένουν· σβήνονται στην επόμενη
+            # εισαγωγή όσα δεν είναι τρέχον/προηγούμενο. Η κατάσταση ανά Client δεν μεταφέρεται.
+            from director.updates import CONFIG_FILE, default_config, updates_dir
+            updates_target = updates_dir(base) / CONFIG_FILE
+            updates_stage = staging / "updates" / CONFIG_FILE
+            config = default_config()
+            if sections.get("updates_manifest"):
+                config.update(sections["updates_manifest"]["config"])
+            if sections.get("updates_manifest") or updates_target.exists():
+                _write_exclusive(updates_stage, canonical(config))
+                moves.append({"target": str(updates_target.resolve()),
+                              "stage": str(updates_stage.resolve()),
+                              "previous": str((previous_dir / "updates" / CONFIG_FILE).resolve()),
+                              "had_previous": updates_target.exists()})
             # 4.2D1: τοπικός ρόλος ΔΕΝ μεταφέρεται στο backup. Με κάθε restore,
             # ο νέος υπολογιστής γίνεται Εφεδρικός χωρίς εξυπηρέτηση.
             # Συμμετέχει στο ίδιο journal, ώστε το rollback να επαναφέρει την
@@ -631,6 +743,12 @@ def restore(path: Path, password: str, *, registry_file: Path, tls_cert: Path,
                     target.parent.mkdir(parents=True, exist_ok=True)
                     shutil.copyfile(original, target)
                     copied.append(name)
+        imported = []
+        if restore_updates:
+            imported = _import_update_copies(sections.get("updates_manifest"), base,
+                                             updates_copy_dir(path), update_trusted_keys)
+        updates = _updates_diff(sections.get("updates_manifest"), base, updates_copy_dir(path))
+        updates["imported"] = imported
         # Η αναφορά MP3 βγαίνει ΜΕΤΑ το --restore-media, ώστε να δείχνει την τελική κατάσταση.
         diff = _media_diff(sections.get("media_manifest"), media_dir)
         diff["copied"] = copied
@@ -643,7 +761,34 @@ def restore(path: Path, password: str, *, registry_file: Path, tls_cert: Path,
         return {"registry_version": manifest["registry_version"],
                 "tls_fingerprint": manifest["tls_fingerprint"],
                 "previous": str(previous_dir) if previous_dir.exists() else None,
-                "media": diff, "warnings": warnings}
+                "media": diff, "updates": updates, "warnings": warnings}
+
+
+def _import_update_copies(section: dict | None, base: Path, source_dir: Path,
+                          trusted_keys) -> list[str]:
+    """Αντιγράφει από το «-updates» όσα πακέτα λείπουν, μόνο αν το SHA-256 ταιριάζει με το
+    backup ΚΑΙ η υπογραφή είναι έγκυρη. Ό,τι δεν περνά απλώς δεν αντιγράφεται."""
+    from director.updates import updates_dir
+    from shared.package import PackageError, verify_package
+    folder = updates_dir(base)
+    imported = []
+    for entry in update_packages(section):
+        target, original = folder / entry["file"], source_dir / entry["file"]
+        if _package_present(target, entry) or not original.is_file():
+            continue
+        folder.mkdir(parents=True, exist_ok=True)
+        partial = target.with_name(target.name + ".part")
+        shutil.copyfile(original, partial)
+        try:
+            if _file_sha256(partial) != entry["sha256"]:
+                raise PackageError("SHA-256")
+            verify_package(partial, trusted_keys=trusted_keys, updater_version=10**6)
+        except PackageError:
+            partial.unlink(missing_ok=True)
+            continue
+        _replace_with_retry(partial, target)
+        imported.append(entry["version"])
+    return imported
 
 
 def compare_with_local(manifest: dict, sections: dict, *, registry_file: Path,
@@ -687,7 +832,9 @@ def preview(path: Path, password: str, *, registry_file: Path, tls_cert: Path,
     copy_dir = path.with_name(path.stem + "-media")
     return {**summary, "identity": identity, "relation": relation,
             "local_registry_version": local_version, "media": media,
-            "media_copy_available": copy_dir.is_dir() and bool(media["missing"])}
+            "media_copy_available": copy_dir.is_dir() and bool(media["missing"]),
+            "updates_info": _updates_diff(sections.get("updates_manifest"),
+                                          registry_file.parent, updates_copy_dir(path))}
 
 
 def _passphrase(command: str, env: str | None) -> str:
@@ -717,6 +864,7 @@ def main(argv: list[str] | None = None) -> int:
     cr = sub.add_parser("create")
     cr.add_argument("--out", type=Path, required=True)
     cr.add_argument("--media-copy", choices=("ask", "yes", "no"), default="ask")
+    cr.add_argument("--updates-copy", choices=("ask", "yes", "no"), default="ask")
     ins = sub.add_parser("inspect")
     ins.add_argument("file", type=Path)
     ins.add_argument("--decrypt", action="store_true", help="Σύνοψη manifest με κωδικό")
@@ -725,6 +873,9 @@ def main(argv: list[str] | None = None) -> int:
     res.add_argument("--replace-identity", action="store_true")
     res.add_argument("--accept-older", action="store_true")
     res.add_argument("--restore-media", action="store_true")
+    res.add_argument("--restore-updates", action="store_true")
+    res.add_argument("--update-trusted-key", action="append", default=None,
+                     help=argparse.SUPPRESS)
     rb = sub.add_parser("rollback")
     # Support common options before OR after the subcommand.
     for command_parser in (cr, ins, res, rb):
@@ -742,10 +893,23 @@ def main(argv: list[str] | None = None) -> int:
             if choice == "ask" and _media_entries(media):
                 answer = input("Να γίνει και αντίγραφο του φακέλου MP3 δίπλα στο backup; [Ν/ο] ")
                 choice = "no" if answer.strip().casefold() in ("ο", "o", "όχι", "no", "n") else "yes"
+            updates_choice = args.updates_copy
+            if updates_choice == "ask":
+                updates_choice = "no"
+                try:
+                    config = _updates_config(args.registry_file.parent)
+                except ValueError:
+                    config = None
+                if config and (config["current"] or config["previous"]):
+                    answer = input("Να γίνει και αντίγραφο των πακέτων ενημέρωσης δίπλα στο "
+                                   "backup; [Ν/ο] ")
+                    updates_choice = ("no" if answer.strip().casefold()
+                                      in ("ο", "o", "όχι", "no", "n") else "yes")
             result, notices = create(args.out, _passphrase("create", args.passphrase_env),
                                      registry_file=args.registry_file,
                                      tls_cert=args.tls_cert, tls_key=args.tls_key,
-                                     media_dir=media, media_copy=choice)
+                                     media_dir=media, media_copy=choice,
+                                     updates_copy=updates_choice)
             print("Backup:", result)
             for notice in notices:
                 print(notice)
@@ -760,6 +924,8 @@ def main(argv: list[str] | None = None) -> int:
                              tls_key=args.tls_key, media_dir=media,
                              replace_identity=args.replace_identity,
                              accept_older=args.accept_older, restore_media=args.restore_media,
+                             restore_updates=args.restore_updates,
+                             update_trusted_keys=args.update_trusted_key,
                              fail_after=int(os.environ["SCH_BACKUP_TEST_FAIL_AFTER"])
                              if "SCH_BACKUP_TEST_FAIL_AFTER" in os.environ else None)
             print(json.dumps(result, ensure_ascii=False, indent=2))

@@ -385,8 +385,23 @@ class BackupDialog(_Dialog):
         self.body.addWidget(self.media)
         self.body.addWidget(self.media_detail)
         self.has_media = count > 0
-        for widget in (self.media_separator, self.media, self.media_detail):
+        for widget in (self.media, self.media_detail):
             widget.setVisible(self.has_media)
+        # 5B3: τα .sicu (τρέχον, προηγούμενο) σε φάκελο «<όνομα>-updates» δίπλα στο backup.
+        packages = model.update_files()
+        self.has_updates = bool(packages)
+        self.updates = QCheckBox("Αντίγραφο πακέτων ενημέρωσης δίπλα στο backup")
+        self.updates.setChecked(True)
+        self.updates_detail = _label("", "small")
+        self.updates_detail.setIndent(px(23))
+        self._packages = packages
+        self.body.addWidget(self.updates)
+        self.body.addWidget(self.updates_detail)
+        for widget in (self.updates, self.updates_detail):
+            widget.setVisible(self.has_updates)
+        self.media_separator.setVisible(self.has_media or self.has_updates)
+        self._update_detail()
+        self.path.textChanged.connect(self._update_detail)
         self.error = _label("", "warnText")
         self.error.setWordWrap(True)
         self.error.hide()
@@ -399,6 +414,17 @@ class BackupDialog(_Dialog):
         for edit in (self.path, self.password, self.confirm):
             edit.textChanged.connect(self._validate)
         self._validate()
+
+    def _update_detail(self) -> None:
+        if not self.has_updates:
+            return
+        versions = [entry["version"] for entry in self._packages]
+        stem = Path(self.path.text().strip() or "backup").stem
+        short = stem if len(stem) <= 24 else "…" + stem[-18:]
+        self.updates_detail.setText(
+            " και ".join(versions) + " · "
+            + m.size_text(sum(entry["size"] for entry in self._packages))
+            + f" · υπογεγραμμένα, στο {short}-updates")
 
     def _choose_path(self, parent: QWidget, current: Path) -> Path | None:
         path, _ = QFileDialog.getSaveFileName(parent, "Αρχείο backup", str(current), BACKUP_FILTER)
@@ -434,7 +460,8 @@ class BackupDialog(_Dialog):
             with _Busy():
                 self.created = self.model.create_backup(
                     Path(self.path.text().strip()), self.password.text(), self.confirm.text(),
-                    copy_media=self.has_media and self.media.isChecked())
+                    copy_media=self.has_media and self.media.isChecked(),
+                    copy_updates=self.has_updates and self.updates.isChecked())
         except (BackupError, OSError, ValueError) as exc:
             self.error.setText(str(exc))
             self.error.show()
@@ -496,6 +523,18 @@ class RestoreDialog(_Dialog):
         media_box.addWidget(self.media)
         media_box.addWidget(self.media_detail)
         self.rows.add("media", "", media)
+        self.rows.add("updates", "Ενημερώσεις")
+        updates = QWidget()
+        updates_box = QVBoxLayout(updates)
+        updates_box.setContentsMargins(0, 0, 0, 0)
+        updates_box.setSpacing(px(1))
+        self.updates = QCheckBox("Εισαγωγή των πακέτων που λείπουν")
+        self.updates.setChecked(True)
+        self.updates_detail = _label("", "small")
+        self.updates_detail.setIndent(px(23))
+        updates_box.addWidget(self.updates)
+        updates_box.addWidget(self.updates_detail)
+        self.rows.add("updates_copy", "", updates)
         summary.addLayout(self.rows)
         self.warning_line = QFrame()
         self.warning_line.setObjectName("dialogSeparator")
@@ -554,10 +593,16 @@ class RestoreDialog(_Dialog):
             self.adjustSize()
             return
         self.info = info
-        rows = dict(zip(("created", "registry", "identity", "mp3"), m.preview_rows(info)))
-        for key, (_label_text, text, tone) in rows.items():
+        keys = {"Δημιουργήθηκε": "created", "Μητρώο": "registry", "Ταυτότητα": "identity",
+                "MP3": "mp3", "Ενημερώσεις": "updates"}
+        rows = {keys[label]: (text, tone) for label, text, tone in m.preview_rows(info)}
+        for key, (text, tone) in rows.items():
             self.rows.set(key, text, tone)
         self.rows.set_visible("mp3", "mp3" in rows)
+        self.rows.set_visible("updates", "updates" in rows)
+        updates = info.get("updates_info") or {}
+        self.rows.set_visible("updates_copy", bool(updates.get("copy_available")))
+        self.updates_detail.setText(f"από {path.stem}-updates · ελέγχονται υπογραφή και SHA-256")
         copy = info["media_copy_available"]
         self.rows.set_visible("media", copy)
         self.media_detail.setText("από " + path.stem + "-media")
@@ -587,7 +632,9 @@ class RestoreDialog(_Dialog):
             Path(self.path.text().strip()), self.password.text(),
             replace_identity=consent and self.info["identity"] == "different",
             accept_older=consent and self.info["relation"] in ("older", "conflict"),
-            restore_media=bool(self.info["media_copy_available"]) and self.media.isChecked())
+            restore_media=bool(self.info["media_copy_available"]) and self.media.isChecked(),
+            restore_updates=bool((self.info.get("updates_info") or {}).get("copy_available"))
+            and self.updates.isChecked())
 
     def _confirm(self) -> None:
         if self.request() is not None:

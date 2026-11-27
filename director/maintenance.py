@@ -218,10 +218,12 @@ class RestoreRequest:
     replace_identity: bool = False
     accept_older: bool = False
     restore_media: bool = False
+    restore_updates: bool = False
 
     def __repr__(self) -> str:  # ο κωδικός δεν εμφανίζεται ποτέ σε log/traceback
         return (f"RestoreRequest(path={str(self.path)!r}, replace_identity={self.replace_identity}, "
-                f"accept_older={self.accept_older}, restore_media={self.restore_media})")
+                f"accept_older={self.accept_older}, restore_media={self.restore_media}, "
+                f"restore_updates={self.restore_updates})")
 
 
 class MaintenanceModel:
@@ -235,6 +237,7 @@ class MaintenanceModel:
                  media_dir: Path | None = None,
                  registry_version: Callable[[], int | None] | None = None,
                  importer: Callable[..., dict] | None = None,
+                 update_trusted_keys=None,
                  clock: Callable[[], float] = time.time, kdf_n: int = backup.KDF_N):
         self.registry_file = Path(registry_file)
         self.tls_cert = Path(tls_cert)
@@ -245,6 +248,7 @@ class MaintenanceModel:
         # Εισαγωγή μητρώου στον Manager που τρέχει (RegistryTrust.import_registry):
         # ξαναφτιάχνει το mTLS context και αποσυνδέει όσους δεν είναι πια εγκεκριμένοι.
         self.importer = importer
+        self.update_trusted_keys = update_trusted_keys   # None = κλειδί του συντηρητή
         self.clock = clock
         self.kdf_n = kdf_n  # χαμηλότερο μόνο στα tests
 
@@ -312,16 +316,26 @@ class MaintenanceModel:
                  if p.is_file() and not p.is_symlink() and p.suffix.lower() == ".mp3"]
         return len(files), sum(p.stat().st_size for p in files)
 
+    def update_files(self) -> list[dict]:
+        """Πακέτα ενημέρωσης (τρέχον, προηγούμενο) που υπάρχουν στον δίσκο, για το
+        αντίγραφο «-updates» του backup."""
+        from director.updates import UpdateStore, updates_dir
+        store = UpdateStore(updates_dir(self.data_dir))
+        config = store.config()
+        return [config[label] for label in backup.UPDATES_LABELS
+                if config[label] and not store.package_missing(label)]
+
     # --- ενέργειες --------------------------------------------------------
     def create_backup(self, out: Path, password: str, confirm: str, *,
-                      copy_media: bool) -> tuple[Path, list[str]]:
+                      copy_media: bool, copy_updates: bool = False) -> tuple[Path, list[str]]:
         problem = passphrase_problem(password, confirm)
         if problem:
             raise backup.BackupError(problem)
         return backup.create(Path(out), password, registry_file=self.registry_file,
                              tls_cert=self.tls_cert, tls_key=self.tls_key,
                              media_dir=self.media_dir,
-                             media_copy="yes" if copy_media else "no", kdf_n=self.kdf_n)
+                             media_copy="yes" if copy_media else "no",
+                             updates_copy="yes" if copy_updates else "no", kdf_n=self.kdf_n)
 
     def preview(self, path: Path, password: str) -> dict:
         return backup.preview(Path(path), password, registry_file=self.registry_file,
@@ -334,7 +348,10 @@ class MaintenanceModel:
                               tls_key=self.tls_key, media_dir=self.media_dir,
                               replace_identity=request.replace_identity,
                               accept_older=request.accept_older,
-                              restore_media=request.restore_media, fail_after=fail_after)
+                              restore_media=request.restore_media,
+                              restore_updates=request.restore_updates,
+                              update_trusted_keys=self.update_trusted_keys,
+                              fail_after=fail_after)
 
 
     # --- μητρώο υπολογιστών (εξαγωγή/εισαγωγή, phase4-2d.md §6–§7) ----------
@@ -494,7 +511,25 @@ def preview_rows(info: dict) -> list[tuple[str, str, str | None]]:
                             + str(len(media["different"])))
         rows.append(("MP3", text + (" · " + ", ".join(problems) if problems else " ✓"),
                      "err" if problems else None))
+    row = updates_row(info.get("updates_info"))
+    if row:
+        rows.append(row)
     return rows
+
+
+def updates_row(updates: dict | None) -> tuple[str, str, str | None] | None:
+    """«Ενημερώσεις: 1.0.6 (τρέχουσα), 1.0.5 · λείπουν εδώ» (mockup 5B3 #restore)."""
+    if not updates or not updates["versions"]:
+        return None
+    names = [v + (" (τρέχουσα)" if v == updates["current"] else "") for v in updates["versions"]]
+    missing = updates["missing"]
+    if not missing:
+        return ("Ενημερώσεις", ", ".join(names) + " ✓", None)
+    if len(missing) == len(updates["versions"]):
+        note = "λείπει εδώ" if len(missing) == 1 else "λείπουν εδώ"
+    else:
+        note = ("λείπει εδώ η " if len(missing) == 1 else "λείπουν εδώ οι ") + ", ".join(missing)
+    return ("Ενημερώσεις", ", ".join(names) + " · " + note, "err")
 
 
 def preview_warning(info: dict) -> tuple[str, str] | None:

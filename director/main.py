@@ -916,7 +916,9 @@ def make_update_server(args, trust):
     """Φάση 5B2: θύρα ενημερώσεων Client· ανοίγει μόνο όταν εξυπηρετεί ο Κύριος."""
     from director.updates import STATUS_FILE, UpdateServer, UpdateStatus, UpdateStore, updates_dir
     folder = updates_dir(args.registry_file.parent)
-    return UpdateServer(trust, UpdateStore(folder, trusted_keys=args.update_trusted_key),
+    store = UpdateStore(folder, trusted_keys=args.update_trusted_key)
+    store.remove_old_packages()     # ό,τι δεν σβήστηκε στην προηγούμενη εισαγωγή (Windows)
+    return UpdateServer(trust, store,
                         UpdateStatus(folder / STATUS_FILE), host=args.host,
                         port=args.update_port)
 
