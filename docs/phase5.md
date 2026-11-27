@@ -235,10 +235,40 @@ Client δεν περνά το mTLS.
 - CLI Manager (`--registry-file` όπως στις άλλες εντολές):
   `python -m director.updates import <αρχείο.sicu>` · `status` · `auto on|off` · `start --all | --client <ID>`.
   Ο Manager έχει `--update-port` (προεπιλογή 50560).
-- Δεν έγινε ακόμη: εναλλαγή έκδοσης και rollback (5B2b), manifest πακέτων στο backup και GUI (5B3).
+- Δεν έγινε στο 5B2a: εναλλαγή έκδοσης και rollback (5B2b, §5.4.2), manifest πακέτων στο backup και GUI (5B3).
 - Δοκιμές: `tests/test_updates.py` (21), `tools/update_live_test.{py,sh,ps1}` (15 βήματα, loopback, πακέτα
   με κλειδί δοκιμής μέσω κρυφών επιλογών `--update-trusted-key`). Linux 27/11/2026: 15/15 PASS.
   **Windows 27/11/2026 (χρήστης): `tools\update_live_test.ps1` 15/15 PASS.**
+
+#### 5.4.2 Υλοποίηση 5B2b (27/11/2026): εναλλαγή έκδοσης και rollback
+- Ο Client, μετά το `report ready`, περιμένει να μην παίζει ανακοίνωση και να έχουν περάσει 10 s από το
+  τελευταίο τέλος της και στέλνει στον supervisor `switch <έκδοση>` (κανάλι εντολών του 5A). Ο supervisor
+  δέχεται μόνο έτοιμη (`versions\<έκδοση>\VERSION`), νεότερη, όχι `failed` έκδοση και όχι σε άλλη δοκιμή.
+- Δοκιμή: `trial` στο `current.json`, τερματισμός του παλιού Client, εκκίνηση της νέας με
+  `SCH_INTERCOM_VERSION`/`SCH_INTERCOM_TRIAL` στο περιβάλλον. Ο νέος Client στέλνει `trial-ok` μόλις πάρει
+  αποδεκτό WELCOME.
+- Commit: `current` = νέα, `previous` = παλιά, `install.json`, `sch-intercom-client.cmd` και η τιμή του
+  HKCU\Run (μόνο αν υπάρχει· ίδια μορφή με του εγκαταστάτη) δείχνουν στη νέα· σβήνονται οι εκδόσεις εκτός
+  από current, previous και εκείνη από την οποία τρέχει ο supervisor. Ο νέος Client **δεν** ξαναξεκινά.
+- Rollback αν ο νέος Client τερματιστεί ή δεν στείλει `trial-ok` σε 90 s, και στην εκκίνηση του supervisor
+  αν βρει `trial` (κλείσιμο υπολογιστή/τερματισμός μέσα στη δοκιμή): ξανά η παλιά, η νέα στο `failed`
+  (δεν ξανακατεβαίνει), ο φάκελός της σβήνεται.
+- Το αποτέλεσμα (`update-result.json`: έκδοση, επιτυχία, αιτία) το στέλνει ο Client στον Manager στο επόμενο
+  `check` ως `report installed|failed`.
+- Ο supervisor συνεχίζει από την έκδοση με την οποία ξεκίνησε· ο νέος ξεκινά από το HKCU\Run στην επόμενη
+  σύνδεση στα Windows (απόφαση 27/11/2026).
+- Έκδοση με `app\` χωρίς embeddable Python (μόνο δοκιμές Linux) τρέχει τον κώδικα από το `app\` της.
+  Κρυφές επιλογές δοκιμών: `client.supervisor --trial-seconds N -- <ορίσματα Client>`.
+- Δοκιμές: `tests/test_update_switch.py` (9), `tools/update_install_live_test.{py,sh,ps1}` (13 βήματα:
+  αναβολή κατά την ανακοίνωση, εναλλαγή ≥ 10 s μετά, commit με ίδια ταυτότητα, Run/.cmd, «installed» στον
+  Manager, rollback σε crash, σε 20 s χωρίς σύνδεση και σε kill του supervisor, failed δεν ξανακατεβαίνουν,
+  καθαρισμός παλιών). Το `.ps1` χρησιμοποιεί τον πραγματικό εγκαταστάτη (`--installer`). Linux 27/11/2026: 13/13 PASS.
+  **Windows 27/11/2026 (χρήστης): `tools\update_install_live_test.py --installer` 13/13 PASS** (πραγματικός
+  εγκαταστάτης Inno Setup, embeddable Python), μετά από μία διόρθωση (η αναφορά «installed» στέλνεται με νέο
+  έλεγχο μετά το commit) και αναμονή στο βήμα 07 της δοκιμής.
+- Antivirus (χρήστης, Avast ενεργό): το `setup.exe` χωρίς ψηφιακή υπογραφή ελέγχεται και η εκτέλεση περιμένει
+  να κλείσει το ενημερωτικό παράθυρο. Αφορά μόνο την εγκατάσταση με setup.exe· οι αυτόματες ενημερώσεις δεν
+  τρέχουν setup.exe. Έλεγχος με το antivirus του σχολείου πριν από τη διανομή.
 
 ### 5.5 Γραμμή εντολών Client
 `%LOCALAPPDATA%\sch-intercom\sch-intercom-client.cmd` (υλοποιήθηκε στο 5A):

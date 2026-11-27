@@ -12,6 +12,15 @@
   εκτός Windows) με μυστικό κλειδί στον φάκελο του προγράμματος.
 - Στα Windows ο Client μπαίνει σε Job object: αν τερματιστεί ο supervisor
   (π.χ. kill), τερματίζεται και ο Client· δεν μένουν δύο Clients με ίδια ταυτότητα.
+
+Φάση 5B2b (docs/phase5.md §5.4): εναλλαγή έκδοσης. Ο Client ζητά ``switch <έκδοση>``
+όταν η νέα έκδοση είναι έτοιμη και δεν παίζει ανακοίνωση. Ο supervisor γράφει
+``trial`` στο current.json και ξεκινά τη νέα. Αν αυτή στείλει ``trial-ok`` (αποδεκτό
+WELCOME) μέσα σε 90 s: commit (current/previous, HKCU\\Run, .cmd, σβήσιμο παλιών).
+Αλλιώς, ή αν πέσει, ή αν βρεθεί ``trial`` στην εκκίνηση (π.χ. κλείσιμο υπολογιστή):
+rollback στην παλιά και η νέα μπαίνει στο ``failed``. Το αποτέλεσμα μένει στο
+update-result.json μέχρι να το αναφέρει ο Client στον Manager. Ο ίδιος ο supervisor
+συνεχίζει από την παλιά έκδοση ως την επόμενη σύνδεση στα Windows.
 """
 from __future__ import annotations
 
@@ -30,8 +39,9 @@ import tempfile
 import threading
 import time
 
-from client.install_paths import Layout
+from client.install_paths import Layout, atomic_write_json
 from client.single_instance import AlreadyRunning, InstanceLock
+from shared.version import parse_version
 
 EXIT_ALREADY_RUNNING = 3
 BACKOFF_SECONDS = (2, 5, 10, 30)
@@ -39,6 +49,11 @@ STABLE_AFTER_SECONDS = 60
 LOG_BYTES = 1_000_000
 LOG_BACKUPS = 5
 CREATE_NO_WINDOW = 0x08000000
+#: Η νέα έκδοση πρέπει να συνδεθεί (αποδεκτό WELCOME) μέσα σε τόσα s (§5.4.6).
+TRIAL_SECONDS = 90
+VERSION_ENV = "SCH_INTERCOM_VERSION"
+TRIAL_ENV = "SCH_INTERCOM_TRIAL"
+RESULT_FILE = "update-result.json"
 
 
 # -- κανάλι εντολών -----------------------------------------------------------
@@ -63,7 +78,7 @@ def _new_key(layout: Layout) -> bytes:
     return key
 
 
-def send_command(layout: Layout, command: str, *, timeout: float = 5.0) -> dict:
+def send_command(layout: Layout, command: str, *, timeout: float = 5.0, **fields) -> dict:
     """Στέλνει εντολή στον supervisor. OSError αν δεν εκτελείται."""
     try:
         key = layout.key_file.read_bytes()
@@ -78,7 +93,7 @@ def send_command(layout: Layout, command: str, *, timeout: float = 5.0) -> dict:
     def talk():
         try:
             with PipeClient(address, family=family, authkey=key) as connection:
-                connection.send({"command": command})
+                connection.send({**fields, "command": command})
                 if connection.poll(timeout):
                     result.update(connection.recv())
                 else:
@@ -181,8 +196,16 @@ def default_spawn(command: list[str], env: dict, cwd: Path) -> subprocess.Popen:
 class Supervisor:
     def __init__(self, layout: Layout, *, spawn=default_spawn, clock=time.monotonic,
                  backoff=BACKOFF_SECONDS, stable_after: float = STABLE_AFTER_SECONDS,
-                 client_args: tuple[str, ...] = ()):
+                 client_args: tuple[str, ...] = (), trial_seconds: float = TRIAL_SECONDS,
+                 registry=None):
         self.layout = layout
+        self.trial_seconds = trial_seconds
+        # Για τα tests: αντικατάσταση του HKCU\Run (None = winreg στα Windows).
+        self.registry = registry
+        self.trial: str | None = None
+        self.trial_started = 0.0
+        self._trial_ok = threading.Event()
+        self._switch_to: str | None = None
         self.spawn = spawn
         self.clock = clock
         self.backoff = tuple(backoff)
@@ -217,18 +240,27 @@ class Supervisor:
                     "uptime": round(time.time() - self.started_at),
                     "client_uptime": (round(self.clock() - self.child_started)
                                       if child is not None and child.poll() is None else None),
+                    "trial": self.trial,
                     "home": str(self.layout.home), "data": str(self.layout.data)}
 
     # -- Client -----------------------------------------------------------------
     def _start_child(self) -> None:
-        try:
-            self.version = self.layout.current_version()
-        except ValueError as exc:
-            self.log.info(f"[supervisor] {exc}· εκκίνηση από τον κώδικα χωρίς έκδοση")
-            self.version = None
+        if self.trial is not None:
+            self.version = self.trial
+        else:
+            try:
+                self.version = self.layout.current_version()
+            except ValueError as exc:
+                self.log.info(f"[supervisor] {exc}· εκκίνηση από τον κώδικα χωρίς έκδοση")
+                self.version = None
         command = self.layout.module_command("client.main", *self.client_args,
                                              version=self.version)
         env = self.layout.child_env(self.version)
+        env.pop(TRIAL_ENV, None)
+        if self.version is not None:
+            env[VERSION_ENV] = self.version
+        if self.trial is not None:
+            env[TRIAL_ENV] = self.trial
         try:
             child = self.spawn(command, env, self.layout.home)
         except OSError as exc:
@@ -271,8 +303,154 @@ class Supervisor:
         self.last_exit = child.returncode
         self.log.info(f"[supervisor] Client σταμάτησε (PID {child.pid})")
 
+    # -- εναλλαγή έκδοσης (5B2b) ---------------------------------------------------
+    def _write_state(self, state: dict) -> None:
+        atomic_write_json(self.layout.current_file, state)
+
+    def _result(self, version: str, ok: bool, reason: str = "") -> None:
+        try:
+            atomic_write_json(self.layout.home / RESULT_FILE,
+                              {"version": version, "ok": ok, "reason": reason,
+                               "at": int(time.time())})
+        except OSError as exc:
+            self.log.info(f"[supervisor] Δεν γράφτηκε το {RESULT_FILE}: {exc}")
+
+    def can_switch(self, version) -> str | None:
+        """None αν επιτρέπεται η εναλλαγή στην ``version``· αλλιώς ο λόγος."""
+        try:
+            parse_version(version)
+            state = self.layout.read_current()
+        except ValueError as exc:
+            return str(exc)
+        if state is None:
+            return "Δεν υπάρχει εγκατεστημένη έκδοση"
+        if self.trial is not None or self._switch_to is not None:
+            return "Εναλλαγή ήδη σε εξέλιξη"
+        if version in state["failed"]:
+            return f"Η έκδοση {version} απέτυχε ήδη"
+        if parse_version(version) <= parse_version(state["current"]):
+            return f"Η έκδοση {version} δεν είναι νεότερη από την {state['current']}"
+        if not (self.layout.version_dir(version) / "VERSION").is_file():
+            return f"Η έκδοση {version} δεν είναι έτοιμη"
+        return None
+
+    def recover_trial(self) -> None:
+        """Εκκίνηση με trial στο current.json: η δοκιμή δεν ολοκληρώθηκε (κλείσιμο, kill)."""
+        try:
+            state = self.layout.read_current()
+        except ValueError:
+            return
+        if state and state.get("trial"):
+            version = state["trial"]
+            self.log.info(f"[supervisor] Η δοκιμή της {version} δεν ολοκληρώθηκε· rollback")
+            self._mark_failed(state, version,
+                              "Η δοκιμή διακόπηκε (κλείσιμο υπολογιστή ή τερματισμός)")
+
+    def _mark_failed(self, state: dict, version: str, reason: str) -> None:
+        state["trial"] = None
+        if version not in state["failed"]:
+            state["failed"] = (state["failed"] + [version])[-20:]
+        self._write_state(state)
+        self._result(version, False, reason)
+        remove_tree(self.layout.version_dir(version))
+
+    def _begin_trial(self, version: str) -> None:
+        reason = None
+        self._switch_to = None
+        state = self.layout.read_current()
+        if version in state["failed"] or not (self.layout.version_dir(version) / "VERSION").is_file():
+            reason = "μη διαθέσιμη"
+        if reason is not None:
+            self.log.info(f"[supervisor] Εναλλαγή στην {version} ακυρώθηκε: {reason}")
+            return
+        state["trial"] = version
+        self._write_state(state)
+        self.log.info(f"[supervisor] Δοκιμή έκδοσης {version} (από {state['current']}), "
+                      f"έως {self.trial_seconds:.0f} s για σύνδεση")
+        self._stop_child()
+        self.trial = version
+        self.trial_started = self.clock()
+        self._trial_ok.clear()
+        self.failures = 0
+        self.next_start = 0.0
+        self._start_child()
+
+    def _rollback(self, reason: str) -> None:
+        version, self.trial = self.trial, None
+        self.log.info(f"[supervisor] Rollback από την {version}: {reason}")
+        self._stop_child()
+        state = self.layout.read_current()
+        self._mark_failed(state, version, reason)
+        self.failures = 0
+        self.next_start = 0.0
+        self._start_child()
+
+    def _commit(self) -> None:
+        version, self.trial = self.trial, None
+        state = self.layout.read_current()
+        old = state["current"]
+        state.update(current=version, previous=old, trial=None)
+        self._write_state(state)
+        try:
+            self.layout.set_install_version(version)
+        except (OSError, ValueError) as exc:
+            self.log.info(f"[supervisor] install.json: {exc}")
+        self._rewrite_launchers(version)
+        self._cleanup_versions(state)
+        self._result(version, True)
+        self.log.info(f"[supervisor] Η έκδοση {version} εγκαταστάθηκε (προηγούμενη {old})")
+
+    def _rewrite_launchers(self, version: str) -> None:
+        from client.ctl import CLI_TEMPLATE
+        try:
+            if self.layout.cli_file.exists():
+                self.layout.cli_file.write_bytes(CLI_TEMPLATE.format(version=version)
+                                                 .encode("ascii"))
+        except OSError as exc:
+            self.log.info(f"[supervisor] Δεν ξαναγράφτηκε το {self.layout.cli_file.name}: {exc}")
+        command = run_command(self.layout, version)
+        try:
+            if self.registry is not None:
+                self.registry(self.layout.run_name, command)
+            elif os.name == "nt":
+                set_run_value(self.layout.run_name, command)
+        except OSError as exc:
+            self.log.info(f"[supervisor] Δεν ενημερώθηκε το HKCU\\Run: {exc}")
+
+    def _cleanup_versions(self, state: dict) -> None:
+        """Μένουν μόνο current και previous (και η έκδοση από την οποία τρέχω)."""
+        keep = {state["current"], state.get("previous")}
+        running = Path(sys.executable).resolve()
+        if not self.layout.versions.is_dir():
+            return
+        for folder in self.layout.versions.iterdir():
+            if folder.name in keep or not folder.is_dir():
+                continue
+            if folder.resolve() in running.parents:
+                continue   # ο supervisor τρέχει από εδώ· σβήνεται σε επόμενη εναλλαγή
+            remove_tree(folder)
+            if not folder.exists():
+                self.log.info(f"[supervisor] Σβήστηκε η παλιά έκδοση {folder.name}")
+
     def step(self) -> None:
         """Ένας κύκλος του βρόχου (ξεχωριστό για τα tests)."""
+        if self._switch_to is not None and self.trial is None:
+            self._begin_trial(self._switch_to)
+        if self.trial is not None:
+            if self._trial_ok.is_set():
+                self._commit()
+            else:
+                with self._lock:
+                    child = self.child
+                if child is not None and child.poll() is not None:
+                    self.last_exit = child.returncode
+                    with self._lock:
+                        self.child = None
+                    self._rollback(f"Η νέα έκδοση τερματίστηκε (κωδικός {child.returncode})")
+                    return
+                if self.clock() - self.trial_started >= self.trial_seconds:
+                    self._rollback(f"Δεν συνδέθηκε μέσα σε {self.trial_seconds:.0f} s")
+                    return
         if self._restart.is_set():
             self._restart.clear()
             self._stop_child()
@@ -297,7 +475,7 @@ class Supervisor:
             self._start_child()
 
     # -- εντολές ----------------------------------------------------------------
-    def handle(self, command: str) -> dict:
+    def handle(self, command: str, message: dict | None = None) -> dict:
         if command == "status":
             return self.status()
         if command == "restart":
@@ -306,6 +484,20 @@ class Supervisor:
             return {"ok": True}
         if command == "stop":
             self._stop.set()
+            self._wake.set()
+            return {"ok": True}
+        if command == "switch":
+            version = (message or {}).get("version")
+            reason = self.can_switch(version)
+            if reason is not None:
+                return {"ok": False, "error": reason}
+            self._switch_to = version
+            self._wake.set()
+            return {"ok": True}
+        if command == "trial-ok":
+            if self.trial is None or (message or {}).get("version") != self.trial:
+                return {"ok": False, "error": "Καμία δοκιμή για αυτή την έκδοση"}
+            self._trial_ok.set()
             self._wake.set()
             return {"ok": True}
         return {"ok": False, "error": f"Άγνωστη εντολή: {command}"}
@@ -323,7 +515,7 @@ class Supervisor:
                     if connection.poll(5):
                         message = connection.recv()
                         command = message.get("command") if isinstance(message, dict) else None
-                        connection.send(self.handle(str(command)))
+                        connection.send(self.handle(str(command), message))
             except (OSError, EOFError, ValueError):
                 pass
 
@@ -383,11 +575,15 @@ class Supervisor:
         try:
             self._open_control()
             self.log.info(f"[supervisor] Εκκίνηση (PID {os.getpid()}, φάκελος {self.layout.home})")
+            self.recover_trial()
             while not self._stop.is_set():
                 self.step()
                 self._wake.wait(poll)
                 self._wake.clear()
             self._stop_child()
+            if self.trial is not None:
+                # Τερματισμός μέσα στη δοκιμή: η επόμενη εκκίνηση κάνει rollback.
+                self.log.info(f"[supervisor] Τερματισμός μέσα στη δοκιμή της {self.trial}")
             self.log.info("[supervisor] Τερματισμός")
             return 0
         finally:
@@ -396,13 +592,55 @@ class Supervisor:
             self.close()
 
 
+def remove_tree(path: Path, *, timeout: float = 5.0) -> bool:
+    """Σβήσιμο φακέλου έκδοσης. Στα Windows τα αρχεία μιας διεργασίας που μόλις
+    τερματίστηκε ελευθερώνονται λίγο αργότερα: νέες προσπάθειες έως ``timeout``."""
+    import shutil
+    deadline = time.monotonic() + timeout
+    while True:
+        shutil.rmtree(path, ignore_errors=True)
+        if not Path(path).exists() or time.monotonic() >= deadline:
+            return not Path(path).exists()
+        time.sleep(0.25)
+
+
+def run_command(layout: Layout, version: str) -> str:
+    """Η τιμή του HKCU\\Run, ίδια με αυτήν που γράφει ο εγκαταστάτης."""
+    home = str(layout.home)
+    python = layout.version_dir(version) / "python" / "pythonw.exe"
+    return f'"{python}" -m client.supervisor --home "{home}"'
+
+
+def set_run_value(name: str, command: str) -> None:
+    """Ενημερώνει μόνο υπάρχουσα τιμή (αν ο χρήστης έβγαλε το autostart, μένει έξω)."""
+    import winreg
+    path = r"Software\Microsoft\Windows\CurrentVersion\Run"
+    with winreg.OpenKey(winreg.HKEY_CURRENT_USER, path, 0,
+                        winreg.KEY_QUERY_VALUE | winreg.KEY_SET_VALUE) as key:
+        try:
+            winreg.QueryValueEx(key, name)
+        except FileNotFoundError:
+            return
+        winreg.SetValueEx(key, name, 0, winreg.REG_SZ, command)
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Supervisor του Classroom Client")
     parser.add_argument("--home", type=Path, default=None, help="Φάκελος προγράμματος")
     parser.add_argument("--data-dir", type=Path, default=None, help="Φάκελος δεδομένων")
+    # Μόνο για τις αυτόματες δοκιμές 5B2b: συντομότερη δοκιμή και επιπλέον ορίσματα Client
+    # (μετά από «--»), π.χ. θύρες δοκιμής και κλειδί υπογραφής δοκιμής.
+    parser.add_argument("--trial-seconds", type=float, default=TRIAL_SECONDS,
+                        help=argparse.SUPPRESS)
+    argv = list(sys.argv[1:] if argv is None else argv)
+    client_args: list[str] = []
+    if "--" in argv:
+        split = argv.index("--")
+        argv, client_args = argv[:split], argv[split + 1:]
     args = parser.parse_args(argv)
     layout = Layout(args.home, args.data_dir)
-    return Supervisor(layout).run()
+    return Supervisor(layout, client_args=tuple(client_args),
+                      trial_seconds=args.trial_seconds).run()
 
 
 if __name__ == "__main__":

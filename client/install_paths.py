@@ -141,6 +141,14 @@ class Layout:
         stored = self.install_info().get("data_dir")
         return Path(stored) if isinstance(stored, str) and stored else data_dir()
 
+    def set_install_version(self, version: str) -> None:
+        """5B2b: μετά από αυτόματη ενημέρωση το install.json δείχνει τη νέα έκδοση."""
+        parse_version(version)
+        info = self.install_info()
+        if info:
+            info["installed_version"] = version
+            atomic_write_json(self.install_file, info)
+
     @property
     def run_name(self) -> str:
         name = self.install_info().get("run_name")
@@ -201,7 +209,10 @@ class Layout:
         embedded = version is not None and (self.version_dir(version) / "python").exists()
         if not embedded:
             # Ανάπτυξη: ο κώδικας από το repository (το embeddable έχει ..\\app στο ._pth).
-            paths = [str(SOURCE_ROOT)] + [p for p in env.get("PYTHONPATH", "").split(os.pathsep) if p]
+            # 5B2b: έκδοση με app\\ χωρίς embeddable Python (δοκιμές Linux) → από το app.
+            app = self.version_dir(version) / "app" if version is not None else None
+            first = str(app) if app is not None and app.is_dir() else str(SOURCE_ROOT)
+            paths = [first] + [p for p in env.get("PYTHONPATH", "").split(os.pathsep) if p]
             env["PYTHONPATH"] = os.pathsep.join(dict.fromkeys(paths))
         return env
 

@@ -6,6 +6,7 @@
 """
 
 import argparse
+import os
 import random
 from pathlib import Path
 import socket
@@ -30,6 +31,7 @@ from shared.discovery import discover_candidates, DISCOVERY_PORT
 from shared.manager_pin import load_pin, save_pin
 from client.install_paths import MANAGER_CERT, Layout, data_dir, load_settings
 from client.updater import AnnouncementState, Updater, peer_host
+from client.supervisor import RESULT_FILE, TRIAL_ENV, send_command
 from shared.update_protocol import UPDATE_PORT
 from client.identity_reset import (CLONED, PREVIOUS, archive_identity, check_clone,
                                    previous_room, remember_machine)
@@ -676,6 +678,38 @@ def main() -> None:
                              else {"error_retry": args.update_retry_seconds})).start()
         print(f"[Ενημέρωση] Εγκατεστημένη έκδοση {installed}", flush=True)
 
+    trial = {"version": os.environ.get(TRIAL_ENV), "sent": False}
+
+    def confirm_trial(manager_host: str | None) -> None:
+        """5B2b: νέα έκδοση σε δοκιμή· αποδεκτό WELCOME = «ΟΚ» στον supervisor (commit).
+
+        Μετά το commit νέος έλεγχος, ώστε ο Manager να μάθει αμέσως «installed»: ο
+        έλεγχος της σύνδεσης έτρεξε παράλληλα, πριν γραφτεί το αποτέλεσμα.
+        """
+        if not trial["version"] or trial["sent"]:
+            return
+        trial["sent"] = True
+
+        def send():
+            for attempt in range(5):
+                try:
+                    answer = send_command(layout, "trial-ok", version=trial["version"])
+                    print(f"[Ενημέρωση] Η έκδοση {trial['version']} συνδέθηκε· "
+                          + ("επιβεβαιώθηκε." if answer.get("ok")
+                             else f"ο supervisor: {answer.get('error')}"), flush=True)
+                    if answer.get("ok") and updater is not None:
+                        result = layout.home / RESULT_FILE
+                        deadline = time.monotonic() + 15
+                        while not result.exists() and time.monotonic() < deadline:
+                            time.sleep(0.25)
+                        updater.trigger(manager_host)
+                    return
+                except OSError as exc:
+                    error = exc
+                    time.sleep(1 + attempt)
+            print(f"[Ενημέρωση] Δεν επιβεβαιώθηκε η δοκιμή: {error}", flush=True)
+        threading.Thread(target=send, daemon=True, name="trial-ok").start()
+
     def session(connection: socket.socket) -> None:
         # 4.2D3: αναφορά «έχω δει vN» στον Manager που πέρασε τον έλεγχο TLS.
         key = manager_key(connection.getpeercert(binary_form=True) or b"")
@@ -689,6 +723,7 @@ def main() -> None:
             if updater is not None:
                 updater.trigger(manager_host)
             raise
+        confirm_trial(manager_host)
         if updater is not None:
             updater.trigger(manager_host)   # σε κάθε σύνδεση και επανασύνδεση
         if welcome is not None:
