@@ -30,6 +30,7 @@ from shared.ui import icons, theme
 SETTINGS_TITLE = "Ρυθμίσεις"
 TAB_MAINTENANCE = "Συντήρηση"
 TAB_APPEARANCE = "Εμφάνιση"
+TAB_UPDATES = "Ενημερώσεις"
 SCALE_TITLE = "Κλίμακα περιβάλλοντος"
 SCALE_NOTE = "Ισχύει μετά από επανεκκίνηση"
 RESTART_NOW = "Επανεκκίνηση τώρα"
@@ -886,7 +887,8 @@ class SettingsPage(QWidget):
                  dialog_hook: Callable[[QDialog], None] | None = None,
                  layout_settings: Path | None = None,
                  restart_app: Callable[[], None] | None = None,
-                 ui_scale: int | None = None, parent=None):
+                 ui_scale: int | None = None, updates=None,
+                 updates_options: dict | None = None, parent=None):
         super().__init__(parent)
         self.model = model
         self.start_restore = start_restore
@@ -910,7 +912,9 @@ class SettingsPage(QWidget):
         layout.setSpacing(px(theme.CARD_SPACING))
         tabs = QHBoxLayout()
         self.tab_buttons: dict[str, QPushButton] = {}
-        for name in (TAB_APPEARANCE, TAB_MAINTENANCE):
+        # 5B3: τρίτο tab «Ενημερώσεις» όταν υπάρχει θύρα ενημερώσεων (UpdatesModel).
+        self.tab_names = [TAB_APPEARANCE, TAB_MAINTENANCE] + ([TAB_UPDATES] if updates else [])
+        for name in self.tab_names:
             button = QPushButton(name)
             button.setObjectName("tab")
             button.setCheckable(True)
@@ -950,17 +954,27 @@ class SettingsPage(QWidget):
         self._arrange(True)
         self.scroll = _scroll(body)
         self.stack.addWidget(self.scroll)
+        self.updates_panel = None
+        if updates is not None:
+            from director.qt_updates import UpdatesPanel
+            options = dict(updates_options or {})
+            options.setdefault("choose_open", choose_open)
+            options.setdefault("dialog_hook", dialog_hook)
+            options.setdefault("inform", self.inform)
+            self.updates_panel = UpdatesPanel(updates, **options)
+            self.updates_scroll = _scroll(self.updates_panel)
+            self.stack.addWidget(self.updates_scroll)
         self.show_tab(TAB_APPEARANCE)
 
     # --- tabs ----------------------------------------------------------------
     def show_tab(self, name: str) -> None:
         for key, button in self.tab_buttons.items():
             button.setChecked(key == name)
-        self.stack.setCurrentIndex(0 if name == TAB_APPEARANCE else 1)
+        self.stack.setCurrentIndex(self.tab_names.index(name))
 
     @property
     def current_tab(self) -> str:
-        return TAB_APPEARANCE if self.stack.currentIndex() == 0 else TAB_MAINTENANCE
+        return self.tab_names[self.stack.currentIndex()]
 
     # --- Εμφάνιση: κλίμακα περιβάλλοντος -------------------------------------
     def _build_scale_card(self) -> QFrame:
@@ -1117,6 +1131,8 @@ class SettingsPage(QWidget):
         needed = 2 * px(theme.MAINTENANCE_CARD) + px(theme.CARD_SPACING) \
             + px(theme.SCROLL_GAP) + px(theme.SCROLLBAR)
         self._arrange(self.width() >= needed)
+        if self.updates_panel is not None:
+            self.updates_panel.fit_width(self.width())
 
     # --- ανανέωση ----------------------------------------------------------
     def refresh(self) -> None:
