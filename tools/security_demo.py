@@ -21,6 +21,10 @@
 4.3C2: --notices full | duplicate | both (ψεύτικα: «γεμάτος» Manager, ίδια ταυτότητα
 στον C2627-Γ1 · Board1) και --page home | security.
 
+5B3: --page settings --tab updates [--updates normal | off | missing | empty]
+(Ρυθμίσεις → «Ενημερώσεις» με πακέτα 1.0.6/1.0.5 υπογεγραμμένα με κλειδί επίδειξης και
+ψεύτικη κατάσταση ανά υπολογιστή). Με --role backup δείχνει την κλειδωμένη μορφή.
+
 Κλίμακα περιβάλλοντος: --scale 80 | 90 | 100 | 110 | 125 (προεπιλογή όπως η εφαρμογή).
 """
 from __future__ import annotations
@@ -29,6 +33,7 @@ import argparse
 import os
 from pathlib import Path
 import tempfile
+import time
 import uuid
 
 # Ενδεικτικές αίθουσες και υπολογιστές: 15 αίθουσες, 26 υπολογιστές.
@@ -234,15 +239,86 @@ def build(root: Path, log=print):
     return broadcaster, model, enrollment
 
 
+# 5B3: κατάσταση ενημέρωσης με τη σειρά των υπολογιστών (όσοι είναι online).
+UPDATE_STATES = [
+    {"app": "1.0.6", "state": "current"},
+    {"app": "1.0.5", "state": "downloading", "available": "1.0.6", "progress": 45},
+    {"app": "1.0.6", "state": "installed", "available": "1.0.6"},
+    {"app": "1.0.5", "state": "waiting", "available": "1.0.6", "detail": "ανακοίνωση σε εξέλιξη"},
+    {"app": "1.0.5", "state": "failed", "available": "1.0.6",
+     "detail": "Η 1.0.6 δεν συνδέθηκε σε 90 s · ξανά η 1.0.5"},
+    {"app": "1.0.5", "state": "ready", "available": "1.0.6"},
+    {"app": "1.0.6", "state": "current"},
+    {"app": "1.0.5", "state": "available", "available": "1.0.6",
+     "detail": "αναμονή σειράς λήψης"},
+    {"app": "1.0.6", "state": "current"},
+    {"app": "1.0.4", "state": "available", "available": "1.0.6"},
+]
+
+
+def _demo_package(root: Path, key, version: str) -> Path:
+    from shared import package as pkg
+    tree = root / "release" / version
+    (tree / "python").mkdir(parents=True)
+    (tree / "python" / "python.exe").write_bytes(b"MZ" + os.urandom(1_500_000))
+    (tree / "app" / "client").mkdir(parents=True)
+    (tree / "app" / "client" / "main.py").write_text(f"VERSION = {version!r}\n",
+                                                     encoding="utf-8")
+    (tree / "VERSION").write_text(version + "\n", encoding="ascii")
+    out = root / f"sch-intercom-client-{version}.sicu"
+    pkg.write_package(tree, out, key, version)
+    return out
+
+
+def build_updates(root: Path, model, broadcaster, scenario: str):
+    """Ρυθμίσεις → «Ενημερώσεις»: πακέτα επίδειξης και κατάσταση ανά υπολογιστή."""
+    from director.manager_state import load as load_state, path_for
+    from director.updates import STATUS_FILE, UpdateStatus, UpdateStore, updates_dir
+    from director.updates_view import UpdatesModel
+    from shared import package as pkg
+    key = pkg.generate_key()
+    folder = updates_dir(root)
+    store = UpdateStore(folder, trusted_keys=[pkg.public_hex(key)])
+    status = UpdateStatus(folder / STATUS_FILE)
+    if scenario != "empty":
+        for version in ("1.0.5", "1.0.6"):
+            store.import_package(_demo_package(root / "demo-packages", key, version))
+        store.set_auto(scenario != "off")
+        if scenario == "missing":
+            store.package_path("1.0.6").unlink()
+    index = 0
+    for client_id, (_room, online, age) in broadcaster.status.items():
+        if online:
+            entry = dict(UPDATE_STATES[index % len(UPDATE_STATES)])
+            index += 1
+        else:
+            entry = {"app": "1.0.5" if index % 2 else "1.0.6", "state": "current"}
+        if scenario == "empty":
+            entry = {"app": "1.0.0", "state": "current"}
+        elif scenario == "off" and entry["state"] not in ("current", "installed"):
+            entry = {"app": entry["app"], "state": "available", "available": "1.0.6"}
+            if index == 2 and online:
+                entry.update(state="downloading", progress=45)
+        if not online:
+            entry["seen_at"] = int(time.time() - age)
+        status.update(client_id, **entry)
+    state_file = path_for(model.trust.registry.path)
+    return UpdatesModel(store, status, rooms=model.rooms,
+                        primary=lambda: load_state(state_file).role == "primary")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--width", type=int, default=None, help="πλάτος παραθύρου")
     parser.add_argument("--role", choices=ROLE_SCENARIOS, default="primary",
                         help="σενάριο Κύριου/Εφεδρικού")
-    parser.add_argument("--tab", choices=("computers", "certificates"), default="computers")
+    parser.add_argument("--tab", choices=("computers", "certificates", "updates",
+                                          "maintenance", "appearance"), default=None)
+    parser.add_argument("--updates", choices=("normal", "off", "missing", "empty"),
+                        default="normal", help="5B3: σενάριο Ρυθμίσεις → «Ενημερώσεις»")
     parser.add_argument("--notices", choices=("none", "full", "duplicate", "both"),
                         default="none", help="4.3C2: ειδοποιήσεις «γεμάτος» / ίδια ταυτότητα")
-    parser.add_argument("--page", choices=("home", "security"), default="security")
+    parser.add_argument("--page", choices=("home", "security", "settings"), default="security")
     parser.add_argument("--scale", type=int, choices=(80, 90, 100, 110, 125), default=None,
                         help="κλίμακα περιβάλλοντος %% (προεπιλογή: όπως η εφαρμογή, 90 στα Windows)")
     parser.add_argument("--screenshot", type=Path, default=None,
@@ -272,15 +348,21 @@ def main() -> None:
             maintenance = MaintenanceModel(root / "clients-registry.json", root / "director.crt",
                                            root / "director.key",
                                            registry_version=lambda: model.trust.registry.version)
+            updates = build_updates(root, model, broadcaster, args.updates)
             window = DirectorWindow(broadcaster, DirectorMicrophone(fake_stream, broadcaster),
                                     security=model, maintenance=maintenance, role=role,
-                                    layout_settings=root / "director-gui.json")
+                                    layout_settings=root / "director-gui.json",
+                                    updates=updates)
             if args.width:
                 window.resize(args.width, 900)
             window.show()
             window.show_page(args.page)
             if args.page == "security" and args.tab == "certificates":
                 window.security_page.show_tab("Πιστοποιητικά")
+            if args.page == "settings":
+                window.settings_page.show_tab({"maintenance": "Συντήρηση",
+                                               "appearance": "Εμφάνιση"}.get(
+                                                   args.tab, "Ενημερώσεις"))
             if args.screenshot:
                 for _ in range(5):
                     app.processEvents()

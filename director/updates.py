@@ -3,7 +3,8 @@
 Φάκελος ``<δεδομένα Manager>/updates/``:
     updates-config.json   auto, current/previous πακέτο, «Έναρξη τώρα»
     updates-status.json   κατάσταση ανά Client (γράφει ο Manager που εξυπηρετεί)
-    sch-intercom-client-<έκδοση>.sicu   το τρέχον και το προηγούμενο πακέτο
+    sch-intercom-client-<έκδοση>.sicu   το τρέχον και το προηγούμενο πακέτο· τα παλιότερα
+                          σβήνονται (το προηγούμενο δεν διανέμεται, κρατιέται για ασφάλεια)
 
 Τη ρύθμιση τη γράφει η γραμμή εντολών (``python -m director.updates``) και αργότερα το GUI·
 ο Manager που τρέχει την ξαναδιαβάζει κάθε 2 s και ζητά από τους συνδεδεμένους Clients
@@ -131,8 +132,52 @@ class UpdateStore:
     def package_path(self, version: str) -> Path:
         return self.folder / package_name(version)
 
+    def package_missing(self, label: str = "current") -> bool:
+        """Το πακέτο (current/previous) της ρύθμισης δεν υπάρχει στον δίσκο (π.χ. μετά από
+        επαναφορά χωρίς τον φάκελο -updates)."""
+        entry = self.config()[label]
+        if entry is None:
+            return False
+        path = self.folder / entry["file"]
+        try:
+            return path.stat().st_size != entry["size"]
+        except OSError:
+            return True
+
+    def inspect_package(self, source: Path) -> dict:
+        """Για τον διάλογο εισαγωγής (5B3): πλήρης έλεγχος και τι αλλάζει σε σχέση με το
+        τρέχον πακέτο. Δεν γράφει τίποτα. ``error`` αντί για εξαίρεση."""
+        source = Path(source)
+        info = {"path": source, "error": None}
+        config = self.config()
+        installed = config["current"]["version"] if config["current"] else None
+        try:
+            manifest = verify_package(source, trusted_keys=self.trusted_keys,
+                                      installed_version=installed, updater_version=10**6)
+        except PackageError as exc:
+            info["error"] = str(exc)
+            return info
+        files = {item["path"]: item for item in manifest["files"]}
+        info.update(version=manifest["version"], size=source.stat().st_size,
+                    created_at=manifest["created_at"], files=len(files), changed=None,
+                    changed_bytes=None, compared_with=None)
+        if installed is not None and not self.package_missing():
+            try:
+                old = {item["path"]: item["sha256"] for item in
+                       validate_manifest(json.loads(read_signed_manifest(
+                           self.package_path(installed))[0].decode("utf-8")))["files"]}
+            except (PackageError, ValueError, UnicodeDecodeError):
+                old = None
+            if old is not None:
+                changed = [item for path, item in files.items() if old.get(path) != item["sha256"]]
+                info.update(changed=len(changed),
+                            changed_bytes=sum(item["size"] for item in changed),
+                            compared_with=installed)
+        return info
+
     def import_package(self, source: Path) -> dict:
-        """Επαλήθευση (υπογραφή, hashes, νεότερη έκδοση) και αντιγραφή ως τρέχον πακέτο."""
+        """Επαλήθευση (υπογραφή, hashes, νεότερη έκδοση) και αντιγραφή ως τρέχον πακέτο.
+        Κρατιούνται το τρέχον και το προηγούμενο· τα άλλα .sicu σβήνονται (5B3)."""
         source = Path(source)
         with self._lock:
             config = self.config()
@@ -161,16 +206,27 @@ class UpdateStore:
                      "sha256": _sha256(target), "min_updater": manifest["min_updater"],
                      "connection_protocol": manifest["connection_protocol"],
                      "created_at": manifest["created_at"], "imported_at": int(time.time())}
-            old_previous = config["previous"]
             config["previous"], config["current"] = config["current"], entry
             config["start"] = {"seq": config["start"]["seq"], "version": None,
                                "all": False, "clients": []}
             self._save(config)
-            # Κρατάμε μόνο τρέχον και προηγούμενο.
-            keep = {entry["file"]} | ({config["previous"]["file"]} if config["previous"] else set())
-            if old_previous and old_previous["file"] not in keep:
-                (self.folder / old_previous["file"]).unlink(missing_ok=True)
+            self.remove_old_packages()
             return entry
+
+    def remove_old_packages(self) -> None:
+        """Σβήνει τα .sicu εκτός από το τρέχον και το προηγούμενο. Στα Windows ένα αρχείο που διαβάζεται
+        ακόμη από μια λήψη δεν σβήνεται· θα σβηστεί στην επόμενη κλήση."""
+        with self._lock:
+            config = self.config()
+            keep = {entry["file"] for entry in (config["current"], config["previous"]) if entry}
+            if not keep:
+                return      # χωρίς ρύθμιση (π.χ. παλιό backup) δεν σβήνεται τίποτα
+            for other in self.folder.glob("*.sicu"):
+                if other.name not in keep:
+                    try:
+                        other.unlink()
+                    except OSError:
+                        pass
 
     def set_auto(self, enabled: bool) -> dict:
         with self._lock:
@@ -578,7 +634,9 @@ def _describe(store: UpdateStore, status_path: Path) -> str:
         entry = config[label]
         name = "Τρέχον πακέτο" if label == "current" else "Προηγούμενο"
         lines.append(f"{name}: " + ("—" if entry is None else
-                                     f"{entry['version']} ({entry['size'] / 1e6:.1f} MB)"))
+                                     f"{entry['version']} ({entry['size'] / 1e6:.1f} MB)"
+                                     + (" — λείπει το αρχείο"
+                                        if store.package_missing(label) else "")))
     try:
         clients = json.loads(status_path.read_text(encoding="utf-8")).get("clients", {})
     except (OSError, ValueError):

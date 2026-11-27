@@ -179,6 +179,11 @@ REQUEST_CARD_SPACING = 10   # απόσταση ανάμεσα στις κάρτ�
 IDENTITY_CARD_MAX = 700     # κάρτες «Ταυτότητα Manager» και «Ρόλος Manager»
 SCALE_OPTION = 62          # ελάχιστο πλάτος επιλογής «80%» … «125%» (Ρυθμίσεις → Εμφάνιση)
 MAINTENANCE_CARD = 420      # κάρτες «Backup» / «Επαναφορά» (δίπλα-δίπλα όταν χωρούν)
+UPDATES_PACKAGE_CARD = 420  # Ρυθμίσεις → Ενημερώσεις: κάρτα «Πακέτο Client» (5B3)
+UPDATES_COMPUTERS_MIN = 560 # κάτω από αυτό η κάρτα «Υπολογιστές» πάει κάτω από το πακέτο
+UPDATES_VERSION_COLUMN = 78 # στήλη «Έκδοση»
+UPDATES_STATE_COLUMN = 255  # στήλη «Κατάσταση» (κείμενο + μπάρα λήψης)
+UPDATES_PROGRESS = 90       # μπάρα λήψης 90×6
 DIALOG_WIDTH = 490          # διάλογοι backup/επαναφοράς
 FIELD_HEIGHT = 32           # πεδία κειμένου/κωδικού στους διαλόγους
 KV_GAP = 18                 # απόσταση ετικέτας–τιμής
@@ -516,6 +521,48 @@ QScrollBar::add-page, QScrollBar::sub-page {{
 #kvLabel {{
     color: {TEXT_MUTED};
 }}
+#updRow {{
+    border: none;
+    border-top: 1px solid {CARD_BORDER};
+}}
+#updHeadText, #updCounters {{
+    color: {TEXT_MUTED};
+    font-size: {m.font_pt(FONT_SMALL)}pt;
+}}
+#updState[tone="ok"] {{
+    color: {CONNECTED};
+}}
+#updState[tone="run"] {{
+    color: {PRIMARY};
+}}
+#updState[tone="wait"], #updState[tone="off"], #updState[tone="available"] {{
+    color: {TEXT_MUTED};
+}}
+#updState[tone="fail"] {{
+    color: {LIVE};
+    font-weight: 500;
+}}
+#updProgress {{
+    background: {SIDEBAR_BG};
+    border: none;
+    border-radius: {px(3)}px;
+}}
+#updProgress::chunk {{
+    background: {PRIMARY};
+    border-radius: {px(3)}px;
+}}
+#alarmNote, #infoNote {{
+    border-radius: {px(NAV_RADIUS)}px;
+    padding: {px(9)}px {px(12)}px;
+}}
+#alarmNote {{
+    background: {LIVE_LIGHT};
+    color: {ALARM_TEXT};
+}}
+#infoNote {{
+    background: {PRIMARY_LIGHT};
+    color: {PRIMARY_DARK};
+}}
 #kvValue[tone="ok"], #fieldStatus[tone="ok"] {{
     color: {CONNECTED};
 }}
@@ -589,7 +636,7 @@ QScrollBar::add-page, QScrollBar::sub-page {{
 QDialog#maintenanceDialog {{
     background: {WINDOW_BG};
 }}
-QScrollArea, #roomGrid, #securityBody, #maintenanceBody, #appearanceBody {{
+QScrollArea, #roomGrid, #securityBody, #maintenanceBody, #appearanceBody, #updatesBody {{
     background: transparent;
     border: none;
 }}

@@ -576,8 +576,12 @@ class DirectorWindow(QMainWindow):
                  security=None, security_options: dict | None = None,
                  layout_settings: Path | None = None,
                  maintenance=None, maintenance_options: dict | None = None,
-                 role=None, role_options: dict | None = None):
+                 role=None, role_options: dict | None = None,
+                 updates=None, updates_options: dict | None = None):
         super().__init__()
+        # 5B3: Ρυθμίσεις → «Ενημερώσεις» (director.updates_view.UpdatesModel)· None = χωρίς tab.
+        self.updates = updates
+        self._updates_options = dict(updates_options or {})
         # Κύριος/Εφεδρικός (director.security.RoleModel)· None = χωρίς μητρώο (δοκιμές).
         self.role = role
         self.role_status = None
@@ -731,6 +735,8 @@ class DirectorWindow(QMainWindow):
                        if key not in ("stop_serving", "restart", "warn")}
             options.setdefault("layout_settings", self._layout_settings)
             options["restart_app"] = self.restart_for_scale
+            options["updates"] = self.updates
+            options["updates_options"] = self._updates_options
             self.settings_page = SettingsPage(self.maintenance, start_restore=self.start_restore,
                                               restore_blocked=self.restore_blocked, **options)
             self.pages.addWidget(self.settings_page)
@@ -1638,10 +1644,11 @@ class GuiRuntime:
                  maintenance_options: dict | None = None,
                  role_options: dict | None = None,
                  quit_app: Callable[[], None] | None = None,
-                 updates=None):
+                 updates=None, updates_options: dict | None = None):
         self.args = args
-        # Φάση 5B2: θύρα ενημερώσεων Client (το GUI «Ενημερώσεις» έρχεται στο 5B3).
+        # Φάση 5B2: θύρα ενημερώσεων Client· 5B3: Ρυθμίσεις → «Ενημερώσεις».
         self.updates = updates
+        self.updates_options = updates_options or {}
         # Αφήνει το manager.lock πριν από επαναφορά μέσα από το GUI (Ρυθμίσεις → Συντήρηση).
         self.release_lock = release_lock
         self.maintenance_options = maintenance_options or {}
@@ -1709,7 +1716,9 @@ class GuiRuntime:
                         lambda path, **kw: trust.import_registry(path, self.broadcaster, **kw))
             maintenance = MaintenanceModel(args.registry_file, tls_cert, tls_key,
                                            registry_version=lambda: registry.version,
-                                           importer=importer)
+                                           importer=importer,
+                                           update_trusted_keys=getattr(
+                                               args, "update_trusted_key", None))
         role = None
         if self.controller is not None:
             from director.security import RoleModel
@@ -1720,6 +1729,14 @@ class GuiRuntime:
                                        else (lambda: None)),
                              accept_current=(trust.accept_current if trust is not None
                                              else None))
+        updates_model = None
+        if self.updates is not None and security is not None:
+            from director.manager_state import load as load_manager_role
+            from director.updates_view import UpdatesModel
+            state_file = manager_state_path(args.registry_file)
+            updates_model = UpdatesModel(
+                self.updates.store, self.updates.status, rooms=security.rooms,
+                primary=lambda: load_manager_role(state_file).role == "primary")
         options = {"stop_serving": self.stop_serving, "restart": self.request_restart,
                    **self.maintenance_options}
         self.window = DirectorWindow(
@@ -1728,7 +1745,8 @@ class GuiRuntime:
             security=security, security_options=self.security_options,
             layout_settings=self.layout_settings,
             maintenance=maintenance, maintenance_options=options,
-            role=role, role_options=self.role_options)
+            role=role, role_options=self.role_options,
+            updates=updates_model, updates_options=self.updates_options)
         if self.controller is not None:
             # Μόνο μήνυμα στην κονσόλα· στο παράθυρο τη σύγκρουση τη δείχνει η κόκκινη
             # ειδοποίηση και η επάνω μπάρα (όχι αναδυόμενα παράθυρα).
