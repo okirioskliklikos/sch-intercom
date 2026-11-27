@@ -17,6 +17,7 @@ from __future__ import annotations
 from collections.abc import Callable
 import hashlib
 import json
+import os
 from pathlib import Path
 import shutil
 import socket
@@ -35,6 +36,8 @@ from shared.version import parse_version
 
 STAGING = "staging"
 CONNECT_TIMEOUT = 5.0
+#: 5B2b: εναλλαγή μόνο 10 s μετά το τέλος της τελευταίας ανακοίνωσης (§5.4.4).
+SWITCH_QUIET_SECONDS = 10.0
 #: Διακοπή στη μέση λήψης (δίκτυο/Manager): συνέχιση από το offset μετά από τόσα s.
 ERROR_RETRY = 30.0
 
@@ -42,14 +45,24 @@ ERROR_RETRY = 30.0
 class AnnouncementState:
     """Αν παίζει τώρα ανακοίνωση (το ενημερώνει η λήψη ήχου)."""
 
-    def __init__(self) -> None:
+    def __init__(self, clock=time.monotonic) -> None:
         self._active = threading.Event()
+        self.clock = clock
+        self._ended: float | None = None
 
     def set(self, active: bool) -> None:
         if active:
             self._active.set()
         else:
+            if self._active.is_set():
+                self._ended = self.clock()
             self._active.clear()
+
+    def quiet_for(self) -> float:
+        """Δευτερόλεπτα χωρίς ανακοίνωση (από το τελευταίο τέλος· άπειρο αν καμία)."""
+        if self._active.is_set():
+            return 0.0
+        return float("inf") if self._ended is None else self.clock() - self._ended
 
     @property
     def active(self) -> bool:
@@ -70,7 +83,9 @@ class Updater:
                  trusted_keys=None, announcement: AnnouncementState | None = None,
                  log: Callable[[str], None] = lambda s: print(s, flush=True),
                  idle_timeout: float = IDLE_TIMEOUT, pause_poll: float = 0.5,
-                 error_retry: float = ERROR_RETRY):
+                 error_retry: float = ERROR_RETRY,
+                 switch_quiet: float = SWITCH_QUIET_SECONDS,
+                 send_command: Callable | None = None):
         self.layout = layout
         self.client_id = client_id
         self.tls_context = tls_context
@@ -82,6 +97,11 @@ class Updater:
         self.idle_timeout = idle_timeout
         self.pause_poll = pause_poll
         self.error_retry = error_retry
+        self.switch_quiet = switch_quiet
+        if send_command is None:
+            from client.supervisor import send_command
+        self.send_command = send_command
+        self.ready_version: str | None = None
         self._downloading = False
         self._host: str | None = None
         self._wake = threading.Event()
@@ -121,6 +141,8 @@ class Updater:
             host = self._host
             try:
                 self.last_result = self.run_once(host)
+                if self.last_result == "ready" and self.ready_version:
+                    self.request_switch(self.ready_version)
             except Retry as exc:
                 self.last_result = f"retry: {exc}"
                 self.log(f"[Ενημέρωση] {exc}· νέα προσπάθεια σε {exc.seconds:.0f}s.")
@@ -163,25 +185,79 @@ class Updater:
         state["failed"] = (state["failed"] + [version])[-20:]
         atomic_write_json(self.layout.current_file, state)
 
+    def installed_version(self, state: dict) -> str:
+        """Η έκδοση που τρέχει: ο supervisor τη δίνει στο περιβάλλον (και στη δοκιμή)."""
+        from client.supervisor import VERSION_ENV
+        running = os.environ.get(VERSION_ENV)
+        try:
+            parse_version(running)
+            return running
+        except ValueError:
+            return state["current"]
+
+    def _send_result(self, stream) -> None:
+        """5B2b: αποτέλεσμα εναλλαγής από τον supervisor (update-result.json) στον Manager."""
+        from client.supervisor import RESULT_FILE
+        path = self.layout.home / RESULT_FILE
+        try:
+            result = json.loads(path.read_text(encoding="utf-8"))
+            version = result["version"]
+            parse_version(version)
+        except FileNotFoundError:
+            return
+        except (OSError, ValueError, KeyError, TypeError):
+            path.unlink(missing_ok=True)
+            return
+        state = "installed" if result.get("ok") else "failed"
+        self._report(stream, state, version, str(result.get("reason") or "")[:300])
+        path.unlink(missing_ok=True)
+
+    def request_switch(self, version: str) -> bool:
+        """Ζητά από τον supervisor εναλλαγή όταν δεν παίζει ανακοίνωση εδώ και 10 s."""
+        waited = False
+        while not self._stop.is_set():
+            if self.announcement.quiet_for() >= self.switch_quiet:
+                break
+            if not waited:
+                self.log(f"[Ενημέρωση] Η εναλλαγή στην {version} περιμένει το τέλος της "
+                         "ανακοίνωσης (+10 s).")
+                waited = True
+            time.sleep(self.pause_poll)
+        if self._stop.is_set():
+            return False
+        try:
+            answer = self.send_command(self.layout, "switch", version=version)
+        except OSError as exc:
+            self.log(f"[Ενημέρωση] Χωρίς supervisor δεν γίνεται εναλλαγή: {exc}")
+            return False
+        if not answer.get("ok"):
+            self.log(f"[Ενημέρωση] Ο supervisor δεν έκανε εναλλαγή: {answer.get('error')}")
+            return False
+        self.log(f"[Ενημέρωση] Εναλλαγή στην έκδοση {version}.")
+        return True
+
     def run_once(self, host: str) -> str:
         state = self.layout.read_current()
         if state is None:
             return "not-installed"
-        installed = state["current"]
+        installed = self.installed_version(state)
+        self.ready_version = None
         with self._connect(host) as stream:
             send_message(stream, check_message(self.client_id, installed,
                                                updater=UPDATER_VERSION,
                                                protocol=CONNECTION_PROTOCOL,
                                                failed=state["failed"]))
             offer = parse_offer(read_message(stream))
+            self._send_result(stream)
             if offer is None:
                 return "none"
             version = offer["version"]
             if version in state["failed"] or \
                     parse_version(version) <= parse_version(installed):
                 return "none"   # ο Manager δεν μπορεί να επιβάλει downgrade
-            if self.layout.version_dir(version).exists():
+            if (self.layout.version_dir(version) / "VERSION").is_file():
                 self._report(stream, "ready", version)
+                self.ready_version = version
                 return "ready"
             self._downloading = True
             part = self._download(stream, offer)
@@ -269,6 +345,7 @@ class Updater:
         self._cleanup(version)
         self.log(f"[Ενημέρωση] Η έκδοση {version} επαληθεύτηκε και είναι έτοιμη.")
         self._report(stream, "ready", version)
+        self.ready_version = version
         return "ready"
 
     def _cleanup(self, version: str) -> None:
