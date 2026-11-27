@@ -49,18 +49,27 @@ ERROR_RETRY = 30.0
 class AnnouncementState:
     """Αν παίζει τώρα ανακοίνωση (το ενημερώνει η λήψη ήχου)."""
 
-    def __init__(self, clock=time.monotonic) -> None:
+    def __init__(self, clock=time.monotonic,
+                 on_change: Callable[[bool], None] | None = None) -> None:
         self._active = threading.Event()
         self.clock = clock
         self._ended: float | None = None
+        #: 5C1: αρχή/τέλος ανακοίνωσης για το ιστορικό του Client (μόνο στις αλλαγές).
+        self.on_change = on_change
 
     def set(self, active: bool) -> None:
+        was = self._active.is_set()
         if active:
             self._active.set()
         else:
-            if self._active.is_set():
+            if was:
                 self._ended = self.clock()
             self._active.clear()
+        if was != active and self.on_change is not None:
+            try:
+                self.on_change(active)
+            except Exception:  # noqa: BLE001 — ποτέ διακοπή του ήχου από το ιστορικό
+                pass
 
     def quiet_for(self) -> float:
         """Δευτερόλεπτα χωρίς ανακοίνωση (από το τελευταίο τέλος· άπειρο αν καμία)."""
@@ -89,8 +98,11 @@ class Updater:
                  idle_timeout: float = IDLE_TIMEOUT, pause_poll: float = 0.5,
                  error_retry: float = ERROR_RETRY,
                  switch_quiet: float = SWITCH_QUIET_SECONDS,
-                 send_command: Callable | None = None):
+                 send_command: Callable | None = None,
+                 on_state: Callable[..., None] | None = None):
         self.layout = layout
+        #: 5C1: (state, version, detail, progress) για το παράθυρο του Client.
+        self.on_state = on_state
         self.client_id = client_id
         self.tls_context = tls_context
         self.server_name = server_name
@@ -145,6 +157,8 @@ class Updater:
             host = self._host
             try:
                 self.last_result = self.run_once(host)
+                if self.last_result == "none":
+                    self._notify("current", None)
                 if self.last_result == "ready" and self.ready_version:
                     self.request_switch(self.ready_version)
             except Retry as exc:
@@ -176,7 +190,16 @@ class Updater:
             raw.close()
             raise
 
+    def _notify(self, state: str, version: str | None, detail: str = "",
+                progress: int | None = None) -> None:
+        if self.on_state is not None:
+            try:
+                self.on_state(state, version, detail, progress)
+            except Exception:  # noqa: BLE001 — το GUI δεν σταματά την ενημέρωση
+                pass
+
     def _report(self, stream, state: str, version: str | None, detail: str = "") -> None:
+        self._notify(state, version, detail)
         send_message(stream, report_message(state, version, detail))
         reply = read_message(stream)
         if reply.get("type") != "ok":
@@ -256,7 +279,10 @@ class Updater:
             if offer is None:
                 return "none"
             version = offer["version"]
-            if version in state["failed"] or \
+            if version in state["failed"]:
+                self._notify("failed", version)
+                return "failed-before"
+            if \
                     parse_version(version) <= parse_version(installed):
                 return "none"   # ο Manager δεν μπορεί να επιβάλει downgrade
             if (self.layout.version_dir(version) / "VERSION").is_file():
@@ -391,6 +417,7 @@ class Updater:
                         time.sleep(self.pause_poll)
                     raise Retry(0, f"Συνέχεια λήψης {version} μετά την ανακοίνωση")
                 progress = (done + offset) * 100 // need if need else 100
+                self._notify("downloading", version, "", min(100, progress))
                 send_message(stream, {"type": "get-file", "version": version,
                                       "path": item["path"], "offset": offset,
                                       "progress": min(100, progress)})

@@ -39,6 +39,9 @@ from shared.control import heartbeat_sender
 from client.windows_volume import (AnnouncementVolume, AudioPolicyWorker,
                                    create_volume_controller, recover_pending_volume)
 from client.windows_apps import ApplicationAudio
+from client import status as st
+from client.supervisor import VERSION_ENV
+from shared.version import APP_VERSION
 
 #: Νέα προσπάθεια μετά από 5 s ±1 s: το τυχαίο jitter απλώνει τις επανασυνδέσεις
 #: όταν πολλοί Clients ξεκινούν μαζί (π.χ. πρωινό άνοιγμα υπολογιστών).
@@ -213,6 +216,7 @@ def play_stream(
     test_report=None,
     announcement: AnnouncementState | None = None,
     update_check: Callable[[], None] | None = None,
+    on_output: Callable[[object], None] | None = None,
 ) -> None:
     import sounddevice as sd
 
@@ -270,6 +274,11 @@ def play_stream(
         callback=on_audio,
     ) as output:
         output_latency_us = int(output.latency * 1_000_000)
+        if on_output is not None:
+            try:
+                on_output(output)   # 5C1: όνομα συσκευής για τις «Πληροφορίες»
+            except Exception:  # noqa: BLE001
+                pass
         print(
             f"Λήψη και αναπαραγωγή ήχου... όριο ουράς {jitter.max_blocks * BLOCK_MS} ms, "
             f"καθυστέρηση κάρτας ήχου {output.latency * 1000:.0f} ms",
@@ -383,6 +392,41 @@ def _verified_connection(candidates, *, port, pin, log, **connect):
     return chosen[0], chosen[1]
 
 
+#: 5C1: πώς τελείωσε μια προσπάθεια σύνδεσης (για το tray/παράθυρο, client.status).
+REJECTED = "rejected"     # ο Manager απέρριψε το πιστοποιητικό του Client (TLS alert)
+
+
+class NotAdmitted(ConnectionError):
+    """Η σύνδεση κόπηκε πριν από το WELCOME, αμέσως μετά το TLS.
+
+    Με TLS 1.3 ο Client τελειώνει τη χειραψία πριν ο Manager ελέγξει το πιστοποιητικό του·
+    η απόρριψη φαίνεται στην πρώτη ανάγνωση ως TLS alert **ή** (ανάλογα με τον χρονισμό,
+    και στα Windows) ως «connection reset»/κλείσιμο.
+    """
+
+
+def classify_failure(exc: BaseException) -> tuple[str, str]:
+    """(είδος, λεπτομέρεια) αποτυχίας σύνδεσης.
+
+    Μη εγκεκριμένο/ανακληθέν πιστοποιητικό Client: ο Manager στέλνει TLS alert
+    (π.χ. ``TLSV1_ALERT_UNKNOWN_CA``)· λάθος πιστοποιητικό Manager: έλεγχος στον Client
+    (``SSLCertVerificationError``).
+    """
+    from client import status as st
+    if isinstance(exc, ManagerFull):
+        return st.FULL, ""
+    if isinstance(exc, ProtocolMismatch):
+        return st.INCOMPATIBLE, str(exc)
+    if isinstance(exc, ssl.SSLCertVerificationError):
+        return st.ERROR, "το πιστοποιητικό του Manager δεν είναι το αναμενόμενο"
+    if isinstance(exc, NotAdmitted) or (
+            isinstance(exc, ssl.SSLError) and "ALERT" in str(exc).upper()):
+        return REJECTED, ""
+    if isinstance(exc, ValueError) and "Δύο Managers" in str(exc):
+        return st.ERROR, str(exc)
+    return st.CONNECTING, str(exc)
+
+
 def run_with_reconnect(
     host: str | None,
     port: int,
@@ -400,20 +444,39 @@ def run_with_reconnect(
     max_sessions: int | None = None,
     log: Callable[[str], None] = lambda line: print(line, flush=True),
     sleep: Callable[[float], None] = time.sleep,
+    on_state: Callable[[str, str], None] | None = None,
+    stop: threading.Event | None = None,
 ) -> None:
     """Τρέχει session(connection) και ξανασυνδέεται όταν η σύνδεση χαθεί.
 
     Η παλιά σύνδεση κλείνει πάντα πριν από τη νέα προσπάθεια.
     max_sessions υπάρχει μόνο για τα tests (None = για πάντα).
+    on_state(είδος, λεπτομέρεια): 5C1, «searching»/«connecting» και το είδος της αποτυχίας
+    (``classify_failure``). Μετά από απόρριψη/γεμάτο/ασύμβατο δεν ξαναστέλνεται
+    «connecting» σε κάθε προσπάθεια, ώστε το tray να μην αναβοσβήνει.
+    stop: 5C1, τερματισμός από το GUI (κλείνει και η τρέχουσα σύνδεση από τον καλούντα).
     """
+    def report(kind: str, detail: str = "") -> None:
+        if on_state is not None:
+            try:
+                on_state(kind, detail)
+            except Exception:  # noqa: BLE001 — το GUI δεν σταματά τη σύνδεση
+                pass
+
+    from client import status as st
+    sticky = False
     # Έλεγχος πριν από τον βρόχο: αλλιώς το σφάλμα θα γινόταν ατέρμονη επανασύνδεση.
     _require_tls(tls_context)
     attempts = 0
     pin = load_pin(pin_file)
     preferred_id: str | None = pin["director_id"] if pin else None
     while max_sessions is None or attempts < max_sessions:
+        if stop is not None and stop.is_set():
+            return
         attempts += 1
         try:
+            if not sticky:
+                report(st.SEARCHING if host is None else st.CONNECTING)
             if host is None:
                 result = discovery(udp_port=discovery_port, preferred_id=preferred_id)
                 candidates = [result] if isinstance(result, tuple) else list(result or [])
@@ -424,6 +487,8 @@ def run_with_reconnect(
                     log(f"Discovery: Director {item[0]}:{item[1]} ({item[2]})")
             else:
                 candidates = [(host, port, None)]
+            if host is None and not sticky:
+                report(st.CONNECTING)
             connection, found_id = _verified_connection(
                 candidates, port=port, pin=pin, log=log, receive_timeout=receive_timeout,
                 tls_context=tls_context, tls_server_name=tls_server_name)
@@ -442,21 +507,32 @@ def run_with_reconnect(
                     if pin is None or pin.get("fingerprint") != fingerprint:
                         pin = {"director_id": found_id, "fingerprint": fingerprint}
                 session(connection)
-        except ManagerFull:
+        except ManagerFull as exc:
             delay = _retry_delay(full_delay, reconnect_jitter)
             log(f"Ο Manager έχει συμπληρώσει το όριο υπολογιστών· "
                 f"νέα προσπάθεια σε {delay:.0f}s.")
-        except socket.timeout:
+            kind, detail = classify_failure(exc)
+        except socket.timeout as exc:
             delay = _retry_delay(reconnect_delay, reconnect_jitter)
             log(f"Δεν ήρθε έγκυρο μήνυμα από τον Director για {receive_timeout:g}s· "
                 f"η σύνδεση θεωρείται χαμένη. Νέα προσπάθεια σε {delay:.1f}s.")
+            kind, detail = st.CONNECTING, str(exc)
         except (OSError, EOFError, ValueError) as exc:
             delay = _retry_delay(reconnect_delay, reconnect_jitter)
             log(f"Η σύνδεση διακόπηκε: {exc}. Νέα προσπάθεια σε {delay:.1f}s.")
+            kind, detail = classify_failure(exc)
         else:
             delay = _retry_delay(reconnect_delay, reconnect_jitter)
+            kind, detail = st.CONNECTING, ""
+        sticky = kind not in (st.CONNECTING, st.SEARCHING)
+        report(kind, detail)
+        if stop is not None and stop.is_set():
+            return
         if max_sessions is None or attempts < max_sessions:
-            sleep(delay)
+            if stop is not None and sleep is time.sleep:
+                stop.wait(delay)
+            else:
+                sleep(delay)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -543,6 +619,12 @@ def build_parser() -> argparse.ArgumentParser:
                         help=argparse.SUPPRESS)
     # Μόνο για τις αυτόματες δοκιμές 4.4: γεγονότα λήψης/αναπαραγωγής σε αρχείο JSONL.
     parser.add_argument("--test-report", type=Path, default=None, help=argparse.SUPPRESS)
+    # 5C1: εικονίδιο tray και παράθυρο· χωρίς γραφικό περιβάλλον ή με --no-tray όπως πριν.
+    parser.add_argument("--no-tray", action="store_true",
+                        help="Χωρίς εικονίδιο tray και παράθυρο (μόνο κονσόλα)")
+    # Μόνο για το live test 5C1: τι δείχνουν tray/παράθυρο, σε JSON σε κάθε αλλαγή.
+    parser.add_argument("--status-dump", type=Path, default=None, help=argparse.SUPPRESS)
+    parser.add_argument("--show-window", action="store_true", help=argparse.SUPPRESS)
     return parser
 
 
@@ -608,6 +690,16 @@ def main() -> None:
     except OSError as exc:
         print(f"[Client] Δεν σημειώθηκε το αποτύπωμα του υπολογιστή: {exc}", flush=True)
 
+    # 5C1: κατάσταση για tray/παράθυρο (υπάρχει και χωρίς GUI· κοστίζει ελάχιστα).
+    pending_file = args.identity_file.with_name(st.PENDING_FILE)
+    hints = load_hints(args.client_hints_file)
+    pending = st.load_pending(pending_file, client_id)
+    status = st.ClientStatus(
+        room=(pending or {}).get("room") or hints.get("room") or room,
+        name=(pending or {}).get("name") or hints.get("name"),
+        client_id=client_id, volume=args.announcement_volume, mute_others=args.mute_others,
+        approved_before=args.registry_seen_file.exists(), enrollment=pending)
+
     def submit_enrollment() -> None:
         hints = load_hints(args.client_hints_file)
         proposed_room = args.room or hints.get("room") or room
@@ -634,6 +726,14 @@ def main() -> None:
         else:
             raise ConnectionError("; ".join(errors))
         save_hints(args.client_hints_file, proposed_room, computer_name)
+        try:
+            st.save_pending(pending_file, code=queued["code"], room=proposed_room,
+                            name=computer_name, expires_at=queued["expires_at"],
+                            client_id=client_id)
+        except OSError as exc:
+            print(f"[Client] Δεν αποθηκεύτηκε το αίτημα για το παράθυρο: {exc}", flush=True)
+        status.update(room=proposed_room, name=computer_name,
+                      enrollment=st.load_pending(pending_file, client_id))
         until = time.strftime("%d/%m/%Y %H:%M", time.localtime(queued["expires_at"]))
         print(f"Αίθουσα: {proposed_room} | Υπολογιστής: {computer_name} | "
               f"Κωδικός: {queued['code']} | Λήξη: {until}", flush=True)
@@ -661,7 +761,17 @@ def main() -> None:
     print(f"Client ID: {client_id} | Αίθουσα: {room}", flush=True)
 
     # 5B2: ενημερώσεις μόνο σε εγκατεστημένο Client (current.json του εγκαταστάτη).
-    announcement = AnnouncementState()
+    history = st.History(args.identity_file.with_name(st.HISTORY_FILE)).load()
+
+    def on_announcement(active: bool) -> None:
+        if active:
+            history.begin(st.KIND_LIVE)
+            status.update(live_since=time.time())
+        else:
+            history.end()
+            status.update(live_since=None)
+
+    announcement = AnnouncementState(on_change=on_announcement)
     updater = None
     layout = Layout()
     try:
@@ -674,9 +784,14 @@ def main() -> None:
                           server_name=args.tls_server_name, port=args.update_port,
                           trusted_keys=args.update_trusted_key,
                           announcement=announcement,
+                          on_state=status.set_update,
                           **({} if args.update_retry_seconds is None
                              else {"error_retry": args.update_retry_seconds})).start()
         print(f"[Ενημέρωση] Εγκατεστημένη έκδοση {installed}", flush=True)
+    else:
+        status.set_update("none")
+    running = os.environ.get(VERSION_ENV)
+    status.update(version=running or installed or APP_VERSION)
 
     trial = {"version": os.environ.get(TRIAL_ENV), "sent": False}
 
@@ -710,19 +825,51 @@ def main() -> None:
             print(f"[Ενημέρωση] Δεν επιβεβαιώθηκε η δοκιμή: {error}", flush=True)
         threading.Thread(target=send, daemon=True, name="trial-ok").start()
 
+    current: dict = {"connection": None}
+
+    def on_settings(info: dict) -> None:
+        name = info["name"] or socket.gethostname()[:64]
+        save_hints(args.client_hints_file, info["room"], name)
+        status.update(room=info["room"], name=name)
+
+    def on_output(output) -> None:
+        import sounddevice as sd
+        status.update(device=str(sd.query_devices(output.device)["name"]))
+
+    def on_state(kind: str, detail: str) -> None:
+        if kind != REJECTED:
+            status.set_state(kind, detail)
+            return
+        # Ο Manager απέρριψε το πιστοποιητικό: αναμονή έγκρισης, ανάκληση ή καμία αίτηση.
+        waiting = st.load_pending(pending_file, client_id)
+        status.update(enrollment=waiting)
+        if waiting is not None:
+            status.set_state(st.PENDING)
+        elif status.snapshot()["approved_before"]:
+            status.set_state(st.REVOKED)
+        else:
+            status.set_state(st.UNAPPROVED)
+
     def session(connection: socket.socket) -> None:
         # 4.2D3: αναφορά «έχω δει vN» στον Manager που πέρασε τον έλεγχο TLS.
         key = manager_key(connection.getpeercert(binary_form=True) or b"")
         seen = load_seen(args.registry_seen_file, key)
         manager_host = peer_host(connection)
-        send_hello(connection, client_id, room, seen=seen)
         try:
+            send_hello(connection, client_id, room, seen=seen)
             welcome = receive_welcome(connection)
         except ProtocolMismatch:
             # Ασύμβατο πρωτόκολλο ήχου: η ενημέρωση είναι ο τρόπος να ξανασυνδεθεί.
             if updater is not None:
                 updater.trigger(manager_host)
             raise
+        except ManagerFull:
+            raise
+        except (ConnectionError, EOFError, ssl.SSLError) as exc:
+            raise NotAdmitted(str(exc) or type(exc).__name__) from exc
+        status.update(manager=manager_host, fingerprint=key, enrollment=None)
+        status.set_state(st.CONNECTED)
+        st.clear_pending(pending_file)
         confirm_trial(manager_host)
         if updater is not None:
             updater.trigger(manager_host)   # σε κάθε σύνδεση και επανασύνδεση
@@ -739,6 +886,7 @@ def main() -> None:
                 print(f"[Client] Δεν αποθηκεύτηκε η έκδοση μητρώου: {exc}", flush=True)
         if test_report is not None:
             test_report.event("connected")
+        current["connection"] = connection
         heartbeat_stop = threading.Event()
         sender = threading.Thread(target=heartbeat_sender, args=(connection, heartbeat_stop),
                                   name="client-heartbeat", daemon=True)
@@ -751,13 +899,13 @@ def main() -> None:
                         announcement_volume=args.announcement_volume,
                         mute_others=args.mute_others,
                         recovery_path=args.volume_recovery_file,
-                        settings_callback=lambda info: save_hints(
-                            args.client_hints_file, info["room"],
-                            info["name"] or socket.gethostname()[:64]),
+                        settings_callback=on_settings,
+                        on_output=on_output,
                         test_report=test_report, announcement=announcement,
                         update_check=None if updater is None
                         else lambda: updater.trigger(manager_host))
         finally:
+            current["connection"] = None
             announcement.set(False)
             if test_report is not None:
                 test_report.event("lost")
@@ -768,11 +916,37 @@ def main() -> None:
     if args.test_report is not None:
         from shared.test_report import TestReport
         test_report = TestReport(args.test_report)
-    try:
+    stop = threading.Event()
+
+    def network() -> None:
         run_with_reconnect(args.host, args.port, session,
                            discovery_port=args.discovery_port, pin_file=pin_file,
                            tls_context=trusted_director,
-                           tls_server_name=args.tls_server_name)
+                           tls_server_name=args.tls_server_name,
+                           on_state=on_state, stop=stop)
+
+    def stop_network() -> None:
+        """Από το GUI: τέλος βρόχου και κλείσιμο της τρέχουσας σύνδεσης (επαναφορά ήχου)."""
+        stop.set()
+        connection = current["connection"]
+        if connection is not None:
+            try:
+                connection.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+
+    try:
+        if not args.no_tray and st.tray_supported():
+            try:
+                from client.qt_client import run_tray
+            except ImportError as exc:
+                print(f"[Client] Χωρίς tray (λείπει το PySide6: {exc})", flush=True)
+            else:
+                run_tray(status, history, network, stop=stop_network, dump_file=args.status_dump,
+                         show_window=args.show_window)
+                print("Ο Client τερματίστηκε.", flush=True)
+                return
+        network()
     except KeyboardInterrupt:
         print("\nΟ Client τερματίστηκε.", flush=True)
     finally:

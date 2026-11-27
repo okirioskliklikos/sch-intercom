@@ -36,7 +36,8 @@ class ThemeTokenTests(TestCase):
 
     def test_ui_code_has_no_scattered_hex_colours(self):
         for path in [ROOT / "director" / "qt_gui.py", ROOT / "director" / "qt_security.py",
-                     ROOT / "shared" / "ui" / "icons.py"]:
+                     ROOT / "shared" / "ui" / "icons.py", ROOT / "client" / "qt_client.py",
+                     ROOT / "client" / "status.py"]:
             with self.subTest(path=path.name):
                 self.assertEqual(re.findall(r"#[0-9a-fA-F]{6}\b", path.read_text(encoding="utf-8")), [])
 

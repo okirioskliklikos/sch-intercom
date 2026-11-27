@@ -10,7 +10,7 @@ requires-python = ">=3.10"
 dependencies = ["sounddevice>=0.5,<1", "cryptography>=42"]
 
 [project.optional-dependencies]
-# Μόνο για το γραφικό περιβάλλον του Director (`director.main --gui`).
+# Γραφικό περιβάλλον: Director (`director.main --gui`) και tray/παράθυρο Client (5C1).
 gui = ["PySide6-Essentials>=6.6,<7"]
 
 [tool.setuptools.packages.find]

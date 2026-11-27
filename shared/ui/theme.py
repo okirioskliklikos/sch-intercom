@@ -36,6 +36,10 @@ LIVE_LIGHT = "#f6d5d5"
 LIVE_DARK = "#a51f1f"         # hover κόκκινου κουμπιού (Διακοπή εξυπηρέτησης)
 ALARM_TEXT = "#8e1c1c"        # κείμενο κόκκινης μπάρας ειδοποίησης
 APP_ICON = "#0e7490"
+TRAY_OK = "#4ade80"           # κουκκίδα tray Client «συνδεδεμένος» (5C1)
+PENDING = "#e0a100"           # κίτρινη κουκκίδα / περίγραμμα κάρτας κωδικού
+PENDING_TEXT = "#9a6b00"
+PENDING_LIGHT = "#fff8e1"
 
 #: Όνομα token όπως στο ui-style.md → τιμή.
 TOKENS: dict[str, str] = {
@@ -56,6 +60,10 @@ TOKENS: dict[str, str] = {
     "live_dark": LIVE_DARK,
     "alarm_text": ALARM_TEXT,
     "app_icon": APP_ICON,
+    "tray_ok": TRAY_OK,
+    "pending": PENDING,
+    "pending_text": PENDING_TEXT,
+    "pending_light": PENDING_LIGHT,
 }
 
 # Λευκό σε έγχρωμο φόντο (τικ, εικονίδιο μικροφώνου) δεν είναι token.
@@ -187,6 +195,13 @@ UPDATES_PROGRESS = 90       # μπάρα λήψης 90×6
 DIALOG_WIDTH = 490          # διάλογοι backup/επαναφοράς
 FIELD_HEIGHT = 32           # πεδία κειμένου/κωδικού στους διαλόγους
 KV_GAP = 18                 # απόσταση ετικέτας–τιμής
+# Client — tray και παράθυρο (ui-style.md §10, 5C1)
+CLIENT_WINDOW_W = 640
+CLIENT_WINDOW_H = 600
+CLIENT_MARGIN = 18
+CLIENT_CODE = 34            # κωδικός εγγραφής, mono semibold
+TRAY_DOT = 5 / 24           # ακτίνα κουκκίδας ως κλάσμα του εικονιδίου
+TRAY_DOT_RING = 1.6 / 24    # λευκό δαχτυλίδι γύρω από την κουκκίδα
 
 
 def stylesheet(metrics: Metrics | None = None) -> str:
@@ -632,6 +647,45 @@ QScrollBar::add-page, QScrollBar::sub-page {{
 #dialogSeparator {{
     background: {CARD_BORDER};
     border: none;
+}}
+#clientTitle {{
+    font-size: {m.font_pt(FONT_PAGE_TITLE)}pt;
+    font-weight: 600;
+}}
+#clientStatus {{
+    font-size: {m.font_pt(FONT_CARD_TITLE)}pt;
+}}
+#clientStatus[tone="ok"], #kvValue[tone="state_ok"] {{
+    color: {CONNECTED};
+}}
+#clientStatus[tone="wait"], #kvValue[tone="state_wait"] {{
+    color: {PENDING_TEXT};
+}}
+#clientStatus[tone="bad"], #kvValue[tone="state_bad"] {{
+    color: {LIVE};
+}}
+#codeCard {{
+    background: {PENDING_LIGHT};
+    border: 1px solid {PENDING};
+    border-radius: {px(CARD_RADIUS)}px;
+}}
+#codeCard QLabel {{
+    background: transparent;
+}}
+#enrollCode {{
+    font-size: {m.font_pt(CLIENT_CODE / 13)}pt;
+    font-weight: 600;
+}}
+#historyDay {{
+    color: {TEXT_MUTED};
+    font-size: {m.font_pt(FONT_SMALL)}pt;
+    font-weight: 600;
+}}
+#historyLive {{
+    color: {LIVE};
+}}
+#historyText {{
+    color: {TEXT_MUTED};
 }}
 QDialog#maintenanceDialog {{
     background: {WINDOW_BG};
