@@ -31,7 +31,7 @@ from shared.discovery import discover_candidates, DISCOVERY_PORT
 from shared.manager_pin import load_pin, save_pin
 from client.install_paths import MANAGER_CERT, Layout, data_dir, load_settings
 from client.updater import AnnouncementState, Updater, peer_host
-from client.supervisor import TRIAL_ENV, send_command
+from client.supervisor import RESULT_FILE, TRIAL_ENV, send_command
 from shared.update_protocol import UPDATE_PORT
 from client.identity_reset import (CLONED, PREVIOUS, archive_identity, check_clone,
                                    previous_room, remember_machine)
@@ -680,8 +680,12 @@ def main() -> None:
 
     trial = {"version": os.environ.get(TRIAL_ENV), "sent": False}
 
-    def confirm_trial() -> None:
-        """5B2b: νέα έκδοση σε δοκιμή· αποδεκτό WELCOME = «ΟΚ» στον supervisor (commit)."""
+    def confirm_trial(manager_host: str | None) -> None:
+        """5B2b: νέα έκδοση σε δοκιμή· αποδεκτό WELCOME = «ΟΚ» στον supervisor (commit).
+
+        Μετά το commit νέος έλεγχος, ώστε ο Manager να μάθει αμέσως «installed»: ο
+        έλεγχος της σύνδεσης έτρεξε παράλληλα, πριν γραφτεί το αποτέλεσμα.
+        """
         if not trial["version"] or trial["sent"]:
             return
         trial["sent"] = True
@@ -693,6 +697,12 @@ def main() -> None:
                     print(f"[Ενημέρωση] Η έκδοση {trial['version']} συνδέθηκε· "
                           + ("επιβεβαιώθηκε." if answer.get("ok")
                              else f"ο supervisor: {answer.get('error')}"), flush=True)
+                    if answer.get("ok") and updater is not None:
+                        result = layout.home / RESULT_FILE
+                        deadline = time.monotonic() + 15
+                        while not result.exists() and time.monotonic() < deadline:
+                            time.sleep(0.25)
+                        updater.trigger(manager_host)
                     return
                 except OSError as exc:
                     error = exc
@@ -713,7 +723,7 @@ def main() -> None:
             if updater is not None:
                 updater.trigger(manager_host)
             raise
-        confirm_trial()
+        confirm_trial(manager_host)
         if updater is not None:
             updater.trigger(manager_host)   # σε κάθε σύνδεση και επανασύνδεση
         if welcome is not None:
