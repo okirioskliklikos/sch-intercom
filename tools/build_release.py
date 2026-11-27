@@ -2,12 +2,13 @@
 
 Τρέχει στον υπολογιστή του συντηρητή (internet για την embeddable Python και τα wheels):
 
-    python tools/build_release.py [--version 1.0.0] [--no-setup]
+    python tools/build_release.py [--version 1.0.0] [--no-setup] [--sign <κλειδί.pem>]
 
 Αποτέλεσμα:
     dist/release/<έκδοση>/python/   embeddable Python x64 + site-packages (wheels win_amd64)
     dist/release/<έκδοση>/app/      client/ και shared/ (μόνο ό,τι χρειάζεται ο Client)
     dist/sch-intercom-client-<έκδοση>-setup.exe   (Inno Setup· παραλείπεται χωρίς ISCC)
+    dist/sch-intercom-client-<έκδοση>.sicu        (με --sign: υπογεγραμμένη ενημέρωση, 5B1)
 
 Η έκδοση είναι από προεπιλογή η shared/version.py. Το δέντρο φτιάχνεται και στο Linux
 (--embed-zip, --no-setup) για τα tests· το setup.exe μόνο στα Windows με Inno Setup 7 ή 6.
@@ -118,14 +119,26 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--out", type=Path, default=ROOT / "dist")
     parser.add_argument("--iscc", default=None, help="Διαδρομή ISCC.exe (Inno Setup 7 ή 6)")
     parser.add_argument("--no-setup", action="store_true", help="Μόνο το δέντρο, χωρίς setup.exe")
+    parser.add_argument("--sign", type=Path, default=None, metavar="ΚΛΕΙΔΙ.pem",
+                        help="Και υπογεγραμμένο πακέτο ενημέρωσης .sicu (5B1)")
+    parser.add_argument("--passphrase-env", default=None, help=argparse.SUPPRESS)
     args = parser.parse_args(argv)
     try:
         parse_version(args.version)
     except ValueError as exc:
         parser.error(str(exc))
+    passphrase = None
+    if args.sign is not None:
+        from tools import release_sign
+        if not args.sign.exists():
+            parser.error(f"Δεν βρέθηκε το κλειδί: {args.sign}")
+        passphrase = release_sign.ask_passphrase(args.passphrase_env)   # πριν από το build
     tree = build_tree(args.out, args.version, python_version=args.python_version,
                       embed_zip=args.embed_zip)
     print(f"Δέντρο έκδοσης: {tree}", flush=True)
+    if args.sign is not None:
+        release_sign.sign_tree(tree, args.sign, args.out, passphrase=passphrase,
+                               version=args.version)
     if args.no_setup:
         return 0
     iscc = find_iscc(args.iscc)
