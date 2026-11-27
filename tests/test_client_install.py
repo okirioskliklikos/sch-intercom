@@ -61,9 +61,9 @@ class TempTest(unittest.TestCase):
         self.home = self.root / "app"
         self.data = self.root / "data"
         self.layout = Layout(self.home, self.data)
-
-    def tearDown(self):
-        self._dir.cleanup()
+        # addCleanup (όχι tearDown): τρέχει μετά τα sup.close() των tests (σειρά LIFO),
+        # αλλιώς στα Windows το ανοιχτό log εμποδίζει τη διαγραφή.
+        self.addCleanup(self._dir.cleanup)
 
 
 class VersionAndLayoutTests(TempTest):
