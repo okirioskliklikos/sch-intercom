@@ -335,7 +335,8 @@ Mockup εγκρίθηκε 27/11/2026 (`docs/mockups/director-updates.html`, ui-s
   ανά Client (`updates-status.json`) δεν μεταφέρεται.
 - Δοκιμές: `tests/test_updates_page.py` (13), `tests/test_backup_updates.py` (5),
   `tools/updates_gui_live_test.{py,sh,ps1}` 15 βήματα (πραγματικό παράθυρο, 3 πραγματικοί Clients).
-  Linux 27/11/2026: 15/15 PASS, σουίτα 697 OK. Επίδειξη:
+  Linux 27/11/2026: 15/15 PASS, σουίτα 697 OK. **Windows 27/11/2026 (χρήστης):
+  `tools\updates_gui_live_test.ps1` 15/15 PASS.** Επίδειξη:
   `python -m tools.security_demo --page settings --tab updates [--updates off|missing|empty] [--role backup]`.
 
 ## 6. 5C — Tray, παράθυρο Client, νέα ταυτότητα από τον Manager
