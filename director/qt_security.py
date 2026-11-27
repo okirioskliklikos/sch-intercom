@@ -318,7 +318,7 @@ class RoomHeader(QWidget):
         self.count = _label(computers_text(len(room.computers)), "small")
         # ✓ «ενημερωμένη»: ≥1 online υπολογιστής έχει την τρέχουσα έκδοση πακέτου.
         self.updated = QLabel()
-        self.updated.setPixmap(icons.pixmap("check", theme.CONNECTED, px(18)))
+        self.updated.setPixmap(icons.pixmap("check", theme.CONNECTED, px(18), stroke_width=2.8))
         self.updated.setVisible(False)
         layout.addWidget(self.dot)
         layout.addWidget(self.name)
