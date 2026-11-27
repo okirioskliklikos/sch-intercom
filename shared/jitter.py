@@ -5,10 +5,26 @@
 καθυστέρηση. Εδώ η ουρά έχει μέγιστο μέγεθος και πετάει τα παλιότερα blocks.
 """
 
+import array
+import math
 import threading
 from collections import deque
 
 from shared.audio import apply_gain_ramp
+
+#: Block «σιωπής» για την προσαρμοζόμενη ουρά: RMS κάτω από −40 dBFS (ομιλία ~−20…−30,
+#: θόρυβος καλού μικροφώνου ~−50…−60).
+QUIET_RMS = 330
+#: Από κάθε παύση παίζονται πάντα τόσα blocks (160 ms) πριν παραλειφθεί κάποιο.
+KEEP_QUIET_BLOCKS = 8
+
+
+def block_rms(block: bytes) -> float:
+    samples = array.array("h")
+    samples.frombytes(block[: len(block) - len(block) % 2])
+    if not samples:
+        return 0.0
+    return math.sqrt(sum(value * value for value in samples) / len(samples))
 
 
 class JitterBuffer:
@@ -21,14 +37,31 @@ class JitterBuffer:
     και fade-out στο τέλος της (μετά το STREAM_STOP), ώστε να μην ακούγεται «κλικ»
     από το απότομο πέρασμα σιωπή ↔ φωνή. resume_fade_samples: συντομότερο fade-in
     όταν ο ήχος συνεχίζει μετά από κενό δικτύου. 0 = χωρίς fade.
+
+    target_blocks (προσαρμοζόμενη ουρά, 4.4): στόχος καθυστέρησης. Τότε το max_blocks
+    είναι το ανώτατο κράτημα ριπών (π.χ. 1,5 s): μετά από κόλλημα του δικτύου ο ήχος
+    συνεχίζει από εκεί που σταμάτησε αντί να πεταχτούν λέξεις. Όσο η ουρά είναι πάνω από
+    τον στόχο, παραλείπεται το πολύ ένα block σιωπής ανά block που παίζει, και μόνο αφού
+    έχουν ήδη παίξει ``keep_quiet_blocks`` blocks της ίδιας παύσης: οι παύσεις κονταίνουν
+    έως το μισό, οι λέξεις δεν ενώνονται ποτέ. None = παλιά συμπεριφορά (όριο = στόχος).
     """
 
     def __init__(self, max_blocks: int, block_bytes: int, prefill_blocks: int | None = None,
                  *, fade_in_samples: int = 0, fade_out_samples: int = 0,
-                 resume_fade_samples: int = 0):
+                 resume_fade_samples: int = 0, target_blocks: int | None = None,
+                 quiet_rms: float = QUIET_RMS, keep_quiet_blocks: int = KEEP_QUIET_BLOCKS):
         if max_blocks < 1:
             raise ValueError("max_blocks πρέπει να είναι τουλάχιστον 1")
         self.max_blocks = max_blocks
+        self.target_blocks = (None if target_blocks is None
+                              else max(1, min(max_blocks, target_blocks)))
+        self.quiet_rms = quiet_rms
+        self.keep_quiet_blocks = max(0, keep_quiet_blocks)
+        self._quiet_played = 0       # συνεχόμενα blocks σιωπής που έπαιξαν (τρέχουσα παύση)
+        self._resume_after_drop = False
+        self.skipped = 0             # blocks σιωπής που παραλείφθηκαν για επιστροφή στον στόχο
+        #: Ετικέτα του block σιωπής που παραλείφθηκε στο τελευταίο pop() (μετρήσεις 4.4).
+        self.skipped_tag: object = None
         self.prefill_blocks = max(1, min(max_blocks, prefill_blocks if prefill_blocks else (max_blocks + 1) // 2))
         self._silence = bytes(block_bytes)
         # (block, tag): tag = αύξων αριθμός πακέτου, μόνο για τις μετρήσεις δοκιμών 4.4.
@@ -90,6 +123,9 @@ class JitterBuffer:
             self._fade_total = self._fade_done = 0
             self.dropped = 0
             self.underruns = 0
+            self.skipped = 0
+            self._quiet_played = 0
+            self._resume_after_drop = False
 
     def finish_announcement(self) -> None:
         """STREAM_STOP: παίζουμε όλα τα εναπομείναντα PCM χωρίς νέο prefill."""
@@ -103,10 +139,13 @@ class JitterBuffer:
             while len(self._blocks) > self.max_blocks:
                 self._blocks.popleft()
                 self.dropped += 1
+                # Ασυνέχεια στον ήχο: σύντομο fade-in στο επόμενο block (χωρίς «κλικ»).
+                self._resume_after_drop = True
 
     def pop(self) -> bytes:
         """Επιστρέφει το επόμενο block ή σιωπή αν η ουρά δεν έχει αρκετά δεδομένα."""
         with self._lock:
+            self.skipped_tag = None
             item, fade_in, fade_out = self._pop_locked()
             block, self.last_tag = item
         if fade_in is not None:
@@ -170,7 +209,28 @@ class JitterBuffer:
             self.underruns += 1
             self._filling = True
             return (self._silence, None), None, None
-        return self._blocks.popleft(), self._next_fade_in(), None
+        self._catch_up()
+        if self._resume_after_drop:
+            self._resume_after_drop = False
+            if self._started and self._fade_done >= self._fade_total:
+                self._start_fade_in()
+        item = self._blocks.popleft()
+        if self.target_blocks is not None:
+            self._quiet_played = (self._quiet_played + 1
+                                  if block_rms(item[0]) < self.quiet_rms else 0)
+        return item, self._next_fade_in(), None
+
+    def _catch_up(self) -> None:
+        """Πάνω από τον στόχο: παράλειψη ενός block σιωπής, αν η παύση έχει ήδη ακουστεί."""
+        if (self.target_blocks is None or len(self._blocks) <= self.target_blocks
+                or self._quiet_played < self.keep_quiet_blocks):
+            return
+        block, tag = self._blocks[0]
+        if block_rms(block) >= self.quiet_rms:
+            return
+        self._blocks.popleft()
+        self.skipped += 1
+        self.skipped_tag = tag
 
     def take_level_stats(self) -> tuple[int, float, int] | None:
         """(ελάχιστο, μέσο, μέγιστο) πλήθος blocks σε αναμονή από την τελευταία κλήση."""

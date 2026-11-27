@@ -193,13 +193,22 @@ MELODY_FADE_SAMPLES = 1600      # 100 ms
 MELODY_AMPLITUDE = 1200
 
 
+#: --test-tone speech: 1,5 s χαμηλός τόνος (RMS ~−35 dBFS, πάνω από το όριο σιωπής του
+#: Client), 0,5 s σιωπή, ώστε η προσαρμοζόμενη ουρά να επιστρέφει μόνο στις «παύσεις».
+SPEECH_HZ = 220.0
+SPEECH_AMPLITUDE = 600
+SPEECH_ON_BLOCKS = 75
+SPEECH_CYCLE_BLOCKS = 100
+
+
 def stream_test_tone(broadcaster: AudioBroadcaster, *, stop: threading.Event | None = None,
                      stats: DirectorStats | None = None, melody: bool = False,
-                     report=None, silent: bool = False) -> None:
+                     report=None, silent: bool = False, speech: bool = False) -> None:
     """Μόνο για αυτόματες πραγματικές δοκιμές (κρυφό ``--test-tone``): σταθερός, χαμηλός
     τόνος 440 Hz σε πραγματικό χρόνο αντί για μικρόφωνο, ώστε η δοκιμή να μην εξαρτάται
     από συσκευή εισόδου ή άδεια μικροφώνου. ``melody``: νότες αντί για σταθερό τόνο (4.4).
-    ``report``: TestReport· ένα γεγονός «pub» ανά block (αύξων, χρόνος, παραλήπτες)."""
+    ``report``: TestReport· ένα γεγονός «pub» ανά block (αύξων, χρόνος, παραλήπτες).
+    ``speech``: σαν ομιλία για την προσαρμοζόμενη ουρά: χαμηλός τόνος 1,5 s, παύση 0,5 s."""
     import math
 
     samples = BLOCK_BYTES // 2
@@ -207,12 +216,15 @@ def stream_test_tone(broadcaster: AudioBroadcaster, *, stop: threading.Event | N
     angle = 0.0
     frames_sent = 0
     next_at = time.monotonic()
-    amplitude = 0 if silent else MELODY_AMPLITUDE if melody else 800
+    amplitude = (0 if silent else MELODY_AMPLITUDE if melody
+                 else SPEECH_AMPLITUDE if speech else 800)
     print("Πηγή δοκιμής ενεργή (" + ("σιωπή" if silent else "μελωδία" if melody
+                                     else "ομιλία: τόνος/παύση" if speech
                                      else "τόνος 440 Hz") + ", όχι μικρόφωνο).", flush=True)
     while stop is None or not stop.is_set():
         frequency = (MELODY_HZ[(frames_sent // MELODY_NOTE_BLOCKS) % len(MELODY_HZ)]
-                     if melody else 440.0)
+                     if melody else SPEECH_HZ if speech else 440.0)
+        talking = not speech or frames_sent % SPEECH_CYCLE_BLOCKS < SPEECH_ON_BLOCKS
         step = 2 * math.pi * frequency / SAMPLE_RATE
         block = bytearray()
         note_start = (frames_sent % MELODY_NOTE_BLOCKS) * samples
@@ -224,6 +236,11 @@ def stream_test_tone(broadcaster: AudioBroadcaster, *, stop: threading.Event | N
                 position = note_start + index
                 gain = min(1.0, position / MELODY_FADE_SAMPLES,
                            (note_length - position) / MELODY_FADE_SAMPLES)
+            if speech:
+                position = (frames_sent % SPEECH_CYCLE_BLOCKS) * samples + index
+                length = SPEECH_ON_BLOCKS * samples
+                gain = min(1.0, position / MELODY_FADE_SAMPLES,
+                           (length - position) / MELODY_FADE_SAMPLES) if talking else 0.0
             value = int(amplitude * gain * math.sin(angle + step * index))
             block += value.to_bytes(2, "little", signed=True)
         angle = (angle + step * samples) % (2 * math.pi)
@@ -702,7 +719,7 @@ def main() -> None:
     parser.add_argument("--max-pending-requests", type=int, default=None,
                         help=argparse.SUPPRESS)
     parser.add_argument("--watch-port", type=int, default=None, help=argparse.SUPPRESS)
-    parser.add_argument("--test-tone", nargs="?", const="440", choices=("440", "melody", "silent"),
+    parser.add_argument("--test-tone", nargs="?", const="440", choices=("440", "melody", "silent", "speech"),
                         default=None, help=argparse.SUPPRESS)
     # Μόνο για τις δοκιμές 4.4 (μαζί με --test-tone): ένα γεγονός ανά block σε αρχείο JSONL.
     parser.add_argument("--test-report", type=Path, default=None, help=argparse.SUPPRESS)
@@ -859,7 +876,8 @@ def main() -> None:
                         runtime.callback(tone_report.close)
                     stream_test_tone(broadcaster, stop=stop, stats=stats,
                                      melody=args.test_tone == "melody", report=tone_report,
-                                     silent=args.test_tone == "silent")
+                                     silent=args.test_tone == "silent",
+                                     speech=args.test_tone == "speech")
                 else:
                     stream_microphone(broadcaster, device=args.device, latency=args.latency,
                                       stop=stop, stats=stats)

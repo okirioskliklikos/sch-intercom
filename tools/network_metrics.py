@@ -126,6 +126,7 @@ class ClientResult:
     blocks: int = 0
     played: int = 0
     lost: int = 0
+    skipped: int = 0          # blocks σιωπής που παραλείφθηκαν (προσαρμοζόμενη ουρά)· όχι απώλεια
     underruns: int = 0
     silence: int = 0          # blocks σιωπής που έπαιξε ο Client μέσα σε ανακοίνωση
     edges_ok: int = 0
@@ -146,25 +147,32 @@ class ClientResult:
         return (f"{self.name}: καθυστέρηση διάμεση {statistics.median(self.latencies_ms):.0f} / "
                 f"p95 {percentile(self.latencies_ms, 0.95):.0f} / "
                 f"max {max(self.latencies_ms):.0f} ms, χαμένα {self.lost}/{self.blocks}, "
-                f"κενά {self.underruns} ({self.silence * 20} ms σιωπή), άκρα {self.edges_ok}/{self.edges_total}")
+                f"κενά {self.underruns} ({self.silence * 20} ms σιωπή), άκρα {self.edges_ok}/{self.edges_total}"
+                + (f", παύσεις κόντυναν {self.skipped * 20} ms" if self.skipped else ""))
 
 
 def analyse(name: str, runs: list[Run], events: list[dict], clock: ClockMap) -> ClientResult:
     """Αποτέλεσμα ενός πραγματικού Client για τις ανακοινώσεις runs."""
     result = ClientResult(name)
     plays: dict[int, float] = {}
+    skips: set[int] = set()
     for event in events:
         if event.get("ev") == "play" and event["seq"] not in plays:
             plays[event["seq"]] = clock.to_director(event["t"])
+        elif event.get("ev") == "skip":
+            skips.add(event["seq"])
     for run in runs:
         played = [seq for seq in range(run.first, run.last + 1) if seq in plays]
+        skipped = sum(1 for seq in range(run.first, run.last + 1)
+                      if seq in skips and seq not in plays)
         result.blocks += run.size
         result.played += len(played)
-        result.lost += run.size - len(played)
+        result.skipped += skipped
+        result.lost += run.size - len(played) - skipped
         edges = sorted({*range(run.first, min(run.last, run.first + EDGE_BLOCKS - 1) + 1),
                         *range(max(run.first, run.last - EDGE_BLOCKS + 1), run.last + 1)})
         result.edges_total += len(edges)
-        result.edges_ok += sum(seq in plays for seq in edges)
+        result.edges_ok += sum(seq in plays or seq in skips for seq in edges)
         for seq in played:
             result.latencies_ms.append((plays[seq] - run.sent_us[seq]) / 1000)
             result.latency_times.append(run.sent_us[seq])
@@ -216,3 +224,22 @@ def virtual_received(runs: list[Run], seqs: set[int]) -> tuple[int, int]:
     expected = sum(run.size for run in runs)
     got = sum(1 for run in runs for seq in range(run.first, run.last + 1) if seq in seqs)
     return got, expected
+
+
+def recovery_s(result: ClientResult, resumed_us: int, margin_ms: float = 60.0) -> float | None:
+    """Δευτερόλεπτα από το τέλος ενός κολλήματος μέχρι η καθυστέρηση να ξαναγίνει κανονική.
+
+    Κανονική = διάμεση πριν από το κόλλημα + margin_ms. None αν δεν επέστρεψε ή αν δεν
+    υπάρχουν μετρήσεις πριν/μετά.
+    """
+    before = [value for t, value in zip(result.latency_times, result.latencies_ms)
+              if t < resumed_us - 500_000]
+    after = sorted((t, value) for t, value in zip(result.latency_times, result.latencies_ms)
+                   if t >= resumed_us)
+    if not before or not after:
+        return None
+    limit = statistics.median(before) + margin_ms
+    for t, value in after:
+        if value <= limit:
+            return max(0.0, (t - resumed_us) / 1e6)
+    return None

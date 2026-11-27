@@ -290,5 +290,36 @@ class LoadCarrierTests(unittest.TestCase):
         self.assertEqual(self.carriers("lan", "lan"), ["P0", "P1"])
 
 
+class SkipTests(unittest.TestCase):
+    def test_skipped_silence_is_not_lost(self):
+        runs = nm.runs_from_pubs(pubs(0, 20))
+        events = plays([seq for seq in range(20) if seq not in (8, 9)], 100_000) + [
+            {"ev": "skip", "t": 0, "seq": 8}, {"ev": "skip", "t": 0, "seq": 9}]
+        result = nm.analyse("A", runs, events, clock())
+        self.assertEqual((result.lost, result.skipped, result.interrupt), (0, 2, 0.0))
+        self.assertIn("παύσεις κόντυναν 40 ms", result.summary())
+
+
+class RecoveryTests(unittest.TestCase):
+    def test_recovery_after_stall(self):
+        runs = nm.runs_from_pubs(pubs(0, 500))
+        events = []
+        for seq in range(500):
+            sent = 1_000_000 + seq * nm.BLOCK_US
+            extra = 0
+            if 200 <= seq < 300:                  # μετά το κόλλημα: +500 ms που μειώνονται
+                extra = 500_000 - (seq - 200) * 5_000
+            events.append({"ev": "play", "seq": seq, "t": sent + 150_000 + extra})
+        result = nm.analyse("A", runs, events, clock())
+        resumed = 1_000_000 + 200 * nm.BLOCK_US
+        self.assertAlmostEqual(nm.recovery_s(result, resumed), 1.8, delta=0.05)
+
+    def test_no_recovery(self):
+        runs = nm.runs_from_pubs(pubs(0, 100))
+        events = plays(range(50), 150_000) + plays(range(50, 100), 900_000)
+        result = nm.analyse("A", runs, events, clock())
+        self.assertIsNone(nm.recovery_s(result, 1_000_000 + 50 * nm.BLOCK_US))
+
+
 if __name__ == "__main__":
     unittest.main()
