@@ -48,8 +48,8 @@ TOTAL = 18
 HOST = "127.0.0.1"
 SECOND_IP = "127.0.0.2"
 PORT, BROADCAST_PORT, ENROLL_PORT, WATCH_PORT = 51705, 51706, 51709, 51707
-DISCOVERY_PORT = 51708        # beacons του Manager προς τον Board2 (loopback)
-FAKE_DISCOVERY_PORT = 51718   # μόνο ψεύτικα/χειροκίνητα beacons, για τον Board4
+DISCOVERY_PORT = 51708        # ερωτήσεις του Board2, απαντά ο Manager (loopback)
+FAKE_DISCOVERY_PORT = 51718   # απαντούν μόνο ψεύτικοι Managers, για τον Board4
 PROXY_PORT = 51721
 FAKE_TCP_PORT, FAKE_TLS_PORT = 51730, 51731
 ROOM1, ROOM2, LOAD_ROOM = "C2627-Γ1", "C2627-Γ2", "C2627-Δ9"
@@ -196,7 +196,11 @@ class FreezableProxy:
 
 # ------------------------------------------------------------- ψεύτικος Manager
 class FakeBeacons:
-    """Ψεύτικα beacons προς μία θύρα discovery: άκυρα πακέτα και άλλο Director ID."""
+    """Ψεύτικος Manager στη θύρα discovery: απαντά σε κάθε ερώτηση Client με άκυρα
+    πακέτα και beacons άλλου (ή του ίδιου) Director ID.
+
+    Από 28/11/2026 ο Client ρωτά και οι Managers απαντούν (δεν ακούει πια beacons).
+    """
 
     def __init__(self, port: int):
         self.port = port
@@ -204,22 +208,37 @@ class FakeBeacons:
         self.lock = threading.Lock()
         self.stop = threading.Event()
         self.thread = None
+        self.sock = None
 
     def send(self, packets: list[bytes]):
         with self.lock:
             self.packets = packets
         if self.thread is None:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            if hasattr(socket, "SO_REUSEPORT"):
+                sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
+            sock.bind(("", self.port))
+            sock.settimeout(0.1)
+            self.sock = sock
             self.thread = threading.Thread(target=self._run, daemon=True)
             self.thread.start()
 
     def _run(self):
-        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sender:
-            while not self.stop.wait(0.3):
+        from shared.discovery import MAX_BEACON_BYTES, is_query
+        with self.sock as responder:
+            while not self.stop.is_set():
+                try:
+                    data, sender = responder.recvfrom(MAX_BEACON_BYTES + 1)
+                except OSError:   # timeout ή Windows WSAEMSGSIZE/WSAECONNRESET
+                    continue
+                if not is_query(data):
+                    continue
                 with self.lock:
                     packets = list(self.packets)
                 for packet in packets:
                     try:
-                        sender.sendto(packet, (HOST, self.port))
+                        responder.sendto(packet, sender)
                     except OSError:
                         pass
 
@@ -411,8 +430,11 @@ def fake_manager_tls(folder: Path) -> ssl.SSLContext:
 class LiveTest:
     def __init__(self, root: Path):
         self.root = root
-        self.m = FailureMachine(root, "manager", PORT, BROADCAST_PORT, ENROLL_PORT,
-                                WATCH_PORT, DISCOVERY_PORT)
+        # Θύρα discovery του Manager = DISCOVERY_PORT: εκεί απαντά στις ερωτήσεις του
+        # Board2 (από 28/11/2026 ο Client ρωτά, δεν ακούει beacons). Τα δικά του beacons
+        # για άλλους Managers πηγαίνουν στο BROADCAST_PORT, που δεν ακούει κανείς.
+        self.m = FailureMachine(root, "manager", PORT, DISCOVERY_PORT, ENROLL_PORT,
+                                WATCH_PORT, BROADCAST_PORT)
         self.b1 = Board(root, "Board1", ROOM1, volume=True)
         self.b2 = Board(root, "Board2", ROOM1, discovery=DISCOVERY_PORT)
         self.b3 = Board(root, "Board3", ROOM2, port=PROXY_PORT)

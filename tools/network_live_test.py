@@ -247,12 +247,16 @@ def discovery_hint(*, firewalld: bool | None = None) -> str:
     """Τι να κάνει ο χρήστης όταν ο βοηθός δεν βρίσκει τον Director (4.4, Εκτέλεση 3)."""
     if firewalld is None:
         firewalld = firewalld_running()
+    # Από 28/11/2026 ο Client ρωτά και ο Director απαντά: το εισερχόμενο UDP χρειάζεται
+    # μόνο στον Director. Το firewalld ενός Client Linux αφήνει την απάντηση (conntrack).
     if firewalld:
-        return (f"Δεν βρέθηκε ακόμη. Το firewalld τρέχει και κόβει το beacon (UDP {BEACON_PORT}).\n"
-                f"  Άνοιγμα μέχρι την επανεκκίνηση: sudo firewall-cmd --add-port={BEACON_PORT}/udp\n"
+        return (f"Δεν βρέθηκε ακόμη. Αν ο Director είναι Linux με firewalld, ανοίξτε εκεί το "
+                f"UDP {BEACON_PORT} (απαντά στην ερώτηση εντοπισμού).\n"
+                f"  Μέχρι την επανεκκίνηση: sudo firewall-cmd --add-port={BEACON_PORT}/udp\n"
                 "  ή ξανά με --director-host <IP του Director>")
     return ("Δεν βρέθηκε ακόμη. Ελέγξτε ότι ο Director τρέχει στο ίδιο δίκτυο και ότι το "
-            f"firewall επιτρέπει εισερχόμενο UDP {BEACON_PORT}, ή ξανά με --director-host <IP>")
+            f"firewall του Director επιτρέπει εισερχόμενο UDP {BEACON_PORT}, ή ξανά με "
+            "--director-host <IP>")
 
 
 def own_addresses() -> list[str]:

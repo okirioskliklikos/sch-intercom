@@ -1,4 +1,14 @@
-"""UDP beacon v2 και παρακολούθηση άλλων Managers (χωρίς πιστοποίηση)."""
+"""UDP beacon v2, ερώτηση/απάντηση εντοπισμού και παρακολούθηση άλλων Managers.
+
+Εντοπισμός (απόφαση χρήστη 28/11/2026, εύρημα Firewall στο VM Windows 10): ο Client
+**δεν ακούει** σε σταθερή θύρα. Στέλνει broadcast ερώτηση στη θύρα discovery από τυχαία
+θύρα και ο Manager απαντά απευθείας (unicast) με το beacon του. Το Firewall των Windows
+αφήνει από προεπιλογή την απάντηση σε broadcast που έστειλε ο ίδιος ο υπολογιστής, άρα
+ο Client δεν θέλει κανόνα εισερχομένων· κανόνα θέλει μόνο ο υπολογιστής του Director.
+Ο Manager συνεχίζει να στέλνει broadcast beacons για να βλέπουν οι Managers ο ένας τον
+άλλον (`BeaconWatcher`). Τίποτα από αυτά δεν είναι πιστοποίηση: ο Client δοκιμάζει τους
+υποψηφίους με TLS.
+"""
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -16,6 +26,15 @@ DISCOVERY_WINDOW = 2.5
 CONFIRM_WINDOW = ANNOUNCE_INTERVAL + 0.2
 MAGIC = b"SID2:"
 MAX_BEACON_BYTES = 512
+#: Ερώτηση εντοπισμού του Client. Συμπληρώνεται ως ``QUERY_BYTES`` ώστε η απάντηση
+#: (beacon, έως 512) να μην είναι πολύ μεγαλύτερη από την ερώτηση.
+QUERY_MAGIC = b"SIDQ2:"
+QUERY_BYTES = 128
+#: Κάθε πόσο ξαναστέλνει ερώτηση ο Client όσο ψάχνει.
+QUERY_INTERVAL = 0.5
+#: Όριο απαντήσεων του Manager ανά IP και συνολικά, ανά δευτερόλεπτο.
+REPLIES_PER_IP = 20
+REPLIES_TOTAL = 400
 BEACON_EXPIRY_SECONDS = 5.0
 
 
@@ -116,17 +135,105 @@ def decode_beacon(packet: bytes) -> tuple[str, int]:
     return item.id, item.port
 
 
+def encode_query() -> bytes:
+    return QUERY_MAGIC + b" " * (QUERY_BYTES - len(QUERY_MAGIC))
+
+
+def is_query(packet: bytes) -> bool:
+    return (isinstance(packet, bytes) and packet.startswith(QUERY_MAGIC)
+            and QUERY_BYTES <= len(packet) <= MAX_BEACON_BYTES)
+
+
+def _reusable(sock: socket.socket) -> None:
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    if hasattr(socket, "SO_REUSEPORT"):
+        try:
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
+        except OSError:
+            pass
+
+
+class ReplyLimiter:
+    """Όριο απαντήσεων ανά IP και συνολικά, σε παράθυρο ενός δευτερολέπτου."""
+
+    def __init__(self, per_ip: int = REPLIES_PER_IP, total: int = REPLIES_TOTAL,
+                 clock=time.monotonic):
+        self.per_ip, self.total, self.clock = per_ip, total, clock
+        self._window = None
+        self._counts: dict[str, int] = {}
+        self._sum = 0
+
+    def allow(self, ip: str) -> bool:
+        now = self.clock()
+        if self._window is None or now - self._window >= 1.0:
+            self._window, self._counts, self._sum = now, {}, 0
+        if self._sum >= self.total or self._counts.get(ip, 0) >= self.per_ip:
+            return False
+        self._counts[ip] = self._counts.get(ip, 0) + 1
+        self._sum += 1
+        return True
+
+
+def open_responder(udp_port: int) -> socket.socket:
+    """Socket του Manager που δέχεται ερωτήσεις εντοπισμού στη θύρα discovery."""
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        _reusable(sock)
+        sock.bind(("", udp_port))
+    except OSError:
+        sock.close()
+        raise
+    return sock
+
+
+def answer_queries(responder: socket.socket, packet: bytes, wait: float,
+                   limiter: ReplyLimiter) -> int:
+    """Απαντά σε ερωτήσεις για έως ``wait`` δευτερόλεπτα· επιστρέφει πόσες απαντήθηκαν."""
+    deadline = time.monotonic() + max(0.0, wait)
+    answered = 0
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return answered
+        responder.settimeout(remaining)
+        try:
+            data, sender = responder.recvfrom(MAX_BEACON_BYTES + 1)
+        except socket.timeout:
+            return answered
+        except OSError:
+            # Windows: υπερμεγέθες πακέτο (WSAEMSGSIZE) ή ICMP (WSAECONNRESET).
+            continue
+        if not is_query(data) or not limiter.allow(sender[0]):
+            continue
+        try:
+            responder.sendto(packet, sender)
+            answered += 1
+        except OSError:
+            continue
+
+
 def announce(stop, identifier: str, tcp_port: int, *,
              udp_port: int = DISCOVERY_PORT, interval: float = ANNOUNCE_INTERVAL,
              report=print, school: str | None = None, inst: str | None = None,
              registry_version=None, host: str | None = None,
              extra_ports: tuple[int, ...] = ()) -> None:
-    """Broadcast και προαιρετικά loopback test ports, κάθε φορά με live rv."""
+    """Απαντά σε ερωτήσεις Clients και στέλνει broadcast beacon κάθε ``interval``.
+
+    Το broadcast (και τα loopback test ports) είναι για τους άλλους Managers· οι
+    Clients παίρνουν το beacon ως απάντηση στην ερώτησή τους. Κάθε φορά με live rv.
+    """
     if inst is None:
         inst = str(uuid.uuid4())
     senders = BroadcastSenders(udp_port)
+    limiter = ReplyLimiter()
+    try:
+        responder = open_responder(udp_port)
+    except OSError as exc:
+        responder = None
+        report(f"[Discovery] Η θύρα {udp_port} δεν άνοιξε για ερωτήσεις Clients: {exc}")
     try:
         while not stop.is_set():
+            packet = None
             try:
                 version = registry_version() if callable(registry_version) else (
                     registry_version if registry_version is not None else 1)
@@ -138,9 +245,20 @@ def announce(stop, identifier: str, tcp_port: int, *,
                     senders.default.sendto(packet, ("127.0.0.1", target))
             except (OSError, ValueError) as exc:
                 report(f"[Discovery] Αποτυχία broadcast: {exc}")
-            stop.wait(interval)
+            if responder is None or packet is None:
+                stop.wait(interval)
+                continue
+            # Απαντήσεις μέχρι το επόμενο beacon, σε μικρά κομμάτια για γρήγορο stop.
+            deadline = time.monotonic() + interval
+            while not stop.is_set():
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                answer_queries(responder, packet, min(0.2, remaining), limiter)
     finally:
         senders.close()
+        if responder is not None:
+            responder.close()
 
 
 #: Κάθε πόσο ξαναδιαβάζονται οι διευθύνσεις του υπολογιστή (DHCP, Wi-Fi που αλλάζει).
@@ -299,6 +417,79 @@ class BeaconWatcher:
         if self._thread is not None:
             self._thread.join(timeout=1.0)
 
+def is_local_address(ip: str, _cache: dict[str, bool] = {}) -> bool:
+    """Ανήκει η IP σε αυτόν τον υπολογιστή; (bind πετυχαίνει μόνο σε τοπική διεύθυνση)."""
+    if ip.startswith("127."):
+        return True
+    if ip not in _cache:
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as probe:
+                probe.bind((ip, 0))
+            _cache[ip] = True
+        except OSError:
+            _cache[ip] = False
+    return _cache[ip]
+
+
+class _Asker:
+    """Οι ερωτήσεις του Client: broadcast από κάθε κάρτα (Windows) και λήψη απαντήσεων.
+
+    Η ερώτηση πηγαίνει και στο 127.0.0.1, για Manager στον ίδιο υπολογιστή. Απάντηση από
+    διεύθυνση αυτού του υπολογιστή γράφεται ως 127.0.0.1, ώστε ο ίδιος Manager να μη
+    φαίνεται σε δύο διευθύνσεις (και να δουλεύει με Manager δεμένο στο loopback).
+    """
+
+    def __init__(self, udp_port: int):
+        self.udp_port = udp_port
+        self.senders = BroadcastSenders(udp_port)
+        # Το default socket δένεται σε τυχαία θύρα, ώστε να δέχεται απαντήσεις και όταν
+        # δεν έχει στείλει (Windows: recvfrom σε socket χωρίς bind αποτυγχάνει).
+        self.senders.default.bind(("", 0))
+        self._next = 0.0
+
+    def sockets(self) -> list[socket.socket]:
+        return [self.senders.default, *self.senders.bound.values()]
+
+    def ask(self) -> None:
+        now = time.monotonic()
+        if now < self._next:
+            return
+        self._next = now + QUERY_INTERVAL
+        query = encode_query()
+        try:
+            self.senders.send(query)
+        except OSError:
+            pass   # π.χ. χωρίς δίκτυο· ξανά στο επόμενο QUERY_INTERVAL
+        try:
+            self.senders.default.sendto(query, ("127.0.0.1", self.udp_port))
+        except OSError:
+            pass
+
+    def receive(self, timeout: float):
+        """(packet, sender) ή None μετά από ``timeout`` (ή στο επόμενο ask)."""
+        import select
+        wait = max(0.0, min(timeout, self._next - time.monotonic()))
+        sockets = self.sockets()
+        try:
+            readable, _, _ = select.select(sockets, [], [], wait)
+        except (OSError, ValueError):
+            return None
+        for sock in readable:
+            try:
+                packet, sender = sock.recvfrom(MAX_BEACON_BYTES + 1)
+                if is_local_address(sender[0]):
+                    sender = ("127.0.0.1", sender[1])
+                return packet, sender
+            except OSError:
+                # Windows: υπερμεγέθες πακέτο (WSAEMSGSIZE) ή WSAECONNRESET· αγνοείται
+                # όπως κάθε άκυρη απάντηση.
+                continue
+        return None
+
+    def close(self) -> None:
+        self.senders.close()
+
+
 def discover(*, udp_port: int = DISCOVERY_PORT, timeout: float = DISCOVERY_WINDOW,
              preferred_id: str | None = None,
              confirm: float = CONFIRM_WINDOW) -> tuple[str, int, str] | None:
@@ -310,14 +501,8 @@ def discover(*, udp_port: int = DISCOVERY_PORT, timeout: float = DISCOVERY_WINDO
     Αν το ίδιο ID έρθει από δύο διευθύνσεις (IP ή TCP port), δεν επιλέγει καμία.
     """
     candidates: dict[str, set[tuple[str, int]]] = {}
-    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as listener:
-        listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        if hasattr(socket, "SO_REUSEPORT"):
-            try:
-                listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
-            except OSError:
-                pass
-        listener.bind(("", udp_port))
+    asker = _Asker(udp_port)
+    try:
         start = time.monotonic()
         deadline = start + timeout
         early = start + min(confirm, timeout) if preferred_id is not None else deadline
@@ -328,15 +513,11 @@ def discover(*, udp_port: int = DISCOVERY_PORT, timeout: float = DISCOVERY_WINDO
             remaining = (early if candidates else deadline) - now
             if remaining <= 0:
                 break
-            listener.settimeout(remaining)
-            try:
-                packet, sender = listener.recvfrom(MAX_BEACON_BYTES + 1)
-            except socket.timeout:
-                break
-            except OSError:
-                # Windows: υπερμεγέθες πακέτο (WSAEMSGSIZE) ή WSAECONNRESET. Αγνοείται
-                # όπως κάθε άκυρο beacon· αλλιώς ένα πακέτο εμπόδιζε τη σύνδεση.
+            asker.ask()
+            received = asker.receive(remaining)
+            if received is None:
                 continue
+            packet, sender = received
             try:
                 identifier, tcp_port = decode_beacon(packet)
             except ValueError:
@@ -344,6 +525,8 @@ def discover(*, udp_port: int = DISCOVERY_PORT, timeout: float = DISCOVERY_WINDO
             if preferred_id is not None and identifier != preferred_id:
                 continue
             candidates.setdefault(identifier, set()).add((sender[0], tcp_port))
+    finally:
+        asker.close()
     if len(candidates) > 1:
         raise ValueError("Βρέθηκαν πολλοί Directors: ορίστε χειροκίνητα --host")
     if not candidates:
@@ -373,14 +556,8 @@ def discover_candidates(*, udp_port: int = DISCOVERY_PORT, timeout: float = DISC
     σε άλλον υπολογιστή με νέο ID). Το πλήθος περιορίζεται σε ``MAX_CANDIDATES``.
     """
     found: dict[tuple[str, int, str], None] = {}
-    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as listener:
-        listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        if hasattr(socket, "SO_REUSEPORT"):
-            try:
-                listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
-            except OSError:
-                pass
-        listener.bind(("", udp_port))
+    asker = _Asker(udp_port)
+    try:
         start = time.monotonic()
         deadline = start + timeout
         early = start + min(confirm, timeout)
@@ -393,13 +570,11 @@ def discover_candidates(*, udp_port: int = DISCOVERY_PORT, timeout: float = DISC
             remaining = deadline - now
             if remaining <= 0:
                 break
-            listener.settimeout(remaining)
-            try:
-                packet, sender = listener.recvfrom(MAX_BEACON_BYTES + 1)
-            except socket.timeout:
-                break
-            except OSError:
-                continue   # Windows: υπερμεγέθες πακέτο/ICMP· όπως κάθε άκυρο beacon
+            asker.ask()
+            received = asker.receive(remaining)
+            if received is None:
+                continue
+            packet, sender = received
             try:
                 identifier, tcp_port = decode_beacon(packet)
             except ValueError:
@@ -407,6 +582,8 @@ def discover_candidates(*, udp_port: int = DISCOVERY_PORT, timeout: float = DISC
             key = (sender[0], tcp_port, identifier)
             if key not in found and len(found) < 4 * MAX_CANDIDATES:
                 found[key] = None
+    finally:
+        asker.close()
     candidates = list(found)
     if preferred_id is not None and any(item[2] == preferred_id for item in candidates):
         candidates = [item for item in candidates if item[2] == preferred_id]

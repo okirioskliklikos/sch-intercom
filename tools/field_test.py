@@ -635,6 +635,16 @@ class WindowsMachine:
         rules = sorted({line.strip() for line in text.splitlines() if line.strip()})
         return ", ".join(rules) if rules else "κανένας"
 
+    def udp_listeners(self, port: int) -> str:
+        """Διεργασίες του sch-intercom που ακούν σε UDP ``port`` (πρέπει: καμία)."""
+        text = self.powershell(
+            f"Get-NetUDPEndpoint -LocalPort {int(port)} -ErrorAction SilentlyContinue | "
+            "ForEach-Object { (Get-Process -Id $_.OwningProcess -ErrorAction SilentlyContinue).Path }",
+            timeout=60)
+        paths = sorted({line.strip() for line in text.splitlines()
+                        if "sch-intercom" in line.lower()})
+        return ", ".join(paths)
+
     @staticmethod
     def process_path(pid) -> str:
         import ctypes
@@ -775,6 +785,9 @@ class SimMachine:
     def firewall_rules(self) -> str:
         return "—"
 
+    def udp_listeners(self, port: int) -> str:
+        return ""
+
     @staticmethod
     def process_path(pid) -> str:
         return ""
@@ -838,7 +851,7 @@ STEPS = [
     (f"Αθόρυβη εγκατάσταση {BASE} με /ROOM= /PC= /MANAGERHOST= (κανονική θέση, χωρίς admin)",
      "s02"),
     ("Εγγραφή με κωδικό και έγκριση: ο Client συνδέεται", "s03"),
-    ("Εντοπισμός του Director χωρίς IP (UDP), μετά πάλι με IP", "s04"),
+    ("Εντοπισμός του Director χωρίς IP (UDP, χωρίς θύρα στον Client), μετά πάλι με IP", "s04"),
     ("Επανεγκατάσταση με νέα /ROOM= /PC=: αίτημα αλλαγής χωρίς κωδικό, ίδιο UUID", "s05"),
     ("Επανεγκατάσταση με τα ίδια ονόματα: κανένα αίτημα, ίδιο UUID", "s06"),
     (f"Νέο πακέτο {GOOD} κατά την ανακοίνωση: καμία εναλλαγή όσο παίζει", "s07"),
@@ -1067,14 +1080,21 @@ class FieldTest:
         mark = self.mark()
         self.m.cli("--set-director-host", "auto")
         found = self.joined(mark, timeout=60) is not None
+        # Από 28/11/2026 ο Client ρωτά και ο Manager απαντά: ο Client δεν ακούει σε θύρα
+        # UDP, άρα δεν χρειάζεται κανόνα Firewall (ούτε ερώτηση των Windows).
+        listening = self.m.udp_listeners(50556)
         rules = self.m.firewall_rules()
         mark = self.mark()
         self.m.cli("--set-director-host", self.host)
         back = self.joined(mark, timeout=90) is not None
         hint = "" if found else (" · αν το VM είναι σε NAT το broadcast δεν φτάνει (βάλτε "
-                                 "bridged), αλλιώς δείτε αν εμφανίστηκε ερώτηση Firewall")
-        return found and back, (f"χωρίς IP: {'συνδέθηκε' if found else 'ΔΕΝ συνδέθηκε σε 60 s'}, "
-                                f"κανόνες Firewall για τον Client: {rules}, με IP ξανά: {back}{hint}")
+                                 "bridged)")
+        return self.verdict(
+            {"συνδέθηκε χωρίς IP": found, "ο Client δεν ακούει σε UDP 50556": not listening,
+             "ξανά με IP": back},
+            f"χωρίς IP: {'συνδέθηκε' if found else 'ΔΕΝ συνδέθηκε σε 60 s'}, ακούει σε UDP 50556: "
+            f"{listening or 'κανένα'}, κανόνες Firewall για τον Client (πληροφοριακά, "
+            f"δεν χρειάζονται): {rules}, με IP ξανά: {back}{hint}")
 
     def s05(self):
         mark = self.mark()
