@@ -36,7 +36,6 @@ LIVE_LIGHT = "#f6d5d5"
 LIVE_DARK = "#a51f1f"         # hover κόκκινου κουμπιού (Διακοπή εξυπηρέτησης)
 ALARM_TEXT = "#8e1c1c"        # κείμενο κόκκινης μπάρας ειδοποίησης
 APP_ICON = "#0e7490"
-TRAY_OK = "#4ade80"           # κουκκίδα tray Client «συνδεδεμένος» (5C1)
 PENDING = "#e0a100"           # κίτρινη κουκκίδα / περίγραμμα κάρτας κωδικού
 PENDING_TEXT = "#9a6b00"
 PENDING_LIGHT = "#fff8e1"
@@ -60,7 +59,6 @@ TOKENS: dict[str, str] = {
     "live_dark": LIVE_DARK,
     "alarm_text": ALARM_TEXT,
     "app_icon": APP_ICON,
-    "tray_ok": TRAY_OK,
     "pending": PENDING,
     "pending_text": PENDING_TEXT,
     "pending_light": PENDING_LIGHT,
@@ -202,7 +200,11 @@ CLIENT_WINDOW_W = 780       # 5C2: με αριστερή μπάρα όπως ο 
 CLIENT_WINDOW_H = 600
 CLIENT_CODE = 34            # κωδικός εγγραφής, mono semibold
 TRAY_DOT = 5 / 24           # ακτίνα κουκκίδας ως κλάσμα του εικονιδίου
-TRAY_DOT_RING = 1.6 / 24    # λευκό δαχτυλίδι γύρω από την κουκκίδα
+TRAY_DOT_RING = 1.6 / 24    # διάφανο κενό γύρω από την κουκκίδα (φαίνεται το υπόβαθρο)
+TRAY_APP_SCALE = 0.85       # τα κύματα στο tray: 85% του εικονιδίου, κάτω αριστερά
+TRAY_GLYPH_LIGHT = "#000000"  # κύματα σε φωτεινή γραμμή εργασιών
+TRAY_GLYPH_DARK = "#ffffff"   # κύματα σε σκούρα γραμμή εργασιών
+TRAY_THEME_POLL_MS = 5000   # έλεγχος θέματος γραμμής εργασιών (Windows χωρίς σήμα)
 
 
 def stylesheet(metrics: Metrics | None = None) -> str:

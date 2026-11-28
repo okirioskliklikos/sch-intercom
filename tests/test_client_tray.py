@@ -265,7 +265,41 @@ class TrayTests(TestCase):
             image = tray_pixmap(size, "ok").toImage()
             outer = size * (theme.TRAY_DOT + theme.TRAY_DOT_RING)
             center = image.pixelColor(round(size - outer), round(outer))
-            self.assertEqual(center.name(), QColor(theme.TRAY_OK).name(), size)
+            self.assertEqual(center.name(), QColor(theme.ONLINE).name(), size)
+
+    def test_tray_pixmap_monochrome_by_taskbar(self):
+        from client.qt_client import tray_pixmap
+        from shared.ui import theme
+        size = 64
+        side = size * theme.TRAY_APP_SCALE
+        middle = (round(side / 2), round(size - side / 2))     # κεντρική κουκκίδα κυμάτων
+        for dark, color in ((False, theme.TRAY_GLYPH_LIGHT), (True, theme.TRAY_GLYPH_DARK)):
+            image = tray_pixmap(size, "ok", dark).toImage()
+            self.assertEqual(image.pixelColor(*middle).name(), color, dark)
+            # Καμία απόχρωση teal: μόνο μαύρο/λευκό, διάφανο ή το χρώμα της κουκκίδας.
+            allowed = {color, theme.ONLINE.lower()}
+            for y in range(size):
+                for x in range(size):
+                    pixel = image.pixelColor(x, y)
+                    if pixel.alpha() == 255:
+                        self.assertIn(pixel.name(), allowed, (x, y))
+            # Διάφανο κενό ανάμεσα στην κουκκίδα και στα κύματα, και πάνω αριστερά.
+            radius = size * theme.TRAY_DOT
+            outer = radius + size * theme.TRAY_DOT_RING
+            self.assertEqual(image.pixelColor(1, 1).alpha(), 0)
+            gap = image.pixelColor(round(size - outer), round(outer + (radius + outer) / 2))
+            self.assertEqual(gap.alpha(), 0)
+
+    def test_tray_icon_follows_taskbar_theme(self):
+        status, _history, tray = self.make(room="C2627-Γ1", name="Board1")
+        status.set_state(st.CONNECTED)
+        tray.taskbar_dark = lambda: False
+        tray.refresh()
+        self.assertFalse(tray.dump()["tray_dark"])
+        tray.taskbar_dark = lambda: True
+        tray.refresh()
+        self.assertTrue(tray.dump()["tray_dark"])
+        self.assertEqual(tray.dump()["tone"], "ok")
 
     def test_menu_has_no_exit_and_window_hides_on_close(self):
         status, _history, tray = self.make(room="C2627-Γ1", name="Board1")

@@ -15,7 +15,7 @@ import signal
 import threading
 from collections.abc import Callable
 
-from PySide6.QtCore import QObject, QPointF, QRectF, QSize, Qt, QTimer, Signal
+from PySide6.QtCore import QByteArray, QObject, QPointF, QRectF, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import (QAction, QColor, QFont, QFontDatabase, QFontMetrics, QIcon,
                            QPainter, QPixmap)
 from PySide6.QtSvg import QSvgRenderer
@@ -40,8 +40,10 @@ HISTORY_RANGE = "Τελευταίες 30 ημέρες"
 #: είναι και αυτό που ανοίγει με κλικ/διπλό κλικ στο εικονίδιο.
 MENU_HISTORY = "Ιστορικό…"
 MENU_INFO = "Πληροφορίες…"
-TONE_COLORS = {"ok": theme.TRAY_OK, "wait": theme.PENDING, "bad": theme.LIVE}
+TONE_COLORS = {"ok": theme.ONLINE, "wait": theme.PENDING, "bad": theme.LIVE}
 TRAY_SIZES = (16, 20, 24, 32, 40, 48, 64)
+#: Πάχος των εξωτερικών κύκλων του tray (μονάδες του SVG των 24· απόφαση χρήστη 28/11/2026).
+TRAY_RING_WIDTH = 1.3
 
 _metrics = theme.metrics_for(None)
 
@@ -90,31 +92,66 @@ def _repolish(widget: QWidget, **properties) -> None:
 
 
 # --- Εικονίδιο tray ---------------------------------------------------------------------
-def tray_pixmap(size: int, tone: str | None) -> QPixmap:
-    """Εικονίδιο εφαρμογής με κουκκίδα πάνω δεξιά (ui-style.md §10)."""
+def tray_svg(color: str) -> str:
+    """Τα κύματα του εικονιδίου εφαρμογής (§3) μονόχρωμα, χωρίς φόντο, ίδια ένταση."""
+    return ('<svg xmlns="http://www.w3.org/2000/svg" viewBox="2.8 2.8 18.4 18.4">'
+            f'<circle cx="12" cy="12" r="2.4" fill="{color}"/>'
+            f'<circle cx="12" cy="12" r="5.2" fill="none" stroke="{color}" stroke-width="{TRAY_RING_WIDTH}"/>'
+            f'<circle cx="12" cy="12" r="8.2" fill="none" stroke="{color}" stroke-width="{TRAY_RING_WIDTH}"/>'
+            '</svg>')
+
+
+def taskbar_is_dark() -> bool:
+    """Σκούρα γραμμή εργασιών → λευκά κύματα. Windows: ρύθμιση θέματος της γραμμής
+    εργασιών (SystemUsesLightTheme)· αλλού: χρωματικό σχήμα/παλέτα του Qt."""
+    if os.name == "nt":
+        try:
+            import winreg
+            with winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Software\Microsoft\Windows"
+                                r"\CurrentVersion\Themes\Personalize") as key:
+                return winreg.QueryValueEx(key, "SystemUsesLightTheme")[0] == 0
+        except OSError:
+            return True     # Windows 10 πριν από το φωτεινό θέμα: σκούρα γραμμή
+    app = QApplication.instance()
+    if app is None:
+        return False
+    scheme = app.styleHints().colorScheme()
+    if scheme != Qt.ColorScheme.Unknown:
+        return scheme == Qt.ColorScheme.Dark
+    return app.palette().window().color().lightness() < 128
+
+
+def tray_pixmap(size: int, tone: str | None, dark: bool = False) -> QPixmap:
+    """Μονόχρωμα κύματα στο 85% κάτω αριστερά (μαύρα, λευκά σε σκούρα γραμμή) και
+    κουκκίδα πάνω δεξιά με διάφανο κενό γύρω της (ui-style.md §10)."""
     pm = QPixmap(size, size)
     pm.fill(Qt.GlobalColor.transparent)
     painter = QPainter(pm)
     painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-    QSvgRenderer(str(theme.APP_ICON_SVG)).render(painter, QRectF(0, 0, size, size))
+    color = theme.TRAY_GLYPH_DARK if dark else theme.TRAY_GLYPH_LIGHT
+    side = size * theme.TRAY_APP_SCALE
+    QSvgRenderer(QByteArray(tray_svg(color).encode())).render(
+        painter, QRectF(0, size - side, side, side))
     if tone is not None:
         radius = size * theme.TRAY_DOT
         ring = max(1.0, size * theme.TRAY_DOT_RING)
         outer = radius + ring
         center = QPointF(size - outer, outer)
         painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(QColor(theme.WHITE))
+        painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_Clear)
+        painter.setBrush(QColor(0, 0, 0))
         painter.drawEllipse(center, outer, outer)
+        painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceOver)
         painter.setBrush(QColor(TONE_COLORS[tone]))
         painter.drawEllipse(center, radius, radius)
     painter.end()
     return pm
 
 
-def tray_icon(tone: str | None) -> QIcon:
+def tray_icon(tone: str | None, dark: bool = False) -> QIcon:
     result = QIcon()
     for size in TRAY_SIZES:
-        result.addPixmap(tray_pixmap(size, tone))
+        result.addPixmap(tray_pixmap(size, tone, dark))
     return result
 
 
@@ -720,7 +757,15 @@ class ClientTray(QObject):
         self.menu.addAction(self.info_action)
         self.tray.setContextMenu(self.menu)
         self.tray.activated.connect(self._activated)
-        self._tone: str | None = None
+        self._icon: tuple[str | None, bool] | None = None
+        # Θέμα γραμμής εργασιών: αλλαγή στα Windows χωρίς σήμα του Qt → ανάγνωση της
+        # ρύθμισης κάθε λίγα δευτερόλεπτα (μία τιμή μητρώου, όχι animation).
+        self.taskbar_dark = taskbar_is_dark
+        self._theme_timer = QTimer()
+        self._theme_timer.timeout.connect(self.notify)
+        self._theme_timer.start(theme.TRAY_THEME_POLL_MS)
+        if app is not None:
+            app.styleHints().colorSchemeChanged.connect(lambda *_: self.notify())
         self._opened_for: str | None = None
         self._dirty = False
         self.bridge = _Bridge()
@@ -757,9 +802,10 @@ class ClientTray(QObject):
         self._dirty = False
         snap = self.status.snapshot()
         tone = st.tone(snap)
-        if tone != self._tone:
-            self._tone = tone
-            self.tray.setIcon(tray_icon(tone))
+        icon = (tone, bool(self.taskbar_dark()))
+        if icon != self._icon:
+            self._icon = icon
+            self.tray.setIcon(tray_icon(*icon))
         self.tray.setToolTip(st.tooltip(snap))
         first, second = st.menu_lines(snap)
         self.menu_title.setText(first)
@@ -833,7 +879,8 @@ class ClientTray(QObject):
     def dump(self) -> dict:
         return {
             "tray_available": self.tray_available,
-            "tone": self._tone,
+            "tone": self._icon[0] if self._icon else None,
+            "tray_dark": self._icon[1] if self._icon else None,
             "tooltip": self.tray.toolTip(),
             "menu": [{"text": action.text(), "enabled": action.isEnabled()}
                      for action in self.menu.actions() if not action.isSeparator()],
@@ -893,4 +940,4 @@ def run_tray(status: st.ClientStatus, history: st.History, network: Callable[[],
 
 
 __all__ = ["ChangeDialog", "ClientTray", "ClientWindow", "ScaleDialog", "run_tray",
-           "setup_application", "tray_icon", "tray_pixmap", "window_bars", "window_title"]
+           "setup_application", "taskbar_is_dark", "tray_icon", "tray_pixmap", "tray_svg", "window_bars", "window_title"]

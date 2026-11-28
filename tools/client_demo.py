@@ -88,7 +88,6 @@ def main() -> int:
     from client.qt_client import ClientTray, setup_application, tray_pixmap
     from PySide6.QtCore import Qt
     from PySide6.QtGui import QColor, QPainter, QPixmap
-    from shared.ui import theme
 
     app = setup_application(ui_scale=args.scale)
     with tempfile.TemporaryDirectory(prefix="sch-intercom-client-demo-") as temp:
@@ -100,15 +99,18 @@ def main() -> int:
         window.show_tab("Πληροφορίες" if tab == "info" else "Ιστορικό")
         if args.tray:
             sizes = (16, 24, 32, 64)
-            sheet = QPixmap(sum(sizes) * 3 + 40 * 3, 80)
-            sheet.fill(QColor(theme.WINDOW_BG))
+            # Πάνω φωτεινή γραμμή εργασιών (μαύρα κύματα), κάτω σκούρα (λευκά).
+            sheet = QPixmap(sum(sizes) * 3 + 40 * 3, 160)
             painter = QPainter(sheet)
-            x = 10
-            for tone in ("ok", "wait", "bad"):
-                for size in sizes:
-                    painter.drawPixmap(x, 70 - size, tray_pixmap(size, tone))
-                    x += size + 4
-                x += 28
+            for row, (dark, background) in enumerate(((False, "#f3f3f3"), (True, "#202020"))):
+                top = row * 80
+                painter.fillRect(0, top, sheet.width(), 80, QColor(background))
+                x = 10
+                for tone in ("ok", "wait", "bad"):
+                    for size in sizes:
+                        painter.drawPixmap(x, top + 70 - size, tray_pixmap(size, tone, dark))
+                        x += size + 4
+                    x += 28
             painter.end()
             sheet.save(str(args.tray))
             print(f"Εικονίδια tray: {args.tray}")
