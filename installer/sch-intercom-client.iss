@@ -214,7 +214,12 @@ begin
       Log('Defender: εξαίρεση για ' + ExpandConstant('{app}'));
   end;
 
-  if NeedsDetails then
+  if NeedsDetails and WizardSilent then
+    { Αθόρυβη εγκατάσταση: χωρίς κονσόλα που περιμένει Enter (θα κολλούσε)· ο κωδικός φαίνεται
+      στο παράθυρο του Client (tray) και στο enrollment-pending.json. }
+    Exec(Python(False), HomeArgs + ' --enroll --room "' + Room + '" --computer-name "' + ComputerName + '"',
+      ExpandConstant('{app}'), SW_HIDE, ewWaitUntilTerminated, Code)
+  else if NeedsDetails then
     Exec(Python(False), HomeArgs + ' --enroll --room "' + Room + '" --computer-name "' + ComputerName + '" --pause',
       ExpandConstant('{app}'), SW_SHOW, ewWaitUntilTerminated, Code)
   else if not NewIdentity and (Room <> '') and (ComputerName <> '') then
