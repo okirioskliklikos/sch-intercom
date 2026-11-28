@@ -238,6 +238,22 @@ KIND_ENROLL = "enroll"
 KIND_CHANGE = "change"
 TAG_CHANGE = "Αλλαγή"
 TEXT_OFFLINE = "εκτός σύνδεσης"
+#: 5C3: αίτημα εγγραφής με σύσταση εγκεκριμένης ταυτότητας (χωρίς κωδικό, phase5 §6.6–§6.7).
+KIND_CLONE = "clone"
+KIND_RESET = "reset"
+TAG_CLONE = "Κλώνος"
+TAG_RESET = "Νέα ταυτότητα"
+SPONSOR_TAGS = {KIND_CLONE: TAG_CLONE, KIND_RESET: TAG_RESET}
+#: Placeholder του ονόματος στην κάρτα κλώνου (το όνομα το γράφει ο χρήστης).
+CLONE_NAME_HINT = "π.χ. PC05"
+TEXT_NAME_NEEDED = "Γράψτε όνομα υπολογιστή"
+NEW_IDENTITY = "Νέα ταυτότητα"
+HINT_NEW_IDENTITY_SENT = "Ο υπολογιστής παίρνει νέα ταυτότητα και στέλνει νέο αίτημα εγγραφής."
+
+
+def new_identity_action(ip: str) -> str:
+    """Επιλογή στο ⋮ του υπολογιστή, μόνο σε διπλή ταυτότητα (απόφαση χρήστη 28/11/2026)."""
+    return f"Νέα ταυτότητα στο {ip}…"
 
 
 @dataclass(frozen=True)
@@ -252,6 +268,18 @@ class RequestView:
     old_name: str = ""
     #: Μόνο για αλλαγή: αν ο υπολογιστής είναι αυτή τη στιγμή συνδεδεμένος.
     online: bool = True
+    #: 5C3: κλώνος/νέα ταυτότητα· αίθουσα και όνομα της ταυτότητας που τον σύστησε.
+    origin_room: str = ""
+    origin_name: str = ""
+
+    @property
+    def sponsored(self) -> bool:
+        """Εγκρίνεται χωρίς κωδικό (αλλαγή, κλώνος ή νέα ταυτότητα)."""
+        return self.kind != KIND_ENROLL
+
+    @property
+    def origin_title(self) -> str:
+        return room_title(self.origin_room, self.origin_name)
 
     @property
     def short_id(self) -> str:
@@ -393,8 +421,20 @@ class SecurityModel:
 
         5C2: μαζί και τα αιτήματα αλλαγής αίθουσας/ονόματος (``kind="change"``).
         """
-        items = [RequestView(rid, room, name, expires - REQUEST_TTL, expires)
-                 for rid, room, name, expires in self.enrollment.pending()]
+        details = getattr(self.enrollment, "pending_details", None)
+        if details is not None:
+            items = []
+            for item in details():
+                sponsor = item["sponsor"] if item["sponsored"] else None
+                kind = sponsor["kind"] if sponsor else KIND_ENROLL
+                items.append(RequestView(
+                    item["request_id"], item["room"], item["name"],
+                    item["expires"] - REQUEST_TTL, item["expires"], kind,
+                    origin_room=sponsor["origin_room"] if sponsor else "",
+                    origin_name=sponsor["origin_name"] if sponsor else ""))
+        else:
+            items = [RequestView(rid, room, name, expires - REQUEST_TTL, expires)
+                     for rid, room, name, expires in self.enrollment.pending()]
         changes = getattr(self.trust, "changes", None)
         if changes is not None:
             online = {client_id for client_id, _room, active, _age
@@ -423,6 +463,24 @@ class SecurityModel:
             if exc.remaining <= 0:
                 return Decision(TEXT_REJECTED, False, True, HINT_REJECTED)
             return Decision(wrong_code_text(exc.remaining), False, False)
+        except (EnrollmentError, RegistryError, ValueError) as exc:
+            return self._failure(exc)
+        return Decision(TEXT_APPROVED, True, True, HINT_APPROVED)
+
+    def approve_sponsored(self, request_id: str, room: str, name: str) -> Decision:
+        """5C3: κλώνος / νέα ταυτότητα· χωρίς κωδικό, με αίθουσα/όνομα από την κάρτα."""
+        try:
+            room = check_room(room)
+            if not name.strip():
+                return Decision(TEXT_NAME_NEEDED, False, False)
+            name = check_name(name)
+        except ValueError as exc:
+            return Decision(str(exc), False, False)
+        try:
+            self.enrollment.decide(request_id, None, approve=True, room=room, name=name)
+        except IncorrectCodeError:
+            # Η παλιά ταυτότητα ανακλήθηκε στο μεταξύ: χρειάζεται πια κωδικός.
+            return Decision("Η σύσταση δεν ισχύει πια · χρειάζεται κωδικός", False, True)
         except (EnrollmentError, RegistryError, ValueError) as exc:
             return self._failure(exc)
         return Decision(TEXT_APPROVED, True, True, HINT_APPROVED)
@@ -513,12 +571,36 @@ class SecurityModel:
         except RegistryError as exc:
             raise ValueError(f"Η μετονομασία απέτυχε: {exc}") from exc
 
-    def revoke(self, client_id: str) -> None:
-        """Άμεση αποσύνδεση· για επιστροφή χρειάζεται νέα εγγραφή με νέο κλειδί."""
+    def revoke(self, client_id: str, *, derived: tuple[str, ...] = ()) -> None:
+        """Άμεση αποσύνδεση· για επιστροφή χρειάζεται νέα εγγραφή με νέο κλειδί.
+
+        ``derived`` (5C3): και οι κλώνοι που εγκρίθηκαν με σύστασή του (αν επιλεγούν).
+        """
         try:
             self.trust.revoke(client_id, self.broadcaster)
+            for other in derived:
+                self.trust.revoke(other, self.broadcaster)
         except RegistryError as exc:
             raise ValueError(f"Η ανάκληση απέτυχε: {exc}") from exc
+
+    def derived(self, client_id: str) -> list[ComputerView]:
+        """5C3: εγκεκριμένοι υπολογιστές με σύσταση του ``client_id`` (για την ανάκληση)."""
+        lookup = getattr(self.trust, "derived", None)
+        if lookup is None:
+            return []
+        return sorted((ComputerView(entry["client_id"], entry.get("name") or
+                                    entry["client_id"][:8], entry["room"], False, None)
+                       for entry in lookup(client_id)),
+                      key=lambda c: (_sort_key(c.room), _sort_key(c.name)))
+
+    def new_identity(self, client_id: str, ip: str, room: str, name: str) -> bool:
+        """5C3: «Νέα ταυτότητα στο <IP>»· True αν στάλθηκε τώρα (αλλιώς στην επόμενη
+        σύνδεση από αυτή την IP)."""
+        try:
+            return self.trust.new_identity(client_id, ip, check_room(room), check_name(name),
+                                           self.broadcaster)
+        except RegistryError as exc:
+            raise ValueError(f"Η νέα ταυτότητα δεν στάλθηκε: {exc}") from exc
 
 
 # ------------------------------------------------------------ Κύριος / Εφεδρικός (4.2D2)

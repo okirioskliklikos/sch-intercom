@@ -16,6 +16,10 @@ from collections.abc import Callable
 from client.install_paths import atomic_write_json
 from shared.room_names import room_title, short_room
 
+#: 5C3: ίδιες τιμές με shared.enrollment (χωρίς εξάρτηση από cryptography εδώ).
+SPONSOR_CLONE = "clone"
+SPONSOR_RESET = "reset"
+
 #: Μόνο για δοκιμές/ανάπτυξη: 1 = χωρίς tray, όπως πριν από το 5C1.
 NO_TRAY_ENV = "SCH_INTERCOM_NO_TRAY"
 
@@ -157,7 +161,8 @@ def status_label(snap: dict) -> str:
 def tooltip(snap: dict) -> str:
     text = f"{title(snap)} — {status_label(snap)}"
     enrollment = snap.get("enrollment")
-    if snap["state"] == PENDING and enrollment and enrollment.get("code"):
+    if snap["state"] == PENDING and enrollment and enrollment.get("code") and \
+            not enrollment.get("sponsor"):
         text += f", κωδικός {format_code(enrollment['code'])}"
     if (snap.get("update") or {}).get("state") == "failed":
         text += " · αποτυχία ενημέρωσης"
@@ -333,9 +338,16 @@ def window_bars(snap: dict) -> tuple[str | None, str | None]:
         return (f"Η αλλαγή σε {target} δεν στάλθηκε: "
                 + _html(change.get("detail") or "άγνωστο σφάλμα")), None
     info = None
+    sponsor = (snap.get("enrollment") or {}).get("sponsor") if state == PENDING else None
     if state == FULL:
         info = ("Ο Director έχει συμπληρώσει το όριο υπολογιστών· νέα προσπάθεια "
                 "κάθε 30 δευτερόλεπτα.")
+    elif sponsor and sponsor["kind"] == SPONSOR_CLONE:
+        source = room_title(sponsor["room"], sponsor["name"])
+        info = (f"Κλώνος του <b>{_html(source)}</b>: " if source else "Κλώνος: ") + \
+            "αναμονή ονόματος και έγκρισης από τον Director"
+    elif sponsor:
+        info = "Νέα ταυτότητα από τον Director: αναμονή έγκρισης"
     elif change.get("state") == "pending":
         info = f"Αίτημα αλλαγής σε {target}: αναμονή έγκρισης από τον Director"
     elif change.get("state") == "queued":
@@ -353,11 +365,17 @@ PENDING_FILE = "enrollment-pending.json"
 
 
 def save_pending(path: Path, *, code: str, room: str, name: str, expires_at: float,
-                 client_id: str, request_id: str | None = None, seq: int = 0) -> None:
-    """5C2: και ``request_id``/``seq`` για τη διόρθωση του αιτήματος (ίδιος κωδικός)."""
+                 client_id: str, request_id: str | None = None, seq: int = 0,
+                 sponsor: dict | None = None) -> None:
+    """5C2: και ``request_id``/``seq`` για τη διόρθωση του αιτήματος (ίδιος κωδικός).
+
+    5C3: ``sponsor`` {kind, room, name}: ο Director δέχτηκε τη σύσταση της παλιάς
+    ταυτότητας (κλώνος / νέα ταυτότητα), οπότε εγκρίνει χωρίς κωδικό.
+    """
     atomic_write_json(path, {"code": str(code), "room": room, "name": name,
                              "expires_at": float(expires_at), "client_id": client_id,
-                             "request_id": request_id, "seq": int(seq)})
+                             "request_id": request_id, "seq": int(seq),
+                             **({"sponsor": sponsor} if sponsor else {})})
 
 
 def load_pending(path: Path, client_id: str, *, now: float | None = None) -> dict | None:
@@ -374,10 +392,16 @@ def load_pending(path: Path, client_id: str, *, now: float | None = None) -> dic
             not isinstance(expires, (int, float)) or expires <= now:
         return None
     request_id, seq = data.get("request_id"), data.get("seq")
+    sponsor = data.get("sponsor")
+    if not (isinstance(sponsor, dict) and sponsor.get("kind") in (SPONSOR_CLONE, SPONSOR_RESET)):
+        sponsor = None
+    else:
+        sponsor = {"kind": sponsor["kind"], "room": str(sponsor.get("room") or ""),
+                   "name": str(sponsor.get("name") or "")}
     return {"code": code, "room": str(data.get("room") or ""),
             "name": str(data.get("name") or ""), "expires_at": float(expires),
             "request_id": request_id if isinstance(request_id, str) else None,
-            "seq": seq if type(seq) is int and seq >= 0 else 0}
+            "seq": seq if type(seq) is int and seq >= 0 else 0, "sponsor": sponsor}
 
 
 def clear_pending(path: Path) -> None:

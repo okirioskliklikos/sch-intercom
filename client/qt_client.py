@@ -644,7 +644,9 @@ class ClientWindow(QWidget):
                 bar.text.setTextFormat(Qt.TextFormat.RichText)
                 bar.text.setText(text)
         enrollment = snap.get("enrollment")
-        show_code = snap["state"] == st.PENDING and bool(enrollment)
+        # 5C3: με σύσταση (κλώνος / νέα ταυτότητα) η έγκριση γίνεται χωρίς κωδικό.
+        show_code = snap["state"] == st.PENDING and bool(enrollment) and \
+            not enrollment.get("sponsor")
         self.code_card.setVisible(show_code)
         if show_code:
             self.code_card.set_code(enrollment)

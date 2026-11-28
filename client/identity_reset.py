@@ -42,6 +42,28 @@ def check_clone(identity_file: Path, credentials_dir: Path, *,
     return reason
 
 
+def old_identity(identity_file: Path, credentials_dir: Path, hints_file: Path,
+                 kind: str) -> dict | None:
+    """5C3: η ταυτότητα που θα αρχειοθετηθεί, για να συστήσει τη νέα (``make_sponsor``).
+
+    Διαβάζεται πριν από το ``archive_identity``. None αν λείπει κάτι (τότε κανονική
+    εγγραφή με κωδικό).
+    """
+    from shared.client_hints import load_hints
+    from shared.device_identity import identity_credentials
+    try:
+        data = json.loads(Path(identity_file).read_text(encoding="utf-8"))
+        _cert, keyfile, password = identity_credentials(credentials_dir)
+        key = Path(keyfile).read_bytes()
+        hints = load_hints(hints_file)
+        return {"kind": kind, "origin": str(data["client_id"]), "token": "", "key": key,
+                "password": password, "room": hints.get("room") or previous_room(identity_file)
+                or "", "name": hints.get("name") or ""}
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        print(f"[Client] Η παλιά ταυτότητα δεν θα συστήσει τη νέα: {exc}", flush=True)
+        return None
+
+
 def remember_machine(credentials_dir: Path, *, machine: Machine | None = None) -> None:
     """Μετά τη δημιουργία νέας ταυτότητας: σημειώνει τον υπολογιστή στον οποίο ανήκει."""
     path = binding_path(credentials_dir)

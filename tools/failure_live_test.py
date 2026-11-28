@@ -751,7 +751,9 @@ class LiveTest:
 
     def copy_board(self, source: Board, name: str, room: str, *, port=PORT) -> Board:
         board = Board(self.root, name, room, port=port)
-        shutil.copytree(source.dir, board.dir)
+        # Χωρίς τα προσωρινά αρχεία ατομικής εγγραφής (π.χ. registry-seen.json.ab12cd):
+        # ο αρχικός Client τρέχει και μπορεί να τα σβήσει στη μέση της αντιγραφής.
+        shutil.copytree(source.dir, board.dir, ignore=shutil.ignore_patterns("*.json.*"))
         board.client_id = source.client_id
         return board
 
@@ -766,17 +768,18 @@ class LiveTest:
         mark_d, mark_1 = self.director.mark(), self.b1.process.mark()
         process = clone.start(self.m.cert)
         detected = process.wait_for("μοιάζει αντίγραφο", timeout=10) is not None
-        code_line = process.wait_for("Κωδικός:", timeout=20)
+        # 5C3: η παλιά (εγκεκριμένη) ταυτότητα συστήνει τον κλώνο· έγκριση χωρίς κωδικό.
+        code_line = process.wait_for("Κλώνος του", timeout=20)
         new_id = json.loads((clone.dir / "client.json").read_text(encoding="utf-8"))["client_id"]
         archived = any(path.name.startswith("cloned-") for path in clone.dir.iterdir())
         request = self.director.wait_for("Νέο αίτημα", since=mark_d, timeout=10)
         approved = False
         if request and code_line:
             short = request.split("Νέο αίτημα")[1].split("|")[0].strip()
-            code = code_line.split("Κωδικός:")[1].split("|")[0].strip()
             mark = self.director.mark()
-            self.send(f"approve {short} {code}")
-            approved = self.director.wait_for("Εγκρίθηκε:", since=mark, timeout=10) is not None
+            self.send(f"approve {short} {ROOM1} Board5")
+            approved = self.director.wait_for("Εγκρίθηκε χωρίς κωδικό", since=mark,
+                                              timeout=10) is not None
         clone.client_id = new_id
         joined = self.joined(clone, mark_d, 20)
         board1_ok = (not self.director.seen(self.b1.client_id, LEFT, since=mark_d)
@@ -785,7 +788,7 @@ class LiveTest:
         ok = (detected and archived and new_id != self.b1.client_id and approved and joined
               and board1_ok)
         return ok, (f"ανίχνευση {detected}, παλιά αρχεία σε cloned-* {archived}, νέο UUID "
-                    f"{new_id != self.b1.client_id}, εγκρίθηκε {approved}, συνδέθηκε {joined}, "
+                    f"{new_id != self.b1.client_id}, εγκρίθηκε χωρίς κωδικό {approved}, συνδέθηκε {joined}, "
                     f"ο Board1 ανεπηρέαστος {board1_ok}")
 
     def s18(self):

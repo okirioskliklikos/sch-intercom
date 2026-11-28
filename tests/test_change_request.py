@@ -58,8 +58,8 @@ class ControlProtocolTests(unittest.TestCase):
         worker.join(3)
         return beats, changes, result
 
-    def test_protocol_is_8(self):
-        self.assertEqual(CONNECTION_PROTOCOL, 8)
+    def test_protocol_is_9(self):
+        self.assertEqual(CONNECTION_PROTOCOL, 9)
 
     def test_change_request_between_heartbeats(self):
         frame = encode_change_request("C2627-Γ2", "Board 1")

@@ -25,6 +25,11 @@
 (Ρυθμίσεις → «Ενημερώσεις» με πακέτα 1.0.6/1.0.5 υπογεγραμμένα με κλειδί επίδειξης και
 ψεύτικη κατάσταση ανά υπολογιστή). Με --role backup δείχνει την κλειδωμένη μορφή.
 
+5C3: --requests sponsored (κάρτες «Κλώνος του C2627-Γ1 · PC» και «Νέα ταυτότητα» του
+C2627-Γ2 · Board1, χωρίς κωδικό· ο κλώνος «PC05» του Εργαστηρίου · PC01 εγκεκριμένος, ώστε
+η «Ανάκληση…» του PC01 να προτείνει και τον κλώνο). Με --notices duplicate το ⋮ του
+C2627-Γ1 · Board1 έχει «Νέα ταυτότητα στο <IP>…» για κάθε IP.
+
 Κλίμακα περιβάλλοντος: --scale 80 | 90 | 100 | 110 | 125 (προεπιλογή όπως η εφαρμογή).
 """
 from __future__ import annotations
@@ -113,6 +118,9 @@ class DemoBroadcaster:
     def disconnect_client(self, client_id):
         self.status.pop(client_id, None)
 
+    def send_new_identity(self, *_args):
+        return False  # κανένας πραγματικός Client: «στέλνεται στην επόμενη σύνδεση»
+
 
 class DemoWatcher:
     """Ψεύτικος BeaconWatcher: οι «άλλοι Managers» ορίζονται από το σενάριο."""
@@ -174,6 +182,31 @@ def build_role(root: Path, scenario: str, registry_version, trust=None):
                      host=DEMO_HOST, **extra)
 
 
+def add_sponsored(model, broadcaster) -> None:
+    """5C3: αιτήματα με σύσταση (κλώνος, νέα ταυτότητα) και ένας εγκεκριμένος κλώνος."""
+    from shared.enrollment import SPONSOR_CLONE, SPONSOR_RESET
+
+    def origin(room, name):
+        [client_id] = [cid for cid, n in broadcaster.names.items()
+                       if n == name and broadcaster.rooms[cid] == room]
+        return client_id
+
+    lab = origin("Εργαστήριο Πληροφορικής", "PC01")
+    clone_id, _code = model.demo_submit("Εργαστήριο Πληροφορικής", "PC01",
+                                        (SPONSOR_CLONE, lab, ""))
+    [request] = [r for r in model.requests() if r.sponsored]
+    if not model.approve_sponsored(request.request_id, "Εργαστήριο Πληροφορικής", "PC05").ok:
+        raise SystemExit("Η έγκριση του κλώνου απέτυχε")
+    broadcaster.names[clone_id] = "PC05"
+    broadcaster.rooms[clone_id] = "Εργαστήριο Πληροφορικής"
+    broadcaster.status[clone_id] = ("Εργαστήριο Πληροφορικής", True, 0.1)
+    model.demo_submit("C2627-Γ1", "PC", (SPONSOR_CLONE, origin("C2627-Γ1", "PC"), ""))
+    board = origin("C2627-Γ2", "Board1")
+    model.trust.new_identity(board, "192.168.1.47", "C2627-Γ2", "Board1", broadcaster)
+    token = model.trust._identity_tokens[board][0]
+    model.demo_submit("C2627-Γ2", "Board1", (SPONSOR_RESET, board, token))
+
+
 def fake_stream(_gate, *, stop, ready_callback, level_callback, **_kwargs):
     ready_callback()
     while not stop.wait(0.05):
@@ -187,7 +220,7 @@ def build(root: Path, log=print):
     from shared import enrollment as enrollment_module
     from shared.client_registry import SignedClientRegistry
     from shared.device_identity import create_device_identity
-    from shared.enrollment import EnrollmentServer, enroll_client, make_request
+    from shared.enrollment import EnrollmentServer, enroll_client, make_request, make_sponsor
 
     cert, key = root / "director.crt", root / "director.key"
     create_director_identity(cert, key)
@@ -205,15 +238,23 @@ def build(root: Path, log=print):
     last_seen = LastSeenStore(last_seen_path(registry_file), log=lambda _m: None)
     model = SecurityModel(enrollment, trust, broadcaster, last_seen)
 
-    def submit(room, name):
+    def submit(room, name, sponsor=None):
         client_id = str(uuid.uuid4())
         device_cert, device_key, password = create_device_identity(
             root / "devices" / client_id, client_id)
         request = make_request(client_id, room, name, device_cert.read_bytes(),
                                device_key.read_bytes(), password)
+        if sponsor is not None:
+            kind, origin, token = sponsor
+            old_key, old_password = model.demo_keys[origin]
+            request = make_sponsor(request, kind, origin, token, old_key, old_password)
+        model.demo_keys[client_id] = (device_key.read_bytes(), password)
         queued = enroll_client("127.0.0.1", enrollment.port, cert,
                                "school-intercom-director", request)
         return client_id, queued["code"]
+
+    model.demo_keys = {}
+    model.demo_submit = submit
 
     index = 0
     for room, names in ROOMS.items():
@@ -320,6 +361,8 @@ def main() -> None:
                         default="normal", help="5B3: σενάριο Ρυθμίσεις → «Ενημερώσεις»")
     parser.add_argument("--notices", choices=("none", "full", "duplicate", "both"),
                         default="none", help="4.3C2: ειδοποιήσεις «γεμάτος» / ίδια ταυτότητα")
+    parser.add_argument("--requests", choices=("normal", "sponsored"), default="normal",
+                        help="5C3: και αιτήματα κλώνου / νέας ταυτότητας χωρίς κωδικό")
     parser.add_argument("--page", choices=("home", "security", "settings"), default="security")
     parser.add_argument("--scale", type=int, choices=(70, 80, 90, 100, 110, 125, 135), default=None,
                         help="κλίμακα περιβάλλοντος %% (προεπιλογή: όπως η εφαρμογή, 90 στα Windows)")
@@ -344,6 +387,8 @@ def main() -> None:
         broadcaster.set_notices(args.notices)
         role = build_role(Path(temp), args.role, lambda: model.trust.registry.version,
                           trust=model.trust)
+        if args.requests == "sponsored":
+            add_sponsored(model, broadcaster)
         try:
             from director.maintenance import MaintenanceModel
             root = Path(temp)

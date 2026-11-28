@@ -11,7 +11,8 @@ import time
 from collections.abc import Callable
 
 from shared.audio import (encode_frame, encode_control, encode_client_settings,
-                          encode_change_status, MESSAGE_KEEPALIVE, MESSAGE_STREAM_STOP,
+                          encode_change_status, encode_new_identity,
+                          MESSAGE_KEEPALIVE, MESSAGE_STREAM_STOP,
                           MESSAGE_UPDATE_CHECK)
 from shared.control import (HEARTBEAT_TIMEOUT_SECONDS, KEEPALIVE_INTERVAL_SECONDS,
                             heartbeat_receiver)
@@ -32,6 +33,8 @@ DUPLICATE_REPLACEMENTS = 3
 DUPLICATE_WINDOW_SECONDS = 60.0
 DUPLICATE_WARN_SECONDS = 300.0
 SEND_TIMEOUT_SECONDS = 1.0
+#: 5C3: «Νέα ταυτότητα στο <IP>» περιμένει τόσο την επόμενη σύνδεση από αυτή την IP.
+NEW_IDENTITY_WAIT_SECONDS = 600.0
 
 
 class AudioBroadcaster:
@@ -61,6 +64,8 @@ class AudioBroadcaster:
         self._full: dict[str, tuple[str, str, float, float]] = {}   # id -> room, name, seen, logged
         self._replacements: dict[str, list[tuple[float, str, str]]] = {}
         self._duplicates: dict[str, tuple[str, tuple[str, ...], float]] = {}
+        #: 5C3: (client_id, IP) → (frame «Νέα ταυτότητα», λήξη)
+        self._identity_commands: dict[tuple[str, str], tuple[bytes, float]] = {}
         self.clock: Callable[[], float] = time.monotonic
 
     @property
@@ -171,7 +176,8 @@ class AudioBroadcaster:
             return None
         return (f"[Director] ΠΡΟΣΟΧΗ: η ταυτότητα {client_id} ({room}) χρησιμοποιείται "
                 f"από δύο υπολογιστές ({', '.join(addresses)})· πιθανώς κλωνοποιημένος "
-                f"δίσκος. Στον έναν: client --new-identity και νέα έγκριση.")
+                f"δίσκος. Στον έναν: «Νέα ταυτότητα στο <IP>» (Ασφάλεια → Υπολογιστές, ⋮) "
+                f"ή new-identity {client_id} <IP>, και νέα έγκριση.")
 
     def add_client(self, connection: socket.socket, client_id: str, room: str,
                    address: object = "local", *, name: str | None = None,
@@ -195,6 +201,9 @@ class AudioBroadcaster:
                 # 5C2: σε κάθε σύνδεση ο Client μαθαίνει τι έγινε με το αίτημά του.
                 session.enqueue(encode_change_status(**change_status))
             self._sessions[client_id] = session
+            command = self._take_identity_command(client_id, _ip(address))
+            if command is not None:
+                session.enqueue(command)
             self._offline.pop(client_id, None)
             self._full.pop(client_id, None)
             warning = None
@@ -261,6 +270,38 @@ class AudioBroadcaster:
                 return False
             session.enqueue(frame)
         return True
+
+    def send_new_identity(self, client_id: str, ip: str, room: str, name: str,
+                          token: str) -> bool:
+        """5C3: «Νέα ταυτότητα» μόνο στη σύνδεση από ``ip``. True αν στάλθηκε τώρα·
+        αλλιώς στέλνεται όταν συνδεθεί ξανά αυτή η IP (έως 10 λεπτά)."""
+        frame = encode_new_identity(room, name, token)
+        now = self.clock()
+        with self._lock:
+            # Η μπάρα «Ίδια ταυτότητα…» σβήνει: η ενέργεια έγινε.
+            self._duplicates.pop(client_id, None)
+            self._replacements.pop(client_id, None)
+            session = self._sessions.get(client_id)
+            if session is not None and _ip(session.address) == ip:
+                session.enqueue(frame)
+                sent = True
+            else:
+                self._identity_commands[(client_id, ip)] = (frame,
+                                                            now + NEW_IDENTITY_WAIT_SECONDS)
+                sent = False
+        self.on_event(f"[Director] Νέα ταυτότητα στο {ip} ({client_id[:8]}): "
+                      + ("στάλθηκε" if sent else "στέλνεται στην επόμενη σύνδεση"))
+        return sent
+
+    def _take_identity_command(self, client_id: str, ip: str | None) -> bytes | None:
+        """Μέσα στο lock: εκκρεμής «Νέα ταυτότητα» για αυτή τη σύνδεση."""
+        now = self.clock()
+        self._identity_commands = {key: value for key, value in self._identity_commands.items()
+                                   if value[1] > now}
+        if ip is None:
+            return None
+        item = self._identity_commands.pop((client_id, ip), None)
+        return None if item is None else item[0]
 
     def _change_request(self, session: "_ClientSession", room: str, name: str) -> None:
         """Από το νήμα ανάγνωσης του Client: αίτημα αλλαγής αίθουσας/ονόματος (v8)."""

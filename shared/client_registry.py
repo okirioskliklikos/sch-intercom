@@ -214,6 +214,12 @@ def verify_document(document: dict, manager_cert_pem: bytes) -> dict:
                 raise RegistryError("One key cannot represent multiple Clients")
             if not isinstance(entry["room"], str) or not entry["room"]:
                 raise RegistryError("Invalid room")
+            # 5C3: από ποια ταυτότητα προήλθε (κλώνος / «Νέα ταυτότητα»), προαιρετικό.
+            origin = entry.get("origin")
+            if origin is not None and (not isinstance(origin, str)
+                                       or str(uuid.UUID(origin)) != origin
+                                       or origin == client_id):
+                raise RegistryError("Invalid origin")
             seen_ids.add(client_id)
             seen_keys.update(keys)
         return registry
@@ -369,8 +375,14 @@ class SignedClientRegistry:
         self._persist(document)
         self._document = document
 
-    def approve(self, client_id: str, room: str, cert_pem: bytes, *, name: str = "") -> None:
-        """CLI-first approval. A revoked key cannot be approved a second time."""
+    def approve(self, client_id: str, room: str, cert_pem: bytes, *, name: str = "",
+                origin: str | None = None) -> None:
+        """CLI-first approval. A revoked key cannot be approved a second time.
+
+        ``origin`` (5C3): η εγκεκριμένη ταυτότητα με τη σύσταση της οποίας εγκρίθηκε.
+        """
+        if origin is not None and (str(uuid.UUID(origin)) != origin or origin == client_id):
+            raise RegistryError("Invalid origin")
         from shared.identity import validate_identity
         validate_identity(client_id, room)
         try:
@@ -413,12 +425,16 @@ class SignedClientRegistry:
                 existing.update({"name": name, "room": room, "spki_sha256": fp,
                                  "cert_pem": cert_pem.decode("ascii"), "status": "approved",
                                  "changed_in_version": self.version + 1})
+                existing.pop("origin", None)
+                if origin is not None:
+                    existing["origin"] = origin
                 self._commit(updated)
                 return
             updated["clients"].append({
                 "client_id": client_id, "name": name, "room": room,
                 "spki_sha256": fp, "cert_pem": cert_pem.decode("ascii"),
-                "status": "approved", "changed_in_version": self.version + 1})
+                "status": "approved", "changed_in_version": self.version + 1,
+                **({"origin": origin} if origin is not None else {})})
             self._commit(updated)
 
     def update_client_info(self, client_id: str, *, room: str | None = None,
@@ -456,6 +472,12 @@ class SignedClientRegistry:
             return next((dict(entry) for entry in self._document["registry"]["clients"]
                          if entry["client_id"] == client_id
                          and entry["status"] == "approved"), None)
+
+    def derived(self, client_id: str) -> list[dict]:
+        """5C3: εγκεκριμένοι υπολογιστές που εγκρίθηκαν με σύσταση του ``client_id``."""
+        with self.lock:
+            return [dict(entry) for entry in self._document["registry"]["clients"]
+                    if entry.get("origin") == client_id and entry["status"] == "approved"]
 
     def revoke(self, client_id: str, *, blocked: bool = False) -> None:
         with self.lock:

@@ -19,14 +19,16 @@ from collections.abc import Callable
 from shared.audio import (BLOCK_BYTES, BLOCK_MS, BLOCK_SAMPLES, CHANNELS, DEFAULT_PORT,
                           DTYPE, SAMPLE_RATE, Frame, MESSAGE_STREAM_STOP,
                           MESSAGE_CLIENT_SETTINGS, MESSAGE_UPDATE_CHECK, MESSAGE_CHANGE_STATUS,
+                          MESSAGE_NEW_IDENTITY, decode_new_identity,
                           decode_client_settings, receive_message)
 from shared.jitter import DelayTracker, JitterBuffer
 from shared.identity import (ManagerFull, ProtocolMismatch, load_identity, receive_welcome,
                              send_hello)
-from shared.enrollment import (ENROLL_PORT, amend_enrollment, make_amend, make_request,
-                               enroll_client)
+from shared.enrollment import (ENROLL_PORT, SPONSOR_CLONE, SPONSOR_RESET, amend_enrollment,
+                               make_amend, make_request, make_sponsor, enroll_client)
 from shared import change_request as cr
 from shared.client_hints import load_hints, save_hints
+from shared.room_names import room_title
 from shared.registry_seen import load_seen, manager_key, record_seen
 from shared.device_identity import create_device_identity, replace_device_identity
 from shared.transport_security import client_context, connect_tls, DEFAULT_SERVER_NAME
@@ -38,6 +40,7 @@ from client.updater import AnnouncementState, Updater, peer_host
 from client.supervisor import RESULT_FILE, TRIAL_ENV, send_command
 from shared.update_protocol import UPDATE_PORT
 from client.identity_reset import (CLONED, PREVIOUS, archive_identity, check_clone,
+                                   old_identity,
                                    previous_room, remember_machine)
 from shared.control import heartbeat_sender
 from client.windows_volume import (AnnouncementVolume, AudioPolicyWorker,
@@ -114,6 +117,7 @@ def pump_frames(
     announcement: AnnouncementState | None = None,
     update_check: Callable[[], None] | None = None,
     change_status: Callable[[dict], None] | None = None,
+    new_identity: Callable[[dict], None] | None = None,
 ) -> None:
     """PCM/έλεγχος στην ίδια κατεύθυνση TCP, χωρίς reconnect σε αναμονή.
 
@@ -121,6 +125,7 @@ def pump_frames(
     announcement: 5B2, η λήψη ενημέρωσης σταματά όσο παίζει ανακοίνωση.
     update_check: 5B2, ο Manager ζήτησε CHECK ενημέρωσης τώρα («Έναρξη τώρα»).
     change_status: 5C2, απάντηση του Director για το αίτημα αλλαγής αίθουσας/ονόματος.
+    new_identity: 5C3, ο Director ζήτησε νέα ταυτότητα ({room, name, token}).
     Άγνωστα μικρά μηνύματα ελέγχου (νεότερου Manager) αγνοούνται.
     """
     received = 0
@@ -171,6 +176,14 @@ def pump_frames(
                     change_status(cr.decode_status(message.payload))
                 except (OSError, ValueError) as exc:
                     print(f"[Client] Αγνοείται απάντηση αιτήματος αλλαγής: {exc}", flush=True)
+        elif message.kind == MESSAGE_NEW_IDENTITY:
+            if new_identity is not None:
+                try:
+                    data = decode_new_identity(message.payload)
+                except ValueError as exc:
+                    print(f"[Client] Αγνοείται εντολή νέας ταυτότητας: {exc}", flush=True)
+                else:
+                    new_identity(data)
         elif message.kind == MESSAGE_STREAM_STOP:
             if test_report is not None:
                 test_report.event("stop", underruns=jitter.underruns, dropped=jitter.dropped)
@@ -230,6 +243,7 @@ def play_stream(
     update_check: Callable[[], None] | None = None,
     on_output: Callable[[object], None] | None = None,
     change_status: Callable[[dict], None] | None = None,
+    new_identity: Callable[[dict], None] | None = None,
 ) -> None:
     import sounddevice as sd
 
@@ -302,7 +316,7 @@ def play_stream(
                         report=lambda line: print(line, flush=True), volume=volume,
                         settings_callback=settings_callback, test_report=test_report,
                         announcement=announcement, update_check=update_check,
-                        change_status=change_status)
+                        change_status=change_status, new_identity=new_identity)
         finally:
             if volume is not None:
                 # Δίκτυο/τερματισμός: καλύτερα αποκατάσταση παρά παραμονή σε
@@ -694,6 +708,10 @@ def main() -> None:
 
     #: Η τρέχουσα ταυτότητα· 5C2: αλλάζει χωρίς επανεκκίνηση με «Αλλαγή…» μετά από ανάκληση.
     ident: dict = {}
+    #: 5C3: κλώνος· η παλιά (αντιγραμμένη) ταυτότητα συστήνει μία φορά τη νέα.
+    clone_sponsor = (old_identity(args.identity_file, args.client_credentials_dir,
+                                  args.client_hints_file, SPONSOR_CLONE)
+                     if reset_label == CLONED else None)
 
     def activate(label: str | None, room_override: str | None, *, new_key: bool = False,
                  extra: tuple[Path, ...] = ()) -> None:
@@ -764,7 +782,10 @@ def main() -> None:
         return hosts
 
     def submit_enrollment(proposed_room: str | None = None,
-                          computer_name: str | None = None) -> None:
+                          computer_name: str | None = None, *,
+                          sponsor: dict | None = None) -> None:
+        """``sponsor`` (5C3): η παλιά ταυτότητα (``old_identity``) συστήνει τη νέα, ώστε ο
+        Director να την εγκρίνει χωρίς κωδικό. Αν δεν γίνει δεκτή, ισχύει ο κωδικός."""
         hints = load_hints(args.client_hints_file)
         proposed_room = proposed_room or args.room or hints.get("room") or ident["room"]
         computer_name = (computer_name or args.computer_name or hints.get("name")
@@ -772,28 +793,56 @@ def main() -> None:
         request = make_request(ident["client_id"], proposed_room, computer_name,
                                ident["certfile"].read_bytes(), ident["keyfile"].read_bytes(),
                                ident["password"])
-        errors = []
-        for enrollment_host in enrollment_hosts():
+        attempts = [request]
+        if sponsor is not None:
             try:
-                queued = enroll_client(enrollment_host, args.enrollment_port, args.tls_ca,
-                                       args.tls_server_name, request)
+                attempts.insert(0, make_sponsor(request, sponsor["kind"], sponsor["origin"],
+                                                sponsor.get("token", ""), sponsor["key"],
+                                                sponsor["password"]))
+            except (ValueError, TypeError) as exc:
+                print(f"[Client] Χωρίς σύσταση της παλιάς ταυτότητας: {exc}", flush=True)
+        errors = []
+        queued = None
+        # Με σύσταση πρώτα· αν ο Director δεν τη δέχεται (π.χ. παλιότερη έκδοση), χωρίς.
+        for attempt in attempts:
+            for enrollment_host in enrollment_hosts():
+                try:
+                    queued = enroll_client(enrollment_host, args.enrollment_port, args.tls_ca,
+                                           args.tls_server_name, attempt)
+                    break
+                except (OSError, EOFError, ValueError) as exc:
+                    errors.append(f"{enrollment_host}: {exc}")
+            if queued is not None:
                 break
-            except (OSError, EOFError, ValueError) as exc:
-                errors.append(f"{enrollment_host}: {exc}")
-        else:
+        if queued is None:
             raise ConnectionError("; ".join(errors))
         save_hints(args.client_hints_file, proposed_room, computer_name)
+        sponsored = None
+        if queued.get("sponsored") and sponsor is not None:
+            sponsored = {"kind": sponsor["kind"], "room": sponsor.get("room") or "",
+                         "name": sponsor.get("name") or ""}
         try:
             st.save_pending(pending_file, code=queued["code"], room=proposed_room,
                             name=computer_name, expires_at=queued["expires_at"],
-                            client_id=ident["client_id"], request_id=queued.get("request_id"))
+                            client_id=ident["client_id"], request_id=queued.get("request_id"),
+                            sponsor=sponsored)
         except OSError as exc:
             print(f"[Client] Δεν αποθηκεύτηκε το αίτημα για το παράθυρο: {exc}", flush=True)
-        status.update(room=proposed_room, name=computer_name,
-                      enrollment=st.load_pending(pending_file, ident["client_id"]))
+        waiting = st.load_pending(pending_file, ident["client_id"])
+        if sponsored is not None and sponsored["kind"] == SPONSOR_CLONE:
+            # «Νέος υπολογιστής»: αίθουσα και όνομα τα ορίζει ο Director στην έγκριση.
+            status.update(room=None, name=None, enrollment=waiting)
+        else:
+            status.update(room=proposed_room, name=computer_name, enrollment=waiting)
         until = time.strftime("%d/%m/%Y %H:%M", time.localtime(queued["expires_at"]))
-        print(f"Αίθουσα: {proposed_room} | Υπολογιστής: {computer_name} | "
-              f"Κωδικός: {queued['code']} | Λήξη: {until}", flush=True)
+        if sponsored is not None:
+            source = room_title(sponsored["room"], sponsored["name"]) or sponsor["origin"][:8]
+            what = "Κλώνος του" if sponsored["kind"] == SPONSOR_CLONE else "Νέα ταυτότητα του"
+            print(f"Αίθουσα: {proposed_room} | Υπολογιστής: {computer_name} | {what} "
+                  f"{source}: έγκριση στον Director χωρίς κωδικό | Λήξη: {until}", flush=True)
+        else:
+            print(f"Αίθουσα: {proposed_room} | Υπολογιστής: {computer_name} | "
+                  f"Κωδικός: {queued['code']} | Λήξη: {until}", flush=True)
 
     def amend(room_value: str, name_value: str) -> None:
         """5C2: πριν από την πρώτη έγκριση· διόρθωση του αιτήματος, ίδιος κωδικός."""
@@ -833,7 +882,7 @@ def main() -> None:
         return
     if reset_label is not None:
         try:
-            submit_enrollment()
+            submit_enrollment(sponsor=clone_sponsor)
             print("[Client] Νέα αίτηση εγγραφής· μετά την έγκριση με τον κωδικό στον Manager "
                   "ο Client συνδέεται μόνος του.", flush=True)
         except (OSError, EOFError, ValueError) as exc:
@@ -999,7 +1048,8 @@ def main() -> None:
                         on_output=on_output,
                         test_report=test_report, announcement=announcement,
                         update_check=lambda: trigger_update(manager_host),
-                        change_status=changes.on_status)
+                        change_status=changes.on_status,
+                        new_identity=lambda data: on_new_identity(data))
         finally:
             changes.disconnected()
             current["connection"] = None
@@ -1025,8 +1075,22 @@ def main() -> None:
             except OSError:
                 pass
 
-    def new_enrollment(room_value: str, name_value: str) -> None:
-        """5C2: μετά από ανάκληση/χωρίς αίτημα· νέα ταυτότητα και νέος κωδικός."""
+    def new_enrollment(room_value: str, name_value: str, token: str | None = None) -> None:
+        """5C2: μετά από ανάκληση/χωρίς αίτημα· νέα ταυτότητα και νέος κωδικός.
+
+        5C3: με ``token`` είναι η «Νέα ταυτότητα» του Director· η παλιά ταυτότητα τη
+        συστήνει και ο Director την εγκρίνει χωρίς κωδικό.
+        """
+        sponsor = None
+        if token is not None:
+            snap = status.snapshot()
+            try:
+                sponsor = {"kind": SPONSOR_RESET, "origin": ident["client_id"],
+                           "token": token, "key": ident["keyfile"].read_bytes(),
+                           "password": ident["password"], "room": snap.get("room") or "",
+                           "name": snap.get("name") or ""}
+            except OSError as exc:
+                print(f"[Client] Δεν διαβάστηκε η παλιά ταυτότητα: {exc}", flush=True)
         if worker["updater"] is not None:
             worker["updater"].stop()
             worker["updater"] = None
@@ -1035,7 +1099,7 @@ def main() -> None:
         status.update(client_id=ident["client_id"], room=room_value, name=name_value,
                       enrollment=None, approved_before=False)
         try:
-            submit_enrollment(room_value, name_value)
+            submit_enrollment(room_value, name_value, sponsor=sponsor)
             status.set_state(st.PENDING)
         except (OSError, EOFError, ValueError) as exc:
             print(f"[Client] Η νέα αίτηση εγγραφής δεν καταχωρήθηκε: {exc}", flush=True)
@@ -1056,6 +1120,14 @@ def main() -> None:
                 return
             if target is not None:
                 new_enrollment(*target)
+
+    def on_new_identity(data: dict) -> None:
+        """5C3: ο Director ζήτησε νέα ταυτότητα σε αυτόν τον υπολογιστή (από το νήμα λήψης)."""
+        print(f"[Client] Ο Director ζήτησε νέα ταυτότητα: {data['room']} · {data['name']}",
+              flush=True)
+        reenroll["target"] = (data["room"], data["name"], data["token"])
+        epoch.set()
+        close_connection()
 
     def handle_change(room_value: str, name_value: str) -> str:
         """«Αλλαγή…» του παραθύρου και ``--request-change``: ανάλογα με την κατάσταση."""

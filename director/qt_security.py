@@ -15,18 +15,20 @@ from shared.room_names import room_title, short_room
 
 from PySide6.QtCore import QRegularExpression, QSize, Qt, QTimer
 from PySide6.QtGui import QAction, QColor, QFontDatabase, QPalette, QRegularExpressionValidator
-from PySide6.QtWidgets import (QApplication, QFrame, QGraphicsDropShadowEffect, QProxyStyle, QStyle, QGridLayout, QHBoxLayout, QInputDialog, QLabel,
+from PySide6.QtWidgets import (QApplication, QCheckBox, QDialog, QFrame, QGraphicsDropShadowEffect, QProxyStyle, QStyle, QGridLayout, QHBoxLayout, QInputDialog, QLabel,
                                QLineEdit, QMenu,
                                QMessageBox, QPushButton, QScrollArea, QSizePolicy,
                                QStackedWidget, QToolButton, QVBoxLayout, QWidget)
 
 from director.qt_gui import (ElidedLabel, SplitHandle, StatusDot, _repolish, fit_tab_text,
                              load_layout_settings, px, save_layout_settings)
-from director.security import (CODE_LENGTH, KIND_CHANGE, TAG_CHANGE,
+from director.security import (CLONE_NAME_HINT, CODE_LENGTH, KIND_CHANGE, KIND_CLONE,
+                               NEW_IDENTITY, SPONSOR_TAGS, TAG_CHANGE, new_identity_action,
                                TEXT_CHANGES_PRIMARY_ONLY, TEXT_PRIMARY_ONLY,
                                ComputerView, Decision, RequestView, RoleStatus, RoomView,
                                SecurityModel, computers_text)
 from director.notices import duplicate_tooltip
+from director.qt_maintenance import _Dialog, _line_edit
 from shared.ui import icons, theme
 
 PAGE_TITLE = "Ασφάλεια"
@@ -160,6 +162,8 @@ class RequestRow(QFrame):
     αποτέλεσμα δεξιά, δύο πεδία Αίθουσα/Υπολογιστής που διορθώνονται πριν από την
     έγκριση, και πεδίο κωδικού που γεμίζει αριστερά με Έγκριση/Απόρριψη τέρμα δεξιά.
     Αλλαγή (``#mgr-change``): ετικέτα «Αλλαγή», παλιό σε γκρι, «→ νέο» έντονο, χωρίς κωδικό.
+    Κλώνος / νέα ταυτότητα (5C3, ``#mgr-clones``): ετικέτα και «του Αίθουσα · PC» σε γκρι,
+    πεδία Αίθουσα/Υπολογιστής (στον κλώνο το όνομα κενό), χωρίς κωδικό.
     """
 
     def __init__(self, request: RequestView, on_approve: Callable[[str, str], None],
@@ -168,6 +172,8 @@ class RequestRow(QFrame):
         self.setObjectName("card")
         self.request = request
         self.change = request.kind == KIND_CHANGE
+        #: 5C3: κλώνος ή νέα ταυτότητα (σύσταση εγκεκριμένης ταυτότητας).
+        self.sponsored = request.kind in SPONSOR_TAGS
         self.final = False
         layout = QVBoxLayout(self)
         layout.setContentsMargins(px(14), px(10), px(14), px(11))
@@ -184,6 +190,14 @@ class RequestRow(QFrame):
             self.tag = _label(TAG_CHANGE, "requestTag")
             top.addWidget(self.tag, 0, Qt.AlignmentFlag.AlignVCenter)
             top.addWidget(self.title, 1)
+        elif self.sponsored:
+            self.tag = _label(SPONSOR_TAGS[request.kind], "requestTag")
+            self.origin = ElidedLabel(f"του {request.origin_title}" if request.origin_title
+                                      else "")
+            self.origin.setObjectName("requestOld")
+            top.addWidget(self.tag, 0, Qt.AlignmentFlag.AlignVCenter)
+            top.addWidget(self.origin, 1)
+            self.title.hide()
         else:
             # Ο τίτλος εμφανίζεται μόνο όταν κλείσει το αίτημα, στη θέση των πεδίων.
             self.title.hide()
@@ -206,12 +220,20 @@ class RequestRow(QFrame):
             self.meta.setWordWrap(True)
             layout.addWidget(self.meta)
         else:
+            if self.sponsored:
+                self.meta.setWordWrap(True)
+                layout.addWidget(self.meta)
+                layout.addWidget(self.title)
             self.fields = QWidget()
             fields = QHBoxLayout(self.fields)
             fields.setContentsMargins(0, 0, 0, 0)
             fields.setSpacing(px(8))
             self.room_edit = self._field(request.room, "Αίθουσα")
-            self.name_edit = self._field(request.name, "Υπολογιστής")
+            # Κλώνος: το όνομα το γράφει ο χρήστης (mockup #mgr-clones).
+            self.name_edit = self._field("" if request.kind == KIND_CLONE else request.name,
+                                         "Υπολογιστής")
+            if request.kind == KIND_CLONE:
+                self.name_edit.setPlaceholderText(CLONE_NAME_HINT)
             fields.addWidget(self.room_edit, 1)
             fields.addWidget(self.name_edit, 1)
             layout.addWidget(self.fields)
@@ -253,8 +275,9 @@ class RequestRow(QFrame):
         for button in (self.approve, self.deny):
             button.setIconSize(icon_size)
             button.setCursor(Qt.CursorShape.PointingHandCursor)
-        if self.change:
-            # Χωρίς κωδικό: εγκεκριμένος υπολογιστής μέσα από mTLS (phase5.md §6.4).
+        if self.change or self.sponsored:
+            # Χωρίς κωδικό: εγκεκριμένος υπολογιστής μέσα από mTLS (phase5.md §6.4) ή
+            # σύσταση εγκεκριμένης ταυτότητας (5C3).
             self.code.hide()
             actions.addStretch(1)
         else:
@@ -276,6 +299,10 @@ class RequestRow(QFrame):
         edit.setToolTip(label)
         edit.setMinimumWidth(px(60))
         return edit
+
+    def values(self) -> tuple[str, str]:
+        """Αίθουσα/όνομα όπως είναι στα πεδία (5C3: κλώνος / νέα ταυτότητα)."""
+        return self.room_edit.text().strip(), self.name_edit.text().strip()
 
     def edited(self) -> tuple[str | None, str | None]:
         """Αίθουσα/όνομα όπως είναι στα πεδία (None αν δεν άλλαξαν)."""
@@ -303,9 +330,12 @@ class RequestRow(QFrame):
                 name = self.name_edit.text().strip() or self.request.name
                 self.title.setText(room_title(room, name))
                 self.fields.hide()
-                self.meta.hide()
+                if not self.sponsored:
+                    self.meta.hide()
                 self.title.show()
             _repolish(self.title, final="true")
+        elif self.sponsored:
+            self.name_edit.setFocus()
         else:
             self.code.clear()
             self.code.setFocus()
@@ -313,7 +343,7 @@ class RequestRow(QFrame):
 
 def _content(request: RequestView) -> tuple:
     return (request.kind, request.room, request.name, request.old_room, request.old_name,
-            request.created)
+            request.created, request.origin_room, request.origin_name)
 
 
 class ComputerRow(QWidget):
@@ -343,6 +373,10 @@ class ComputerRow(QWidget):
         self.menu_button = _menu_button(
             f"Ενέργειες για {computer.name}",
             [self.actions["room"], self.actions["rename"], None, self.actions["revoke"]])
+        self._page = page
+        #: 5C3: «Νέα ταυτότητα στο <IP>…», μία ανά IP, μόνο σε διπλή ταυτότητα.
+        self.identity_actions: dict[str, QAction] = {}
+        self._identity_separator: QAction | None = None
         layout.addWidget(self.dot)
         # Το όνομα παίρνει τον επιπλέον χώρο· η κατάσταση στοιχίζεται δεξιά, δίπλα στο ⋮
         # (απόφαση χρήστη 22/11/2026)· το όνομα κόβεται με «…» μόνο όταν δεν χωρά.
@@ -376,6 +410,29 @@ class ComputerRow(QWidget):
             tip = duplicate_tooltip(computer.duplicate) if duplicate else ""
             for widget in (self.state, self.alert):
                 widget.setToolTip(tip)
+            self._set_identity_actions(computer.duplicate)
+
+    def _set_identity_actions(self, addresses: tuple[str, ...]) -> None:
+        """Στο ⋮, ανάμεσα σε διαχωριστικά πάνω από την «Ανάκληση…»: «Νέα ταυτότητα στο <IP>…»
+        για κάθε IP της διπλής ταυτότητας."""
+        menu = self.menu_button.menu()
+        for action in self.identity_actions.values():
+            menu.removeAction(action)
+            action.deleteLater()
+        self.identity_actions = {}
+        if self._identity_separator is not None:
+            menu.removeAction(self._identity_separator)
+            self._identity_separator = None
+        if not addresses:
+            return
+        revoke = self.actions["revoke"]
+        cid = self.computer.client_id
+        for ip in addresses:
+            action = QAction(_menu_icon("new_identity"), new_identity_action(ip), menu)
+            action.triggered.connect(lambda _checked=False, ip=ip: self._page.new_identity(cid, ip))
+            menu.insertAction(revoke, action)
+            self.identity_actions[ip] = action
+        self._identity_separator = menu.insertSeparator(revoke)
 
 
 class RoomHeader(QWidget):
@@ -438,6 +495,124 @@ class RoomCard(QFrame):
             layout.addWidget(row)
 
 
+# --- 5C3: διάλογοι «Νέα ταυτότητα» και ανάκληση με κλώνους ---------------------------------
+def _dialog_text(text: str, *, name: str | None = None) -> QLabel:
+    label = QLabel(text)
+    if name:
+        label.setObjectName(name)
+    label.setWordWrap(True)
+    label.setTextFormat(Qt.TextFormat.RichText)
+    return label
+
+
+def _esc(text: str) -> str:
+    return str(text).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
+class NewIdentityDialog(_Dialog):
+    """«Νέα ταυτότητα στο <IP>» (mockup ``#mgr-confirm``): προσυμπληρωμένα πεδία,
+    προεπιλογή «Άκυρο»."""
+
+    def __init__(self, computer: ComputerView, ip: str, parent=None):
+        super().__init__(f"{NEW_IDENTITY} στο {ip}", parent)
+        body = self.body
+        body.addWidget(_dialog_text(
+            f"Ο υπολογιστής στη διεύθυνση <b>{_esc(ip)}</b>, που τώρα συνδέεται ως "
+            f"<b>{_esc(room_title(computer.room, computer.name))}</b>, θα αποσυνδεθεί, θα "
+            "πάρει νέα ταυτότητα και θα στείλει νέο αίτημα εγγραφής με αυτά τα στοιχεία:"))
+        row = QHBoxLayout()
+        row.setSpacing(px(12))
+        self.room = _line_edit()
+        self.room.setText(computer.room)
+        self.room.setMaxLength(64)
+        self.name = _line_edit()
+        self.name.setText(computer.name)
+        self.name.setMaxLength(64)
+        for label, edit in (("Αίθουσα", self.room), ("Υπολογιστής", self.name)):
+            column = QVBoxLayout()
+            column.setSpacing(px(4))
+            caption = QLabel(label)
+            caption.setObjectName("fieldLabel")
+            column.addWidget(caption)
+            column.addWidget(edit)
+            row.addLayout(column, 1)
+        body.addLayout(row)
+        body.addWidget(_dialog_text(
+            "Το αίτημα έρχεται από την ήδη πιστοποιημένη σύνδεση, οπότε εγκρίνεται εδώ "
+            "<b>χωρίς κωδικό</b>."))
+        others = [other for other in computer.duplicate if other != ip]
+        if others:
+            body.addWidget(_dialog_text(
+                f"Ο άλλος υπολογιστής ({_esc(', '.join(others))}) συνεχίζει κανονικά.",
+                name="small"))
+        self.error = _dialog_text("", name="warnText")
+        self.error.hide()
+        body.addWidget(self.error)
+        self.cancel, self.accept_button = self.footer(NEW_IDENTITY)
+        self.accept_button.setIcon(icons.icon("new_identity", theme.WHITE, size=px(theme.ICON)))
+        self.accept_button.setIconSize(QSize(px(theme.ICON), px(theme.ICON)))
+        self.cancel.setDefault(True)
+        self.cancel.setFocus()
+        self.accept_button.clicked.connect(self._accept)
+
+    def _accept(self) -> None:
+        from shared.change_request import ChangeRequestError, clean
+        try:
+            clean(self.room.text(), self.name.text())
+        except ChangeRequestError as exc:
+            self.error.setText(_esc(str(exc)))
+            self.error.show()
+            return
+        self.accept()
+
+    def values(self) -> tuple[str, str]:
+        return self.room.text().strip(), self.name.text().strip()
+
+
+class RevokeDialog(_Dialog):
+    """Ανάκληση υπολογιστή με κλώνους (mockup ``#mgr-revoke``): checkbox ξετσεκαρισμένο."""
+
+    def __init__(self, computer: ComputerView, derived: list[ComputerView], parent=None):
+        super().__init__(f"Ανάκληση {room_title(computer.room, computer.name)}", parent)
+        body = self.body
+        body.addWidget(_dialog_text("Ο υπολογιστής δεν θα μπορεί πλέον να συνδεθεί. Για να "
+                                    "ξαναμπεί χρειάζεται νέο κλειδί και νέα έγκριση."))
+        count = len(derived)
+        what = "του <b>1 κλώνου</b>" if count == 1 else f"των <b>{count} κλώνων</b>"
+        self.also = QCheckBox()
+        self.also.setChecked(False)
+        label = _dialog_text(f"Ανάκληση και {what} που εγκρίθηκαν με σύστασή του")
+        names = _dialog_text(_esc(_derived_names(derived)), name="small")
+        row = QHBoxLayout()
+        row.setSpacing(px(8))
+        row.addWidget(self.also, 0, Qt.AlignmentFlag.AlignTop)
+        texts = QVBoxLayout()
+        texts.setSpacing(px(2))
+        texts.addWidget(label)
+        texts.addWidget(names)
+        row.addLayout(texts, 1)
+        body.addLayout(row)
+        label.mousePressEvent = lambda _event: self.also.toggle()
+        self.cancel, self.accept_button = self.footer("Ανάκληση")
+        self.accept_button.setObjectName("dangerAction")
+        self.accept_button.setIcon(icons.icon("trash", theme.WHITE, size=px(theme.ICON),
+                                              stroke_width=theme.TRASH_ICON_STROKE))
+        self.accept_button.setIconSize(QSize(px(theme.ICON), px(theme.ICON)))
+        self.accept_button.style().unpolish(self.accept_button)
+        self.accept_button.style().polish(self.accept_button)
+        self.cancel.setDefault(True)
+        self.cancel.setFocus()
+        self.accept_button.clicked.connect(self.accept)
+
+
+def _derived_names(derived: list[ComputerView]) -> str:
+    """«C2627-Εργ · PC01, PC02 · C2627-Γ1 · Board2»: ανά αίθουσα."""
+    groups: dict[str, list[str]] = {}
+    for computer in derived:
+        groups.setdefault(short_room(computer.room), []).append(computer.name)
+    return " · ".join(f"{room} · {', '.join(names)}" for room, names in groups.items())
+
+
 class SecurityPage(QWidget):
     """Σελίδα «Ασφάλεια». `refresh()` καλείται από το παράθυρο όσο είναι ορατή.
 
@@ -451,7 +626,8 @@ class SecurityPage(QWidget):
                  warn: Callable[[str], None] | None = None,
                  layout_settings: Path | None = None,
                  identity: Callable[[], object] | None = None,
-                 role_card: QWidget | None = None, parent=None):
+                 role_card: QWidget | None = None,
+                 dialog_hook: Callable[[QDialog], bool] | None = None, parent=None):
         super().__init__(parent)
         # Κύριος/Εφεδρικός (set_role): στον Εφεδρικό κλειστές εγγραφές, χωρίς μενού ⋮.
         self.role: RoleStatus | None = None
@@ -470,6 +646,8 @@ class SecurityPage(QWidget):
         self.model = model
         self.clock = clock
         self.ask_text = ask_text or self._ask_text
+        #: 5C3: στις δοκιμές αντί για exec() των διαλόγων (όπως στη «Συντήρηση»).
+        self.dialog_hook = dialog_hook
         self.confirm = confirm or self._confirm
         self.warn = warn or self._warn
         self.request_rows: dict[str, RequestRow] = {}
@@ -767,6 +945,8 @@ class SecurityPage(QWidget):
             return
         if row.change:
             decision = self.model.approve_change(request_id)
+        elif row.sponsored:
+            decision = self.model.approve_sponsored(request_id, *row.values())
         else:
             room, name = row.edited()
             decision = self.model.approve(request_id, code, room=room, name=name)
@@ -838,11 +1018,36 @@ class SecurityPage(QWidget):
         computer = self._computer(client_id)
         if computer is None:
             return
+        derived = self.model.derived(client_id)
+        if derived:
+            # 5C3: προτείνει (ξετσεκαρισμένο) να ανακληθούν και οι κλώνοι του.
+            dialog = RevokeDialog(computer, derived, self)
+            if not self._show(dialog):
+                return
+            also = tuple(c.client_id for c in derived) if dialog.also.isChecked() else ()
+            self._apply(lambda: self.model.revoke(client_id, derived=also))
+            return
         question = (f"Ανάκληση του «{computer.name}» ({short_room(computer.room)});\n\n"
                     "Ο υπολογιστής αποσυνδέεται αμέσως. Για να ξαναμπεί χρειάζεται "
                     "νέα εγγραφή με νέο κλειδί.")
         if self.confirm("Ανάκληση υπολογιστή", question, "Ανάκληση"):
             self._apply(lambda: self.model.revoke(client_id))
+
+    def new_identity(self, client_id: str, ip: str) -> None:
+        """5C3: «Νέα ταυτότητα στο <IP>…» από το ⋮ (μόνο σε διπλή ταυτότητα)."""
+        computer = self._computer(client_id)
+        if computer is None:
+            return
+        dialog = NewIdentityDialog(computer, ip, self)
+        if not self._show(dialog):
+            return
+        room, name = dialog.values()
+        self._apply(lambda: self.model.new_identity(client_id, ip, room, name))
+
+    def _show(self, dialog) -> bool:
+        if self.dialog_hook is not None:
+            return bool(self.dialog_hook(dialog))
+        return dialog.exec() == QDialog.DialogCode.Accepted
 
     def _apply(self, action: Callable[[], object]) -> None:
         try:

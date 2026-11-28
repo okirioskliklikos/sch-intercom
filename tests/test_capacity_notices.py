@@ -8,7 +8,7 @@ from shared.ui.offscreen import use_offscreen
 use_offscreen()
 
 from director.broadcast import AudioBroadcaster, MAX_CLIENTS
-from director.notices import (DUPLICATE_COMMAND, TEXT_DUPLICATE_STATE, TEXT_SHOW,
+from director.notices import (TEXT_DUPLICATE_STATE, TEXT_SHOW,
                               duplicate_html, duplicate_tooltip, full_html)
 from director.security import ComputerView
 from tests.test_security_page import FakeBroadcaster, SecurityFixture, _MicBroadcaster
@@ -47,8 +47,8 @@ class TextTests(unittest.TestCase):
         self.assertTrue(text.startswith("Ίδια ταυτότητα σε 2 υπολογιστές: <b>C2627-Γ1 · Board1</b> "
                                         "(192.168.1.21, 192.168.1.47)<br>"))
         self.assertIn("Στον έναν από τους δύο:", text)
-        self.assertIn(DUPLICATE_COMMAND, text)
-        self.assertIn("και νέα έγκριση", text)
+        self.assertIn("«Νέα ταυτότητα στο &lt;IP&gt;» από το ⋮ του υπολογιστή και νέα έγκριση",
+                      text)
         self.assertIsNone(duplicate_html([]))
 
     def test_tooltip_and_state(self):

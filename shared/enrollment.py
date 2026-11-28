@@ -50,6 +50,11 @@ REQUEST_TTL = 24 * 3600  # απόφαση χρήστη: τα αιτήματα ι
 NETWORK_TIMEOUT = 8
 PENDING_FILE_VERSION = 1
 MAX_CODE_ATTEMPTS = 3  # απόφαση χρήστη: 3 προσπάθειες κωδικού ανά αίτημα
+#: 5C3: αίτημα με σύσταση της παλιάς ταυτότητας (phase5.md §6.6, §6.7). Εγκρίνεται χωρίς
+#: κωδικό όσο η παλιά ταυτότητα είναι εγκεκριμένη· αλλιώς κανονικά, με κωδικό.
+SPONSOR_CLONE = "clone"   # ο Client κατάλαβε μόνος του ότι είναι αντίγραφο (4.3C1)
+SPONSOR_RESET = "reset"   # «Νέα ταυτότητα στο <IP>» από τον Director (με token)
+SPONSOR_KINDS = (SPONSOR_CLONE, SPONSOR_RESET)
 
 
 class EnrollmentError(ValueError):
@@ -110,7 +115,7 @@ def _name(value: str) -> str:
 def _unsigned_request(request: dict) -> dict:
     expected = {"type", "version", "request_id", "client_id", "room", "name",
                 "cert_pem", "client_nonce"}
-    if not isinstance(request, dict) or set(request) != expected | {"proof"}:
+    if not isinstance(request, dict) or set(request) - {"sponsor"} != expected | {"proof"}:
         raise EnrollmentError("Invalid enrollment fields")
     if request["type"] != "enroll" or type(request["version"]) is not int or request["version"] != PROTOCOL:
         raise EnrollmentError("Unsupported enrollment version")
@@ -156,6 +161,49 @@ def make_request(client_id: str, room: str, name: str, cert: bytes,
         key.sign(canonical(unsigned), ec.ECDSA(hashes.SHA256()))).decode("ascii")}
 
 
+def _sponsor_payload(unsigned: dict, kind: str, origin: str, token: str) -> bytes:
+    return canonical({"type": "sponsor", "kind": kind, "origin": origin, "token": token,
+                      "request": unsigned})
+
+
+def make_sponsor(request: dict, kind: str, origin: str, token: str,
+                 encrypted_key: bytes, password: bytes) -> dict:
+    """5C3: προσθέτει στο αίτημα τη σύσταση της παλιάς ταυτότητας ``origin``.
+
+    Υπογράφεται με το παλιό κλειδί πάνω στο νέο αίτημα· δεν δίνει περισσότερη
+    εμπιστοσύνη από όση έχει ήδη όποιος κρατά αυτό το κλειδί (phase5.md §6.7).
+    """
+    if kind not in SPONSOR_KINDS:
+        raise EnrollmentError("Unknown sponsor kind")
+    unsigned = {k: v for k, v in request.items() if k not in ("proof", "sponsor")}
+    key = serialization.load_pem_private_key(encrypted_key, password=password)
+    if not isinstance(key, ec.EllipticCurvePrivateKey):
+        raise EnrollmentError("Expected ECDSA Client key")
+    proof = key.sign(_sponsor_payload(unsigned, kind, origin, token), ec.ECDSA(hashes.SHA256()))
+    return {**request, "sponsor": {"kind": kind, "origin": origin, "token": token,
+                                   "proof": base64.b64encode(proof).decode("ascii")}}
+
+
+def check_sponsor(request: dict, unsigned: dict, origin_cert_pem: str) -> dict:
+    """Ελέγχει μορφή και υπογραφή της σύστασης· επιστρέφει {kind, origin, token}."""
+    sponsor = request.get("sponsor")
+    try:
+        if not isinstance(sponsor, dict) or set(sponsor) != {"kind", "origin", "token", "proof"}:
+            raise ValueError
+        kind, origin, token = sponsor["kind"], sponsor["origin"], sponsor["token"]
+        if kind not in SPONSOR_KINDS or not isinstance(token, str) or len(token) > 64:
+            raise ValueError
+        if str(uuid.UUID(origin)) != origin or origin == unsigned["client_id"]:
+            raise ValueError
+        cert = x509.load_pem_x509_certificate(origin_cert_pem.encode("ascii"))
+        signature = base64.b64decode(sponsor["proof"], validate=True)
+        cert.public_key().verify(signature, _sponsor_payload(unsigned, kind, origin, token),
+                                 ec.ECDSA(hashes.SHA256()))
+    except (ValueError, KeyError, TypeError, AttributeError, InvalidSignature) as exc:
+        raise EnrollmentError("Invalid sponsor") from exc
+    return {"kind": kind, "origin": origin, "token": token}
+
+
 def sas_code(unsigned: dict, director_nonce: str) -> str:
     nonce = base64.b64decode(director_nonce, validate=True)
     if len(nonce) != 32:
@@ -166,7 +214,7 @@ def sas_code(unsigned: dict, director_nonce: str) -> str:
 
 class Pending:
     def __init__(self, request: dict, code: str, created: float, attempts: int = 0,
-                 edit: dict | None = None, amend_seq: int = 0):
+                 edit: dict | None = None, amend_seq: int = 0, sponsor: dict | None = None):
         self.request = request  # υπογεγραμμένο αίτημα (μαζί με proof)
         self.code = code
         self.created = created  # wall clock: τα αιτήματα επιβιώνουν επανεκκίνηση
@@ -175,6 +223,8 @@ class Pending:
         #: στην κάρτα). Το υπογεγραμμένο αίτημα και ο κωδικός μένουν ίδια.
         self.edit = edit
         self.amend_seq = amend_seq  # τελευταία διόρθωση από τον Client (όχι επανάληψη)
+        #: 5C3: ελεγμένη σύσταση {kind, origin, origin_room, origin_name} ή None.
+        self.sponsor = sponsor
 
     @property
     def expires(self) -> float:
@@ -275,6 +325,12 @@ class EnrollmentServer:
                 request, code, created = item["request"], item["code"], float(item["created"])
                 attempts = item.get("attempts", 0)
                 edit = item.get("edit")
+                sponsor = item.get("sponsor")
+                if sponsor is not None:
+                    if not isinstance(sponsor, dict) or set(sponsor) != {
+                            "kind", "origin", "origin_room", "origin_name"} or \
+                            sponsor["kind"] not in SPONSOR_KINDS:
+                        raise ValueError
                 amend_seq = item.get("amend_seq", 0)
                 if edit is not None:
                     if not isinstance(edit, dict) or set(edit) != {"room", "name"}:
@@ -292,7 +348,8 @@ class EnrollmentServer:
                 continue
             if created <= now < created + REQUEST_TTL:
                 self._pending[unsigned["request_id"]] = Pending(request, code, created,
-                                                                attempts, edit, amend_seq)
+                                                                attempts, edit, amend_seq,
+                                                                sponsor)
 
     def _save(self) -> None:
         """Ατομική εγγραφή· καλείται με κρατημένο το lock."""
@@ -302,7 +359,8 @@ class EnrollmentServer:
             {"request": p.request, "code": p.code, "created": p.created,
              "attempts": p.attempts,
              **({"edit": p.edit} if p.edit else {}),
-             **({"amend_seq": p.amend_seq} if p.amend_seq else {})}
+             **({"amend_seq": p.amend_seq} if p.amend_seq else {}),
+             **({"sponsor": p.sponsor} if p.sponsor else {})}
             for p in self._pending.values()]}
         path = self.pending_file
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -434,6 +492,7 @@ class EnrollmentServer:
                         return
                     unsigned = _unsigned_request(request)
                     request_id = unsigned["request_id"]
+                    sponsor = self._sponsor(request, unsigned) if "sponsor" in request else None
                     nonce = base64.b64encode(secrets.token_bytes(32)).decode("ascii")
                     code = sas_code(unsigned, nonce)
                     with self._lock:
@@ -450,7 +509,7 @@ class EnrollmentServer:
                                 del self._pending[rid]
                         full = len(self._pending) >= self.max_pending
                         if not full:
-                            pending = Pending(request, code, self.clock())
+                            pending = Pending(request, code, self.clock(), sponsor=sponsor)
                             self._pending[request_id] = pending
                         self._save()
                     if full:
@@ -459,15 +518,51 @@ class EnrollmentServer:
                         raise RequestsFullError("Too many pending requests")
                     send_message(stream, {"type": "queued", "request_id": request_id,
                                           "director_nonce": nonce,
-                                          "expires_at": int(pending.expires)})
+                                          "expires_at": int(pending.expires),
+                                          "sponsored": sponsor is not None})
                     # Ο SAS δεν εμφανίζεται ποτέ στον Manager: ο διαχειριστής πληκτρολογεί
                     # αυτόν που έγραψε από την οθόνη του Client.
+                    kind = {SPONSOR_CLONE: " (κλώνος του ", SPONSOR_RESET: " (νέα ταυτότητα του "
+                            }.get((sponsor or {}).get("kind"), "")
+                    if kind:
+                        kind += f"{sponsor['origin_room']} · {sponsor['origin_name']})"
                     self.log(f"[Εγγραφή] Νέο αίτημα {request_id[:8]} | {unsigned['room']} | "
-                             f"{unsigned['name']}")
+                             f"{unsigned['name']}{kind}")
         except (OSError, ssl.SSLError, EOFError, EnrollmentError, ValueError) as exc:
             self.log(f"[Εγγραφή] Απόρριψη {address[0]}: {exc}")
         finally:
             self._slots.release()
+
+    def _sponsor(self, request: dict, unsigned: dict) -> dict | None:
+        """5C3: ελεγμένη σύσταση ή None (τότε κανονικό αίτημα με κωδικό, όχι απόρριψη).
+
+        Ο ``trust.sponsor_entry`` δίνει την εγκεκριμένη εγγραφή της παλιάς ταυτότητας
+        (και ελέγχει το token της «Νέας ταυτότητας»)· ανακληθείσα δεν γίνεται δεκτή.
+        """
+        sponsor = request.get("sponsor")
+        try:
+            kind = sponsor["kind"]
+            origin = sponsor["origin"]
+            lookup = getattr(self.trust, "sponsor_entry", None)
+            if lookup is not None:
+                entry = lookup(kind, origin, sponsor.get("token", ""))
+            else:
+                entry = self.trust.registry.approved_entry(origin)
+            if entry is None:
+                raise EnrollmentError("Sponsor is not an approved Client")
+            check_sponsor(request, unsigned, entry["cert_pem"])
+        except (EnrollmentError, KeyError, TypeError, ValueError) as exc:
+            self.log(f"[Εγγραφή] Αίτημα {unsigned['request_id'][:8]}: η σύσταση δεν "
+                     f"έγινε δεκτή ({exc})· χρειάζεται κωδικός.")
+            return None
+        return {"kind": kind, "origin": origin, "origin_room": entry["room"],
+                "origin_name": entry.get("name") or ""}
+
+    def sponsor_valid(self, pending: Pending) -> bool:
+        """Η σύσταση ισχύει ακόμη: η παλιά ταυτότητα είναι εγκεκριμένη (όχι ανακληθείσα)."""
+        if not pending.sponsor:
+            return False
+        return self.trust.registry.approved_entry(pending.sponsor["origin"]) is not None
 
     def _amend(self, stream, message: dict) -> None:
         """5C2: ο Client διορθώνει αίθουσα/όνομα του αιτήματος που περιμένει (ίδιος κωδικός)."""
@@ -498,6 +593,17 @@ class EnrollmentServer:
             self._save()
 
     # ------------------------------------------------------------ απόφαση
+    def pending_details(self) -> list[dict]:
+        """Όπως ``pending()`` και με τη σύσταση (5C3): {request_id, room, name, expires,
+        sponsor (ή None), sponsored (ισχύει ακόμη)}."""
+        with self._lock:
+            self._purge()
+            items = sorted(self._pending.items(),
+                           key=lambda item: (item[1].room, item[1].name))
+            return [{"request_id": rid, "room": p.room, "name": p.name, "expires": p.expires,
+                     "sponsor": dict(p.sponsor) if p.sponsor else None,
+                     "sponsored": self.sponsor_valid(p)} for rid, p in items]
+
     def pending(self) -> list[tuple[str, str, str, float]]:
         """Εκκρεμή αιτήματα (ID, αίθουσα, όνομα, λήξη) χωρίς τον SAS.
 
@@ -527,6 +633,8 @@ class EnrollmentServer:
         Λάθος κωδικός μετρά προσπάθεια· μετά από ``MAX_CODE_ATTEMPTS`` λάθη το αίτημα
         απορρίπτεται (η συσκευή ζητά ξανά εγγραφή). Επιστρέφει αίθουσα/όνομα του
         αιτήματος για επιβεβαίωση στον διαχειριστή.
+        5C3: αίτημα με σύσταση εγκεκριμένης ταυτότητας εγκρίνεται χωρίς κωδικό και το
+        μητρώο κρατά από ποια ταυτότητα προήλθε (``origin``).
         """
         with self._lock:
             self._purge()
@@ -541,9 +649,10 @@ class EnrollmentServer:
                 _name(name)
             info = {"client_id": req["client_id"], "room": room or pending.room,
                     "name": name or pending.name}
+            sponsored = self.sponsor_valid(pending)
             try:
-                if approve and not (isinstance(code, str)
-                                    and hmac.compare_digest(code, pending.code)):
+                if approve and not sponsored and not (
+                        isinstance(code, str) and hmac.compare_digest(code, pending.code)):
                     pending.attempts += 1
                     remaining = MAX_CODE_ATTEMPTS - pending.attempts
                     if remaining <= 0:
@@ -551,8 +660,12 @@ class EnrollmentServer:
                     raise IncorrectCodeError(max(remaining, 0))
                 del self._pending[request_id]
                 if approve:
+                    extra = {"origin": pending.sponsor["origin"]} if sponsored else {}
                     self.trust.approve(req["client_id"], info["room"],
-                                       req["cert_pem"].encode("ascii"), name=info["name"])
+                                       req["cert_pem"].encode("ascii"), name=info["name"],
+                                       **extra)
+                    if sponsored:
+                        info["origin"] = pending.sponsor["origin"]
                 return info
             finally:
                 self._save()
@@ -598,7 +711,9 @@ def enroll_client(host: str, port: int, cafile: Path, server_name: str,
             if type(expires) is not int:
                 raise EnrollmentError("Invalid enrollment expiry")
             unsigned = {k: v for k, v in request.items() if k != "proof"}
+            unsigned.pop("sponsor", None)
             return {"code": sas_code(unsigned, reply["director_nonce"]),
-                    "request_id": request["request_id"], "expires_at": expires}
+                    "request_id": request["request_id"], "expires_at": expires,
+                    "sponsored": reply.get("sponsored") is True}
     finally:
         raw.close()
