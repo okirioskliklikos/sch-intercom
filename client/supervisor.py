@@ -440,6 +440,7 @@ class Supervisor:
             remove_tree(folder)
             if not folder.exists():
                 self.log.info(f"[supervisor] Σβήστηκε η παλιά έκδοση {folder.name}")
+        purge_trash(self.layout.home)
 
     def step(self) -> None:
         """Ένας κύκλος του βρόχου (ξεχωριστό για τα tests)."""
@@ -585,6 +586,7 @@ class Supervisor:
             self._open_control()
             self.log.info(f"[supervisor] Εκκίνηση (PID {os.getpid()}, φάκελος {self.layout.home})")
             self.recover_trial()
+            purge_trash(self.layout.home)
             while not self._stop.is_set():
                 self.step()
                 self._wake.wait(poll)
@@ -601,16 +603,48 @@ class Supervisor:
             self.close()
 
 
+TRASH_DIR = "trash"
+
+
 def remove_tree(path: Path, *, timeout: float = 5.0) -> bool:
     """Σβήσιμο φακέλου έκδοσης. Στα Windows τα αρχεία μιας διεργασίας που μόλις
-    τερματίστηκε ελευθερώνονται λίγο αργότερα: νέες προσπάθειες έως ``timeout``."""
+    τερματίστηκε ελευθερώνονται λίγο αργότερα: νέες προσπάθειες έως ``timeout``.
+
+    Ό,τι δεν σβήνεται (π.χ. hard link σε .dll που χρησιμοποιεί η έκδοση που τρέχει: τα
+    Windows δεν σβήνουν όνομα αρχείου που είναι φορτωμένο ως image, αλλά επιτρέπουν τη
+    μετονομασία) μεταφέρεται στο ``trash`` δίπλα στο ``versions`` και σβήνεται αργότερα
+    (``purge_trash``). Δεν πιάνει επιπλέον χώρο: είναι τα ίδια δεδομένα."""
     import shutil
+    path = Path(path)
     deadline = time.monotonic() + timeout
     while True:
         shutil.rmtree(path, ignore_errors=True)
-        if not Path(path).exists() or time.monotonic() >= deadline:
-            return not Path(path).exists()
+        if not path.exists():
+            return True
+        if time.monotonic() >= deadline:
+            break
         time.sleep(0.25)
+    trash = path.parent.parent / TRASH_DIR
+    try:
+        trash.mkdir(exist_ok=True)
+        os.replace(path, trash / f"{path.name}-{time.time_ns()}")
+    except OSError:
+        return False
+    return not path.exists()
+
+
+def purge_trash(home: Path) -> None:
+    """Σβήνει ό,τι έμεινε στο ``trash`` (ό,τι είναι ακόμη σε χρήση μένει για την επόμενη φορά)."""
+    import shutil
+    trash = Path(home) / TRASH_DIR
+    if not trash.is_dir():
+        return
+    for entry in trash.iterdir():
+        shutil.rmtree(entry, ignore_errors=True)
+    try:
+        trash.rmdir()
+    except OSError:
+        pass
 
 
 def run_command(layout: Layout, version: str) -> str:

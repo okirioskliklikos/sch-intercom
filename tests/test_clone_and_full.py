@@ -147,15 +147,9 @@ class ManagerPinTests(unittest.TestCase):
 
 
 class DiscoveryCandidatesTests(unittest.TestCase):
-    def send(self, port, packets, delay=0.06):
-        def sender():
-            time.sleep(delay)
-            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
-                for packet in packets:
-                    sock.sendto(packet, ("127.0.0.1", port))
-        thread = threading.Thread(target=sender)
-        thread.start()
-        return thread
+    def send(self, port, packets):
+        from tests.fake_responder import FakeResponder
+        return FakeResponder(port, packets)
 
     def test_all_candidates_including_same_id_from_two_ports(self):
         port, real, fake = free_udp_port(), str(uuid.uuid4()), str(uuid.uuid4())

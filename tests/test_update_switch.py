@@ -191,3 +191,21 @@ class UpdaterSwitchTests(TempTest):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TrashTests(unittest.TestCase):
+    def test_undeletable_version_goes_to_trash_and_is_purged_later(self):
+        import tempfile
+        from client import supervisor as module
+        with tempfile.TemporaryDirectory() as temp:
+            home = Path(temp)
+            folder = home / "versions" / "1.0.2"
+            (folder / "python").mkdir(parents=True)
+            (folder / "python" / "python313.dll").write_bytes(b"in use")
+            with mock.patch("shutil.rmtree"):          # όπως .dll σε χρήση στα Windows
+                self.assertTrue(module.remove_tree(folder, timeout=0.1))
+            self.assertFalse(folder.exists())
+            trash = home / module.TRASH_DIR
+            self.assertEqual(len(list(trash.iterdir())), 1)
+            module.purge_trash(home)
+            self.assertFalse(trash.exists())

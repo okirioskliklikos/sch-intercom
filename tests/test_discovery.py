@@ -13,6 +13,7 @@ import uuid
 from shared.discovery import (BeaconWatcher, decode_beacon, decode_beacon_info,
                               encode_beacon, director_id, discover)
 from client.main import open_connection, run_with_reconnect
+from tests.fake_responder import FakeResponder
 
 # Τα open_connection είναι mock· αρκεί έγκυρο SSLContext για τον έλεγχο «TLS υποχρεωτικό».
 TLS = ssl.create_default_context()
@@ -89,13 +90,7 @@ class DiscoveryTests(unittest.TestCase):
         with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as test:
             test.bind(("127.0.0.1", 0))
             port = test.getsockname()[1]
-        def sender():
-            time.sleep(0.06)
-            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
-                sock.sendto(b"invalid", ("127.0.0.1", port))
-                sock.sendto(encode_beacon(identifier, 50555), ("127.0.0.1", port))
-        thread = threading.Thread(target=sender)
-        thread.start()
+        thread = FakeResponder(port, [b"invalid", encode_beacon(identifier, 50555)])
         try:
             self.assertEqual(discover(udp_port=port, timeout=0.3),
                              ("127.0.0.1", 50555, identifier))
@@ -107,13 +102,7 @@ class DiscoveryTests(unittest.TestCase):
         with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as test:
             test.bind(("127.0.0.1", 0))
             port = test.getsockname()[1]
-        def sender():
-            time.sleep(0.06)
-            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
-                for identifier in identifiers:
-                    sock.sendto(encode_beacon(identifier, 50555), ("127.0.0.1", port))
-        thread = threading.Thread(target=sender)
-        thread.start()
+        thread = FakeResponder(port, [encode_beacon(i, 50555) for i in identifiers])
         try:
             with self.assertRaisesRegex(ValueError, "πολλοί Directors"):
                 discover(udp_port=port, timeout=0.3)
@@ -121,15 +110,9 @@ class DiscoveryTests(unittest.TestCase):
             thread.join()
 
     def _send_beacons(self, port, beacons, delay=0.06):
-        """Στέλνει (identifier, tcp_port) beacons στο localhost από νέο thread."""
-        def sender():
-            time.sleep(delay)
-            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
-                for identifier, tcp_port in beacons:
-                    sock.sendto(encode_beacon(identifier, tcp_port), ("127.0.0.1", port))
-        thread = threading.Thread(target=sender)
-        thread.start()
-        return thread
+        """Ψεύτικος Manager που απαντά με (identifier, tcp_port) beacons."""
+        return FakeResponder(port, [encode_beacon(identifier, tcp_port)
+                                    for identifier, tcp_port in beacons])
 
     @staticmethod
     def _free_udp_port():
@@ -287,14 +270,8 @@ class OversizedPacketTests(unittest.TestCase):
 
     def test_discover_ignores_oversized_packet(self):
         identifier, port = str(uuid.uuid4()), self.free_port()
-        def sender():
-            time.sleep(0.06)
-            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
-                sock.sendto(b"\x00" * 600, ("127.0.0.1", port))
-                sock.sendto(encode_beacon(identifier, 50555), ("127.0.0.1", port))
         with mock.patch("shared.discovery.socket.socket", WindowsLikeSocket):
-            thread = threading.Thread(target=sender)
-            thread.start()
+            thread = FakeResponder(port, [b"\x00" * 600, encode_beacon(identifier, 50555)])
             try:
                 self.assertEqual(discover(udp_port=port, timeout=0.5),
                                  ("127.0.0.1", 50555, identifier))
@@ -404,18 +381,57 @@ class BroadcastSendersTests(unittest.TestCase):
         with mock.patch.object(discovery.socket, "getaddrinfo", return_value=fake):
             self.assertEqual(discovery.local_ipv4_addresses(), ["192.168.2.58"])
 
-    def test_real_announce_still_reaches_listener(self):
-        from shared.discovery import announce, discover
-        stop = threading.Event()
-        worker = threading.Thread(target=announce, args=(stop, str(uuid.uuid4()), 50599),
-                                  kwargs={"udp_port": 50598, "interval": 0.2,
-                                          "extra_ports": (50597,), "report": lambda *_: None},
-                                  daemon=True)
-        worker.start()
-        try:
-            found = discover(udp_port=50597, timeout=2.0)
-        finally:
-            stop.set()
-            worker.join(2)
+    def test_real_announce_answers_queries_and_feeds_watchers(self):
+        """Ο Client ρωτά και ο Manager απαντά· τα beacons φτάνουν ακόμη σε test watcher port."""
+        from shared.discovery import announce, decode_beacon, discover
+        identifier = str(uuid.uuid4())
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as watcher:
+            watcher.bind(("127.0.0.1", 50597))
+            watcher.settimeout(2.0)
+            stop = threading.Event()
+            worker = threading.Thread(target=announce, args=(stop, identifier, 50599),
+                                      kwargs={"udp_port": 50598, "interval": 0.2,
+                                              "extra_ports": (50597,),
+                                              "report": lambda *_: None},
+                                      daemon=True)
+            worker.start()
+            try:
+                found = discover(udp_port=50598, timeout=2.0)
+                beacon, _ = watcher.recvfrom(1024)
+            finally:
+                stop.set()
+                worker.join(2)
         self.assertIsNotNone(found)
-        self.assertEqual(found[1], 50599)
+        self.assertEqual(found[1:], (50599, identifier))
+        self.assertEqual(decode_beacon(beacon), (identifier, 50599))
+
+    def test_client_does_not_listen_on_discovery_port(self):
+        """Firewall (VM Windows 10, 28/11/2026): ο Client δεν δένεται στη θύρα discovery."""
+        from shared.discovery import discover_candidates
+        port = self._free_port()
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as other:
+            other.bind(("", port))   # χωρίς SO_REUSEADDR: θα αποτύγχανε αν ο Client την έπιανε
+            self.assertEqual(discover_candidates(udp_port=port, timeout=0.3), [])
+
+    def test_reply_limiter(self):
+        from shared.discovery import ReplyLimiter
+        now = [0.0]
+        limiter = ReplyLimiter(per_ip=2, total=3, clock=lambda: now[0])
+        self.assertEqual([limiter.allow("a") for _ in range(3)], [True, True, False])
+        self.assertTrue(limiter.allow("b"))
+        self.assertFalse(limiter.allow("c"))
+        now[0] = 1.0
+        self.assertTrue(limiter.allow("a"))
+
+    def test_query_format(self):
+        from shared.discovery import QUERY_BYTES, encode_query, is_query
+        self.assertEqual(len(encode_query()), QUERY_BYTES)
+        self.assertTrue(is_query(encode_query()))
+        self.assertFalse(is_query(encode_query()[:20]))
+        self.assertFalse(is_query(encode_beacon(str(uuid.uuid4()), 50555)))
+
+    @staticmethod
+    def _free_port():
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as test:
+            test.bind(("", 0))
+            return test.getsockname()[1]
