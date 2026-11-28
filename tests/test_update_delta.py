@@ -5,6 +5,7 @@ import hashlib
 import json
 from pathlib import Path
 import shutil
+import time
 import unittest
 from unittest import mock
 import uuid
@@ -123,6 +124,87 @@ class DeltaTests(ServerFixture, unittest.TestCase):
         self.assertEqual((new / "app" / "empty.txt").read_bytes(), b"")
         self.assertFalse((new / "app" / "intruder.py").exists())
         self.assertEqual(set(tree_hashes(new)), set(index.files))
+
+    def test_slow_local_work_does_not_keep_the_connection_open(self):
+        """VM Windows 10 (28/11/2026): η τοπική αντιγραφή/έλεγχος κρατούσε > 30 s και ο Manager
+        έκλεινε την αδρανή σύνδεση (WinError 10053). Τώρα γίνονται χωρίς ανοιχτή σύνδεση."""
+        from client import updater as module
+        blob = bytes(range(256)) * 1024
+        self.store.import_package(self.package("1.0.1", blob=blob))
+        self.open_server(idle_timeout=0.5)
+        updater = self.installed_client(blob=blob)
+        slow_prepare, slow_finish = updater._prepare, updater._finish
+
+        def prepare(*args):
+            time.sleep(1.2)
+            return slow_prepare(*args)
+
+        def finish(*args):
+            time.sleep(1.2)
+            return slow_finish(*args)
+        updater._prepare, updater._finish = prepare, finish
+        self.assertEqual(updater.run_once("127.0.0.1"), "ready")
+        self.assertTrue((updater.layout.version_dir("1.0.1") / "VERSION").is_file())
+        self.assertEqual(self.status.snapshot()[updater.client_id]["state"], "ready")
+        self.assertTrue(module.HASH_CACHE)
+
+    def test_unchanged_files_are_hard_links_and_hashes_are_cached(self):
+        from client import updater as module
+        blob = bytes(range(256)) * 4096
+        self.store.import_package(self.package("1.0.1", blob=blob))
+        self.open_server()
+        updater = self.installed_client(blob=blob)
+        self.assertEqual(updater.run_once("127.0.0.1"), "ready")
+        old, new = updater.layout.version_dir("1.0.0"), updater.layout.version_dir("1.0.1")
+        self.assertTrue((new / "app" / "blob.bin").samefile(old / "app" / "blob.bin"))
+        self.assertFalse((new / "VERSION").samefile(old / "VERSION"))
+        self.assertEqual((new / "VERSION").read_text(encoding="ascii").strip(), "1.0.1")
+        self.assertEqual((old / "VERSION").read_text(encoding="ascii").strip(), "1.0.0")
+        cache = json.loads((updater.layout.home / module.HASH_CACHE).read_text(encoding="utf-8"))
+        self.assertIn(str(new / "app" / "blob.bin"), cache)
+        # Επόμενη ενημέρωση από την 1.0.1: τα hashes της έρχονται από την cache.
+        self.store.import_package(self.package("1.0.2", blob=blob))
+        state = updater.layout.read_current()
+        state.update(current="1.0.1", previous="1.0.0")
+        from client.install_paths import atomic_write_json
+        atomic_write_json(updater.layout.current_file, state)
+        hashed = []
+        original = module._sha256
+
+        def counting(path):
+            hashed.append(Path(path).name)
+            return original(path)
+        with mock.patch.object(module, "_sha256", counting):
+            self.assertEqual(updater.run_once("127.0.0.1"), "ready")
+        self.assertNotIn("blob.bin", hashed)
+        newest = updater.layout.version_dir("1.0.2")
+        self.assertTrue((newest / "app" / "blob.bin").samefile(old / "app" / "blob.bin"))
+
+    def test_copy_when_hard_links_are_not_possible(self):
+        blob = bytes(range(256)) * 512
+        self.store.import_package(self.package("1.0.1", blob=blob))
+        self.open_server()
+        updater = self.installed_client(blob=blob)
+        sent = self.served()
+        with mock.patch("client.updater.os.link", side_effect=OSError("FAT32")):
+            self.assertEqual(updater.run_once("127.0.0.1"), "ready")
+        new, old = updater.layout.version_dir("1.0.1"), updater.layout.version_dir("1.0.0")
+        self.assertFalse((new / "app" / "blob.bin").samefile(old / "app" / "blob.bin"))
+        self.assertEqual(sorted(name for name, _ in sent), ["VERSION"])
+
+    def test_changed_running_file_is_not_linked(self):
+        """Αρχείο της έκδοσης που τρέχει με ίδιο μέγεθος αλλά άλλο περιεχόμενο: κατεβαίνει."""
+        blob = bytes(range(256)) * 512
+        self.store.import_package(self.package("1.0.1", blob=blob))
+        self.open_server()
+        updater = self.installed_client(blob=blob)
+        damaged = updater.layout.version_dir("1.0.0") / "app" / "blob.bin"
+        damaged.write_bytes(b"\0" * len(blob))
+        sent = self.served()
+        self.assertEqual(updater.run_once("127.0.0.1"), "ready")
+        self.assertEqual(sorted(name for name, _ in sent), ["VERSION", "app/blob.bin"])
+        self.assertEqual((updater.layout.version_dir("1.0.1") / "app" / "blob.bin").read_bytes(),
+                         blob)
 
     def test_forged_manifest_rejected_before_any_file(self):
         self.store.import_package(self.package("1.0.1", blob=b"b"))

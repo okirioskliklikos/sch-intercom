@@ -290,7 +290,57 @@ class Updater:
                 self.ready_version = version
                 return "ready"
             self._downloading = True
-            return self._fetch(stream, offer, installed)
+            try:
+                manifest = self._manifest(stream, offer, installed)
+            except PackageError as exc:
+                return self._rejected(stream, version, exc)
+            except _Transfer as exc:
+                return self._transfer_failed(stream, version, exc)
+        # Αντιγραφή/έλεγχος τοπικά χωρίς ανοιχτή σύνδεση: ο Manager κλείνει σύνδεση που μένει
+        # αδρανής 30 s, και σε αργό υπολογιστή αυτό κρατά περισσότερο (VM Windows 10, 28/11/2026).
+        return self._fetch(host, offer, manifest, installed)
+
+    def _session(self, host: str, offer: dict):
+        """Νέα σύνδεση για το ίδιο πακέτο (check → ίδιο offer), μετά από τοπική δουλειά."""
+        stream = self._connect(host)
+        try:
+            state = self.layout.read_current() or {"current": None, "failed": []}
+            send_message(stream, check_message(self.client_id, self.installed_version(state),
+                                               updater=UPDATER_VERSION,
+                                               protocol=CONNECTION_PROTOCOL,
+                                               failed=state["failed"]))
+            again = parse_offer(read_message(stream))
+            if again is None or again["version"] != offer["version"] or \
+                    again["sha256"] != offer["sha256"]:
+                raise Retry(0, f"Ο Manager άλλαξε πακέτο κατά τη λήψη της {offer['version']}")
+        except BaseException:
+            stream.close()
+            raise
+        return stream
+
+    def _report_new(self, host: str, offer: dict, state: str, detail: str) -> None:
+        """Αναφορά αποτυχίας σε νέα σύνδεση (best effort)."""
+        try:
+            with self._session(host, offer) as stream:
+                self._report(stream, state, offer["version"], detail)
+        except (OSError, EOFError, ValueError, Retry):
+            self._notify(state, offer["version"], detail)
+
+    def _rejected(self, stream, version: str, exc: Exception) -> str:
+        # Υπογραφή/περιεχόμενο: δεν ξανακατεβαίνει μέχρι να υπάρξει νεότερη έκδοση.
+        self._mark_failed(version)
+        self._cleanup(version)
+        self.log(f"[Ενημέρωση] Απορρίφθηκε η έκδοση {version}: {exc}")
+        if stream is not None:
+            self._report(stream, "failed", version, str(exc))
+        return "failed"
+
+    def _transfer_failed(self, stream, version: str, exc: Exception) -> str:
+        # Μπορεί να φταίει μόνο η μεταφορά: ξαναδοκιμάζεται στον επόμενο έλεγχο.
+        self.log(f"[Ενημέρωση] {exc}· νέα προσπάθεια στον επόμενο έλεγχο.")
+        if stream is not None:
+            self._report(stream, "failed", version, str(exc))
+        return "failed"
 
     # -- λήψη (5B2c: μόνο τα αρχεία που άλλαξαν) -------------------------------------
     def _work_dir(self, offer: dict) -> Path:
@@ -335,64 +385,102 @@ class Updater:
         check_version(manifest, installed, UPDATER_VERSION)
         return manifest
 
-    def _fetch(self, stream, offer: dict, installed: str) -> str:
+    def _fetch(self, host: str, offer: dict, manifest: dict, installed: str) -> str:
         version = offer["version"]
         try:
-            manifest = self._manifest(stream, offer, installed)
             work = self._work_dir(offer)
             tree = work / "tree"
-            needed, copied = self._prepare(tree, manifest, installed)
+            needed, linked, copied, trusted = self._prepare(tree, manifest, installed)
             total = sum(item["size"] for item in manifest["files"])
             need = sum(item["size"] for item in needed)
             count = len(manifest["files"])
             self.log(f"[Ενημέρωση] Λήψη έκδοσης {version}: {len(needed)} από {count} αρχεία "
-                     f"({_amount(need)} από {_amount(total)}), {copied} αντιγράφηκαν από "
-                     f"την {installed}.")
-            self._report(stream, "downloading", version,
-                         f"{len(needed)} από {count} αρχεία, {_amount(need)} από "
-                         f"{_amount(total)}")
-            done = 0
-            for item in needed:
-                self._download_file(stream, version, item, work, tree, done, need)
-                done += item["size"]
-            self._finish(tree, manifest, version)
+                     f"({_amount(need)} από {_amount(total)}), από την {installed}: "
+                     f"{linked} με hard link, {copied} αντιγράφηκαν.")
+            if needed:
+                with self._session(host, offer) as stream:
+                    self._report(stream, "downloading", version,
+                                 f"{len(needed)} από {count} αρχεία, {_amount(need)} από "
+                                 f"{_amount(total)}")
+                    done = 0
+                    for item in needed:
+                        self._download_file(stream, version, item, work, tree, done, need)
+                        done += item["size"]
+            self._finish(tree, manifest, version, trusted)
         except PackageError as exc:
-            # Υπογραφή/περιεχόμενο: δεν ξανακατεβαίνει μέχρι να υπάρξει νεότερη έκδοση.
-            self._mark_failed(version)
-            self._cleanup(version)
-            self.log(f"[Ενημέρωση] Απορρίφθηκε η έκδοση {version}: {exc}")
-            self._report(stream, "failed", version, str(exc))
+            self._rejected(None, version, exc)
+            self._report_new(host, offer, "failed", str(exc))
             return "failed"
         except _Transfer as exc:
-            # Μπορεί να φταίει μόνο η μεταφορά: ξαναδοκιμάζεται στον επόμενο έλεγχο.
-            self.log(f"[Ενημέρωση] {exc}· νέα προσπάθεια στον επόμενο έλεγχο.")
-            self._report(stream, "failed", version, str(exc))
+            self._transfer_failed(None, version, exc)
+            self._report_new(host, offer, "failed", str(exc))
             return "failed"
         self._cleanup(version)
         self.log(f"[Ενημέρωση] Η έκδοση {version} επαληθεύτηκε και είναι έτοιμη.")
-        self._report(stream, "ready", version)
         self.ready_version = version
+        try:
+            with self._session(host, offer) as stream:
+                self._report(stream, "ready", version)
+        except (OSError, EOFError, ValueError, Retry) as exc:
+            # Η έκδοση είναι έτοιμη στον δίσκο· ο Manager θα το μάθει στον επόμενο έλεγχο.
+            self.log(f"[Ενημέρωση] Η αναφορά «έτοιμη» δεν στάλθηκε: {exc}")
         return "ready"
 
-    def _prepare(self, tree: Path, manifest: dict, installed: str) -> tuple[list, int]:
-        """Τι λείπει: ό,τι δεν είναι ήδη σωστό στο staging ή ίδιο στην έκδοση που τρέχει."""
+    def _prepare(self, tree: Path, manifest: dict, installed: str) -> tuple[list, int, int, set]:
+        """Τι λείπει. Ό,τι υπάρχει ίδιο στην έκδοση που τρέχει γίνεται hard link (NTFS, χωρίς
+        admin: ούτε αντιγραφή ούτε διπλός χώρος)· αλλιώς αντιγραφή με έλεγχο SHA-256."""
         source = self.layout.version_dir(installed)
-        needed, copied = [], 0
+        needed, linked, copied, trusted = [], 0, 0, set()
+        cache = self._load_hash_cache()
+        used: dict = {}
         for item in manifest["files"]:
             target = _within(tree, item["path"])
+            if item["size"] == 0:
+                if not _matches(target, item):
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    target.write_bytes(b"")
+                    if not _matches(target, item):
+                        raise PackageError(f"Λάθος SHA-256 κενού αρχείου: {item['path']}")
+                continue
+            origin = _within(source, item["path"])
+            digest = _cached_sha256(origin, item["size"], cache, used)
+            if digest == item["sha256"] and _link(origin, target):
+                linked += 1
+                trusted.add(item["path"])
+                continue
             if _matches(target, item):
                 continue
-            if item["size"] == 0:
-                target.parent.mkdir(parents=True, exist_ok=True)
-                target.write_bytes(b"")
-                if not _matches(target, item):
-                    raise PackageError(f"Λάθος SHA-256 κενού αρχείου: {item['path']}")
-                continue
-            if _copy_verified(_within(source, item["path"]), target, item):
+            if _copy_verified(origin, target, item):
                 copied += 1
                 continue
             needed.append(item)
-        return needed, copied
+        self._hash_cache = used
+        return needed, linked, copied, trusted
+
+    # -- SHA-256 των αρχείων της έκδοσης που τρέχει (για να μην ξαναδιαβάζονται κάθε φορά) --
+    def _load_hash_cache(self) -> dict:
+        try:
+            data = json.loads((self.layout.home / HASH_CACHE).read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return {}
+        return data if isinstance(data, dict) else {}
+
+    def _save_hash_cache(self, tree: Path, manifest: dict, trusted) -> None:
+        """Κρατά τα hashes της νέας έκδοσης (hard links: ίδιο μέγεθος/mtime με την πηγή)."""
+        cache = dict(getattr(self, "_hash_cache", {}) or {})
+        for item in manifest["files"]:
+            if item["path"] not in trusted:
+                continue
+            path = _within(tree, item["path"])
+            try:
+                info = path.stat()
+            except OSError:
+                continue
+            cache[str(path)] = [info.st_size, info.st_mtime_ns, item["sha256"]]
+        try:
+            atomic_write_json(self.layout.home / HASH_CACHE, cache)
+        except OSError:
+            pass
 
     def _download_file(self, stream, version: str, item: dict, work: Path, tree: Path,
                        done: int, need: int) -> None:
@@ -444,8 +532,11 @@ class Updater:
         target.parent.mkdir(parents=True, exist_ok=True)
         os.replace(part, target)
 
-    def _finish(self, tree: Path, manifest: dict, version: str) -> None:
-        """Μόνο τα αρχεία του manifest, όλα σωστά· μετά μετονομασία σε versions\\<έκδοση>."""
+    def _finish(self, tree: Path, manifest: dict, version: str, trusted=frozenset()) -> None:
+        """Μόνο τα αρχεία του manifest, όλα σωστά· μετά μετονομασία σε versions\\<έκδοση>.
+
+        Τα ``trusted`` είναι hard links σε αρχεία της έκδοσης που τρέχει (ίδια bytes, ήδη
+        ελεγμένα στην εγκατάστασή της): ελέγχεται μόνο το μέγεθος, χωρίς ξανά SHA-256."""
         wanted = {item["path"] for item in manifest["files"]}
         tree.mkdir(parents=True, exist_ok=True)
         for path in sorted(tree.rglob("*"), reverse=True):
@@ -455,17 +546,29 @@ class Updater:
             elif path.is_dir() and not any(path.iterdir()):
                 path.rmdir()
         for item in manifest["files"]:
-            if not _matches(_within(tree, item["path"]), item):
+            path = _within(tree, item["path"])
+            if item["path"] in trusted:
+                try:
+                    good = path.is_file() and path.stat().st_size == item["size"]
+                except OSError:
+                    good = False
+            else:
+                good = _matches(path, item)
+            if not good:
                 raise _Transfer(f"Άλλαξε αρχείο στο staging: {item['path']}")
         destination = self.layout.version_dir(version)
         if destination.exists():
             shutil.rmtree(destination)   # μισή έκδοση χωρίς VERSION (π.χ. διακοπή ρεύματος)
         destination.parent.mkdir(parents=True, exist_ok=True)
         os.replace(tree, destination)
+        self._save_hash_cache(destination, manifest, trusted)
 
     def _cleanup(self, version: str) -> None:
         shutil.rmtree(self.staging / version, ignore_errors=True)
         (self.staging / f"{version}.json").unlink(missing_ok=True)
+
+
+HASH_CACHE = "hash-cache.json"
 
 
 class _Transfer(Exception):
@@ -500,6 +603,41 @@ def _matches(path: Path, item: dict) -> bool:
             _sha256(path) == item["sha256"]
     except OSError:
         return False
+
+
+def _link(source: Path, target: Path) -> bool:
+    """Hard link (NTFS, χωρίς admin). False αν δεν γίνεται (FAT32, άλλος δίσκος, δικαιώματα):
+    τότε αντιγραφή όπως πριν."""
+    try:
+        if target.exists():
+            return os.path.samefile(source, target)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        os.link(source, target)
+        return True
+    except OSError:
+        return False
+
+
+def _cached_sha256(path: Path, size: int, cache: dict, used: dict) -> str | None:
+    """SHA-256 αρχείου της έκδοσης που τρέχει· από την cache αν μέγεθος και mtime δεν άλλαξαν."""
+    try:
+        info = path.stat()
+    except OSError:
+        return None
+    if not path.is_file() or info.st_size != size:
+        return None
+    key = str(path)
+    entry = cache.get(key)
+    if isinstance(entry, list) and len(entry) == 3 and entry[0] == info.st_size and \
+            entry[1] == info.st_mtime_ns and isinstance(entry[2], str):
+        digest = entry[2]
+    else:
+        try:
+            digest = _sha256(path)
+        except OSError:
+            return None
+    used[key] = [info.st_size, info.st_mtime_ns, digest]
+    return digest
 
 
 def _copy_verified(source: Path, target: Path, item: dict) -> bool:

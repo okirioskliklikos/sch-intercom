@@ -982,6 +982,12 @@ class FieldTest:
         ok = f"\\versions\\{version}\\python\\pythonw.exe" in value and "client.supervisor" in value
         return ok, f"Run → {'versions' + chr(92) + version if ok else value or 'καμία τιμή'}"
 
+    @staticmethod
+    def verdict(checks: dict, detail: str) -> tuple[bool, str]:
+        """Αποτέλεσμα με όνομα για κάθε έλεγχο που απέτυχε (και όσους δεν τυπώνει η λεπτομέρεια)."""
+        failed = [name for name, value in checks.items() if not value]
+        return not failed, detail + (" · ΑΠΕΤΥΧΑΝ: " + ", ".join(failed) if failed else "")
+
     def processes_gone(self, info: dict) -> bool:
         return not pid_alive(info.get("client_pid")) and not pid_alive(info.get("supervisor_pid"))
 
@@ -1110,13 +1116,14 @@ class FieldTest:
                                        since=self.client_mark) is not None
         self.ch.call("announce", on=False)
         self.announce_end = time.monotonic()
-        return ok and seen is not None and early is None, \
+        return self.verdict({"εισαγωγή": ok, f"ο Client είδε την {GOOD}": seen is not None,
+                             "καμία εναλλαγή όσο παίζει": early is None},
             (f"εισαγωγή {'OK' if ok else output[-120:]}, ο Client είδε την {GOOD}: "
              f"{seen is not None}, εναλλαγή όσο παίζει: {'ΝΑΙ' if early else 'όχι'} "
-             f"(παύση λήψης {paused}, αναμονή εναλλαγής {waiting})")
+             f"(παύση λήψης {paused}, αναμονή εναλλαγής {waiting})"))
 
     def s08(self):
-        trial = self.sup_log.wait(f"Δοκιμή έκδοσης {GOOD}", since=self.sup_mark, timeout=120)
+        trial = self.sup_log.wait(f"Δοκιμή έκδοσης {GOOD}", since=self.sup_mark, timeout=300)
         after = time.monotonic() - self.announce_end
         installed = self.sup_log.wait(f"Η έκδοση {GOOD} εγκαταστάθηκε", since=self.sup_mark,
                                       timeout=self.m.trial_seconds + 60)
@@ -1132,13 +1139,15 @@ class FieldTest:
             needed, count = -1, -1
         manager = wait(lambda: (self.manager_update().get("state") == "installed"
                                 and self.manager_update().get("app") == GOOD), 60)
-        ok = (trial is not None and after >= 9 and installed is not None
-              and state.get("current") == GOOD and state.get("previous") == BASE and same
-              and needed == 1 and bool(manager))
-        return ok, (f"εναλλαγή {after:.0f} s μετά το τέλος της ανακοίνωσης, current "
+        return self.verdict({
+            "«Δοκιμή έκδοσης» στο log": trial is not None, "εναλλαγή ≥ 9 s μετά": after >= 9,
+            "«εγκαταστάθηκε» στο log": installed is not None, f"current {GOOD}":
+            state.get("current") == GOOD, f"previous {BASE}": state.get("previous") == BASE,
+            "ίδιο UUID": same, "1 αρχείο λήψης": needed == 1, "installed στον Manager": bool(manager)},
+            (f"εναλλαγή {after:.0f} s μετά το τέλος της ανακοίνωσης, current "
                     f"{state.get('current')}, previous {state.get('previous')}, κατέβηκαν "
                     f"{needed} από {count} αρχεία, ίδιο UUID {same}, Manager: "
-                    f"{self.manager_update().get('state')} {self.manager_update().get('app')}")
+                    f"{self.manager_update().get('state')} {self.manager_update().get('app')}"))
 
     def s09(self):
         files, files_text = self.files_ok(GOOD)
@@ -1182,7 +1191,7 @@ class FieldTest:
         joined_mark = self.mark()
         started = time.monotonic()
         ok, output = self.import_package(version)
-        trial = self.sup_log.wait(f"Δοκιμή έκδοσης {version}", since=mark, timeout=120)
+        trial = self.sup_log.wait(f"Δοκιμή έκδοσης {version}", since=mark, timeout=300)
         rollback = self.sup_log.wait(f"Rollback από την {version}", since=mark, timeout=timeout)
         self.timing(f"{version}: εισαγωγή → rollback", time.monotonic() - started)
         back = self.joined(joined_mark, timeout=120) is not None
@@ -1190,13 +1199,18 @@ class FieldTest:
                       and self.manager_update().get("available") == version, 60)
         state = self.current()
         gone = not self.layout.version_dir(version).exists()
-        good = ok and trial is not None and rollback is not None and reason in (rollback or "") \
-            and state.get("current") == GOOD and version in state.get("failed", []) and back \
-            and bool(failed) and gone
-        return good, (f"rollback «{(rollback or '—').split(': ', 1)[-1]}», current "
+        return self.verdict({
+            "εισαγωγή στον Director": ok, f"«Δοκιμή έκδοσης {version}» στο supervisor.log":
+            trial is not None, "rollback στο supervisor.log": rollback is not None,
+            f"αιτία «{reason}»": reason in (rollback or ""), f"current {GOOD}":
+            state.get("current") == GOOD, f"{version} στο failed του current.json":
+            version in state.get("failed", []), "ξανά συνδεδεμένος": back,
+            "failed στον Manager": bool(failed), "φάκελος σβήστηκε": gone},
+            f"rollback «{(rollback or '—').split(': ', 1)[-1]}», current "
                       f"{state.get('current')}, Manager: failed «"
                       f"{self.manager_update().get('detail', '')[:50]}», ξανά συνδεδεμένος {back}, "
-                      f"φάκελος {version} σβήστηκε {gone}")
+                      f"φάκελος {version} σβήστηκε {gone}, failed {state.get('failed')}"
+                      + ("" if ok else f", εισαγωγή: {output[-150:]}"))
 
     def s11(self):
         return self.trial_fails(CRASHING, "τερματίστηκε", 120)
@@ -1226,11 +1240,13 @@ class FieldTest:
         folders = self.folders()
         files, files_text = self.files_ok(FINAL)
         shown = self.m.display_version()
-        good = ok and installed is not None and bool(manager) and folders == [GOOD, FINAL] and \
-            files and (self.m.sim or shown == FINAL)
-        return good, (f"εκδόσεις στον δίσκο: {', '.join(folders)}, {files_text}, Manager: "
+        return self.verdict({
+            "εισαγωγή": ok, "«εγκαταστάθηκε» στο log": installed is not None,
+            "installed στον Manager": bool(manager), f"μόνο {GOOD}, {FINAL}": folders == [GOOD, FINAL],
+            "αρχεία σωστά": files, "«Εφαρμογές»": self.m.sim or shown == FINAL},
+            (f"εκδόσεις στον δίσκο: {', '.join(folders)}, {files_text}, Manager: "
                       f"{self.manager_update().get('state')} {self.manager_update().get('app')}, "
-                      f"«Εφαρμογές»: {shown if not self.m.sim else 'SKIP'}")
+                      f"«Εφαρμογές»: {shown if not self.m.sim else 'SKIP'}"))
 
     def s15(self):
         before = self.supervisor_status().get("client_pid")
@@ -1273,11 +1289,13 @@ class FieldTest:
         except (IndexError, ValueError):
             needed = -1
         version = wait(lambda: self.supervisor_status().get("version") == FINAL, 30)
-        ok = code == 0 and same and no_code and line is not None and installed is not None and \
-            bool(version) and needed == 1
-        return ok, (f"κωδικός εξόδου {code}, {seconds:.0f} s, ίδιο UUID {same}, συνδέθηκε χωρίς "
+        return self.verdict({
+            "κωδικός εξόδου 0": code == 0, "ίδιο UUID": same, "χωρίς νέο κωδικό": no_code,
+            "συνδέθηκε": line is not None, f"«{FINAL} εγκαταστάθηκε» στο log": installed is not None,
+            f"Client v{FINAL}": bool(version), "1 αρχείο λήψης": needed == 1},
+            (f"κωδικός εξόδου {code}, {seconds:.0f} s, ίδιο UUID {same}, συνδέθηκε χωρίς "
                     f"νέα έγκριση {line is not None}, αυτόματα σε {FINAL}: {installed is not None} "
-                    f"(κατέβηκαν {needed} αρχεία)")
+                    f"(κατέβηκαν {needed} αρχεία)"))
 
     def s18(self):
         info = self.supervisor_status()
