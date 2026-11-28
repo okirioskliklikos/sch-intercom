@@ -74,9 +74,13 @@ class Client:
             self.process.stop()
             self.process = None
 
-    def client_id(self) -> str:
-        return json.loads((self.device.dir / "client.json").read_text(
-            encoding="utf-8"))["client_id"]
+    def client_id(self) -> str | None:
+        """None όσο το client.json λείπει ή γράφεται (π.χ. στη μετακίνηση της παλιάς ταυτότητας)."""
+        try:
+            return json.loads((self.device.dir / "client.json").read_text(
+                encoding="utf-8"))["client_id"]
+        except (OSError, ValueError, KeyError):
+            return None
 
     def dump(self) -> dict | None:
         try:
@@ -199,9 +203,13 @@ class LiveTest:
 
     def s06(self):
         deadline = time.monotonic() + 30
-        while time.monotonic() < deadline and self.twin.client_id() == self.origin:
+        # Στα Windows το βήμα μπορεί να τρέξει ενώ ο Client μετακινεί τα παλιά αρχεία.
+        self.twin_id = ""
+        while time.monotonic() < deadline:
+            self.twin_id = self.twin.client_id() or ""
+            if self.twin_id and self.twin_id != self.origin:
+                break
             time.sleep(0.3)
-        self.twin_id = self.twin.client_id()
         archived = list(self.twin.device.dir.glob("previous-identity-*"))
         board_same = self.board.client_id() == self.origin
         ok = self.twin_id != self.origin and bool(archived) and board_same
