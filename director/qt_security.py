@@ -229,9 +229,9 @@ class RequestRow(QFrame):
             fields.setContentsMargins(0, 0, 0, 0)
             fields.setSpacing(px(8))
             self.room_edit = self._field(request.room, "Αίθουσα")
-            # Κλώνος: το όνομα το γράφει ο χρήστης (mockup #mgr-clones).
-            self.name_edit = self._field("" if request.kind == KIND_CLONE else request.name,
-                                         "Υπολογιστής")
+            # Κλώνος: το όνομα που έστειλε ο Client (παράθυρο ονόματος, 5C3)· ο χρήστης
+            # μπορεί να το αλλάξει. Κενό μόνο αν δεν έστειλε όνομα.
+            self.name_edit = self._field(request.name or "", "Υπολογιστής")
             if request.kind == KIND_CLONE:
                 self.name_edit.setPlaceholderText(CLONE_NAME_HINT)
             fields.addWidget(self.room_edit, 1)

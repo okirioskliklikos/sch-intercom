@@ -10,6 +10,7 @@ import os
 import queue
 import random
 from pathlib import Path
+import importlib.util
 import socket
 import ssl
 import threading
@@ -657,6 +658,9 @@ def build_parser() -> argparse.ArgumentParser:
     # Μόνο για το live test 5C1: τι δείχνουν tray/παράθυρο, σε JSON σε κάθε αλλαγή.
     parser.add_argument("--status-dump", type=Path, default=None, help=argparse.SUPPRESS)
     parser.add_argument("--show-window", action="store_true", help=argparse.SUPPRESS)
+    # 5C3: δευτερόλεπτα αναμονής ονόματος κλώνου πριν από την αυτόματη αποστολή (δοκιμές).
+    parser.add_argument("--clone-name-seconds", type=float, default=st.CLONE_NAME_SECONDS,
+                        help=argparse.SUPPRESS)
     return parser
 
 
@@ -829,11 +833,8 @@ def main() -> None:
         except OSError as exc:
             print(f"[Client] Δεν αποθηκεύτηκε το αίτημα για το παράθυρο: {exc}", flush=True)
         waiting = st.load_pending(pending_file, ident["client_id"])
-        if sponsored is not None and sponsored["kind"] == SPONSOR_CLONE:
-            # «Νέος υπολογιστής»: αίθουσα και όνομα τα ορίζει ο Director στην έγκριση.
-            status.update(room=None, name=None, enrollment=waiting)
-        else:
-            status.update(room=proposed_room, name=computer_name, enrollment=waiting)
+        # 5C3: και ο κλώνος δείχνει το όνομα που έστειλε· ο Director μπορεί να το αλλάξει.
+        status.update(room=proposed_room, name=computer_name, enrollment=waiting)
         until = time.strftime("%d/%m/%Y %H:%M", time.localtime(queued["expires_at"]))
         if sponsored is not None:
             source = room_title(sponsored["room"], sponsored["name"]) or sponsor["origin"][:8]
@@ -880,7 +881,24 @@ def main() -> None:
         print("Γράψτε τα και κλείστε. Μετά την έγκριση στον Manager ο Client "
               "συνδέεται μόνος του στην επόμενη εκκίνηση.", flush=True)
         return
-    if reset_label is not None:
+    # 5C3: κλώνος με γραφικό περιβάλλον· πρώτα όνομα στο παράθυρο (ή αυτόματα στη λήξη).
+    gui = (not args.no_tray and st.tray_supported()
+           and importlib.util.find_spec("PySide6") is not None)
+    naming: dict = {"wait": False, "event": threading.Event(), "values": None}
+    if reset_label == CLONED and clone_sponsor is not None and gui and \
+            args.clone_name_seconds > 0:
+        naming["wait"] = True
+        default_room = args.room or clone_sponsor.get("room") or ident["room"]
+        default_name = (args.computer_name or socket.gethostname())[:64]
+        status.update(room=None, name=None, naming={
+            "origin_room": clone_sponsor.get("room") or "",
+            "origin_name": clone_sponsor.get("name") or "",
+            "room": default_room, "name": default_name,
+            "deadline": time.time() + args.clone_name_seconds})
+        status.set_state(st.NAMING)
+        print(f"[Client] Αναμονή ονόματος στο παράθυρο· αυτόματη αποστολή σε "
+              f"{args.clone_name_seconds:g} s ({default_room} · {default_name}).", flush=True)
+    elif reset_label is not None:
         try:
             submit_enrollment(sponsor=clone_sponsor)
             print("[Client] Νέα αίτηση εγγραφής· μετά την έγκριση με τον κωδικό στον Manager "
@@ -1107,7 +1125,31 @@ def main() -> None:
             status.set_state(st.UNAPPROVED)
         start_updater()
 
+    def finish_naming() -> None:
+        """5C3: «Αποστολή» από το παράθυρο ή αυτόματα στη λήξη· μετά το αίτημα με σύσταση."""
+        info = status.snapshot().get("naming") or {}
+        naming["event"].wait(max(0.0, info.get("deadline", 0) - time.time()))
+        if stop.is_set():
+            return
+        chosen = naming["values"]
+        room_value, name_value = chosen or (info.get("room"), info.get("name"))
+        print("[Client] Όνομα κλώνου " + ("από το παράθυρο" if chosen else
+                                          "αυτόματα (λήξη αναμονής)")
+              + f": {room_value} · {name_value}", flush=True)
+        naming["wait"] = False
+        try:
+            submit_enrollment(room_value, name_value, sponsor=clone_sponsor)
+            status.update(naming=None)
+            status.set_state(st.PENDING)
+        except (OSError, EOFError, ValueError) as exc:
+            print(f"[Client] Η νέα αίτηση εγγραφής δεν καταχωρήθηκε: {exc}", flush=True)
+            status.update(naming=None, room=room_value, name=name_value)
+            changes.fail(room_value, name_value, str(exc))
+            status.set_state(st.UNAPPROVED)
+
     def network() -> None:
+        if naming["wait"]:
+            finish_naming()
         while not stop.is_set():
             epoch.clear()
             run_with_reconnect(args.host, args.port, session,
@@ -1133,7 +1175,10 @@ def main() -> None:
         """«Αλλαγή…» του παραθύρου και ``--request-change``: ανάλογα με την κατάσταση."""
         room_value, name_value = cr.check_room(room_value), cr.check_name(name_value)
         mode = st.change_mode(status.snapshot())
-        if mode == st.MODE_CHANGE:
+        if mode == st.MODE_NAME:
+            naming["values"] = (room_value, name_value)
+            naming["event"].set()
+        elif mode == st.MODE_CHANGE:
             changes.request(room_value, name_value)
         elif mode == st.MODE_AMEND:
             def work() -> None:
@@ -1159,6 +1204,7 @@ def main() -> None:
     def stop_network() -> None:
         """Από το GUI: τέλος βρόχου και κλείσιμο της τρέχουσας σύνδεσης (επαναφορά ήχου)."""
         stop.set()
+        naming["event"].set()
         epoch.set()
         close_connection()
 
@@ -1166,7 +1212,7 @@ def main() -> None:
                      args=(data_folder, lambda: ident["client_id"], handle_change, stop),
                      name="client-change-inbox", daemon=True).start()
     try:
-        if not args.no_tray and st.tray_supported():
+        if gui:
             try:
                 from client.qt_client import run_tray
             except ImportError as exc:

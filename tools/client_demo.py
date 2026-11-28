@@ -3,7 +3,7 @@
     python -m tools.client_demo [--state connected|pending|revoked|full|live] [--tab history|info]
     python -m tools.client_demo --screenshot out.png [--tray tray.png]
     python -m tools.client_demo --screenshot out.png --dialog change|scale   (5C2)
-    python -m tools.client_demo --state clone|new-identity   (5C3: αίτημα με σύσταση, χωρίς κωδικό)
+    python -m tools.client_demo --state clone|clone-naming|new-identity   (5C3: όνομα κλώνου / αίτημα με σύσταση)
 
 Χωρίς --screenshot ανοίγει το παράθυρο (και το εικονίδιο tray, αν υπάρχει)· τα δεδομένα
 είναι προσωρινά και σβήνονται στο κλείσιμο.
@@ -23,7 +23,7 @@ if __package__ in (None, ""):
 from client import status as st  # noqa: E402
 
 STATES = ("connected", "pending", "revoked", "full", "live", "update-failed",
-          "change-pending", "change-denied", "clone", "new-identity")
+          "change-pending", "change-denied", "clone", "clone-naming", "new-identity")
 FINGERPRINT = "84285ca1" + "3f" * 24 + "7e419d33"
 
 
@@ -38,7 +38,7 @@ def build(folder: Path, scenario: str, now: float) -> tuple[st.ClientStatus, st.
         (today + 8 * 3600 + 5 * 60, 38),
         (today + 10 * 3600 + 42 * 60, 72),
     ]
-    if scenario not in ("pending", "clone", "new-identity"):
+    if scenario not in ("pending", "clone", "clone-naming", "new-identity"):
         history_file.write_text("".join(
             json.dumps({"v": 1, "kind": "live", "start": start, "end": start + length}) + "\n"
             for start, length in events), encoding="utf-8")
@@ -51,10 +51,17 @@ def build(folder: Path, scenario: str, now: float) -> tuple[st.ClientStatus, st.
                                   "room": "C2627-Γ1", "name": "Board1"})
         status.set_state(st.PENDING)
         return status, history
+    if scenario == "clone-naming":
+        status.update(client_id="5e0b19c4-8d27-4c11-b6f0-2a9c3e7d4410", manager="192.168.1.10",
+                      room=None, name=None, naming={"origin_room": "C2627-Γ1", "origin_name": "Board1",
+                              "room": "C2627-Γ1", "name": "PC-ΓΡΑΦΕΙΟ",
+                              "deadline": now + 272})
+        status.set_state(st.NAMING)
+        return status, history
     if scenario in ("clone", "new-identity"):
         clone = scenario == "clone"
         status.update(client_id="5e0b19c4-8d27-4c11-b6f0-2a9c3e7d4410", manager="192.168.1.10",
-                      room=None if clone else "C2627-Γ1", name=None if clone else "Board1",
+                      room="C2627-Γ1", name="PC-ΓΡΑΦΕΙΟ" if clone else "Board1",
                       enrollment={"code": "482913", "expires_at": now + 86400 - 600,
                                   "room": "C2627-Γ1", "name": "Board1",
                                   "sponsor": {"kind": st.SPONSOR_CLONE if clone
@@ -107,6 +114,7 @@ def main() -> int:
         tray = ClientTray(status, history)
         window = tray.window
         tab = args.tab or ("info" if args.state in ("pending", "update-failed", "clone",
+                                                    "clone-naming",
                                                     "new-identity") or
                            args.state.startswith("change") or args.dialog else "history")
         window.show_tab("Πληροφορίες" if tab == "info" else "Ιστορικό")

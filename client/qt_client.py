@@ -219,6 +219,95 @@ class _CodeCard(QFrame):
         self.expires.setText(st.expiry_text(enrollment["expires_at"]))
 
 
+class _NamingCard(QFrame):
+    """5C3: κλώνος· Αίθουσα (από το πρότυπο) / Υπολογιστής (όνομα Windows) και «Αποστολή».
+
+    Αν κανείς δεν απαντήσει, ο Client στέλνει μόνος του στη λήξη (``deadline``)· εδώ μόνο η
+    αντίστροφη μέτρηση (timer 1 s μόνο όσο φαίνεται η κάρτα).
+    """
+
+    def __init__(self, on_send: Callable[[str, str], object] | None = None, parent=None):
+        super().__init__(parent)
+        self.setObjectName("card")
+        self.on_send = on_send
+        self.deadline: float | None = None
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(px(18), px(14), px(18), px(14))
+        layout.setSpacing(px(12))
+        fields = QHBoxLayout()
+        fields.setSpacing(px(12))
+        self.room = self._field(fields, "Αίθουσα")
+        self.name = self._field(fields, "Υπολογιστής")
+        layout.addLayout(fields)
+        self.error = QLabel()
+        self.error.setObjectName("warnText")
+        self.error.setWordWrap(True)
+        self.error.hide()
+        layout.addWidget(self.error)
+        foot = QHBoxLayout()
+        self.countdown = QLabel()
+        self.countdown.setObjectName("muted")
+        self.countdown.setTextFormat(Qt.TextFormat.RichText)
+        self.send = QPushButton(st.NAME_SEND)
+        self.send.setObjectName("primaryAction")
+        self.send.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.send.clicked.connect(self._send)
+        foot.addWidget(self.countdown, 1)
+        foot.addWidget(self.send)
+        layout.addLayout(foot)
+        self.timer = QTimer(self)
+        self.timer.timeout.connect(self.tick)
+        self.hide()
+
+    def _field(self, row: QHBoxLayout, label: str) -> QLineEdit:
+        box = QVBoxLayout()
+        box.setSpacing(px(4))
+        caption = QLabel(label)
+        caption.setObjectName("fieldLabel")
+        edit = QLineEdit()
+        edit.setObjectName("field")
+        edit.setMaxLength(64)
+        box.addWidget(caption)
+        box.addWidget(edit)
+        row.addLayout(box, 1)
+        return edit
+
+    def set_naming(self, naming: dict | None) -> None:
+        """Νέες προτεινόμενες τιμές μόνο σε νέα αναμονή (δεν σβήνει ό,τι γράφει ο χρήστης)."""
+        if naming is None:
+            self.deadline = None
+            self.timer.stop()
+            self.hide()
+            return
+        if naming.get("deadline") != self.deadline:
+            self.deadline = naming.get("deadline")
+            self.room.setText(naming.get("room") or "")
+            self.name.setText(naming.get("name") or "")
+            self.error.hide()
+            self.send.setEnabled(True)
+            self.name.setFocus()
+        self.show()
+        self.tick()
+        if not self.timer.isActive():
+            self.timer.start(1000)
+
+    def tick(self) -> None:
+        if self.deadline is not None:
+            self.countdown.setText(st.naming_countdown(self.deadline))
+
+    def _send(self) -> None:
+        try:
+            room, name = clean_values(self.room.text(), self.name.text())
+        except ValueError as exc:
+            self.error.setText(str(exc))
+            self.error.show()
+            return
+        self.error.hide()
+        self.send.setEnabled(False)
+        if self.on_send is not None:
+            self.on_send(room, name)
+
+
 class _HistoryView(QScrollArea):
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -525,7 +614,8 @@ class ClientWindow(QWidget):
     Ιστορικό/Πληροφορίες και «αίθουσα · PC» κάτω· δεξιά τίτλος ενότητας και κατάσταση."""
 
     def __init__(self, *, hide_on_close: bool = True,
-                 on_action: Callable[[str], None] | None = None):
+                 on_action: Callable[[str], None] | None = None,
+                 on_name: Callable[[str, str], object] | None = None):
         super().__init__()
         self.setObjectName("page")
         self.setWindowTitle(APP_NAME)
@@ -552,9 +642,11 @@ class ClientWindow(QWidget):
         self.alarm = _Bar("alarm")
         self.info_bar = _Bar("info")
         self.code_card = _CodeCard()
+        self.naming_card = _NamingCard(on_name)
         layout.addWidget(self.alarm)
         layout.addWidget(self.info_bar)
         layout.addWidget(self.code_card)
+        layout.addWidget(self.naming_card)
         self.range = QLabel(HISTORY_RANGE)
         self.range.setObjectName("small")
         self.range.setAlignment(Qt.AlignmentFlag.AlignRight)
@@ -650,6 +742,7 @@ class ClientWindow(QWidget):
         self.code_card.setVisible(show_code)
         if show_code:
             self.code_card.set_code(enrollment)
+        self.naming_card.set_naming(snap.get("naming") if snap["state"] == st.NAMING else None)
         self.history.render(st.history_groups(events))
         self.info.render(st.info_rows(snap))
 
@@ -677,6 +770,10 @@ class ClientWindow(QWidget):
             if not self.code_card.isHidden() else None,
             "code_expires": self.code_card.expires.text()
             if not self.code_card.isHidden() else None,
+            "naming": {"room": self.naming_card.room.text(),
+                       "name": self.naming_card.name.text(),
+                       "countdown": _plain(self.naming_card.countdown.text())}
+            if not self.naming_card.isHidden() else None,
             "tabs": [button.text() for button in self.tab_buttons.values()],
             "tab": self.current_tab,
             "history": self.history.rows,
@@ -738,7 +835,8 @@ class ClientTray(QObject):
         # συμπεριφέρεται σαν να υπάρχει tray.
         offscreen = app is not None and app.platformName() == "offscreen"
         self.tray_available = tray_available or offscreen
-        self.window = ClientWindow(hide_on_close=self.tray_available, on_action=self.action)
+        self.window = ClientWindow(hide_on_close=self.tray_available, on_action=self.action,
+                                   on_name=self.send_name)
         self.tray = QSystemTrayIcon()
         self.menu = QMenu()
         self.menu_title = QAction(self.menu)
@@ -819,6 +917,11 @@ class ClientTray(QObject):
                 enrollment.get("code") != self._opened_for:
             self._opened_for = enrollment.get("code")
             self.open_window()
+        # 5C3: κλώνος· το παράθυρο ανοίγει μόνο του στις Πληροφορίες για το όνομα.
+        naming = snap.get("naming") if snap["state"] == st.NAMING else None
+        if naming and f"naming-{naming.get('deadline')}" != self._opened_for:
+            self._opened_for = f"naming-{naming.get('deadline')}"
+            self.open_window(TAB_INFO)
         self.write_dump()
 
     # --- 5C2: «Αλλαγή…» -------------------------------------------------------------
@@ -850,6 +953,12 @@ class ClientTray(QObject):
             return None
         return self.on_change(room, name)
 
+    def send_name(self, room: str, name: str) -> object:
+        """5C3: «Αποστολή» της κάρτας ονόματος κλώνου (ίδιος δρόμος με το «Αλλαγή…»)."""
+        if self.on_change is None:
+            return None
+        return self.on_change(room, name)
+
     def scale_dialog(self) -> int | None:
         current = self.status.snapshot().get("scale")
         dialog = ScaleDialog(current, self.window)
@@ -867,7 +976,8 @@ class ClientTray(QObject):
         setup_application(ui_scale=scale)
         old = self.window
         visible, tab, position = old.isVisible(), old.current_tab, old.pos()
-        self.window = ClientWindow(hide_on_close=self.tray_available, on_action=self.action)
+        self.window = ClientWindow(hide_on_close=self.tray_available, on_action=self.action,
+                                   on_name=self.send_name)
         self.window.show_tab(tab)
         self.window.render(self.status.snapshot(), self.history.all())
         if visible:

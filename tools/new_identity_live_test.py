@@ -7,7 +7,8 @@
   από 127.0.0.2 μέσω TCP proxy: διπλή ταυτότητα. Ο Director στέλνει «Νέα ταυτότητα» μόνο στη
   σύνδεση της 127.0.0.2, και εγκρίνει το νέο αίτημα χωρίς κωδικό.
 - Ένα αντίγραφο «από άλλο υπολογιστή» (machine-binding αλλαγμένο) καταλαβαίνει ότι είναι
-  κλώνος και στέλνει αίτημα με σύσταση: έγκριση χωρίς κωδικό, με όνομα από τον Director.
+  κλώνος, ανοίγει το παράθυρο για όνομα («Αποστολή» = ``--request-change``) και στέλνει αίτημα
+  με σύσταση: έγκριση χωρίς κωδικό, με αίθουσα/όνομα που αλλάζει ο Director.
 - Ανάκληση του Board1 μαζί με όσους εγκρίθηκαν με σύστασή του· κλώνος ανακληθείσας
   ταυτότητας χρειάζεται πάλι κωδικό.
 
@@ -22,12 +23,15 @@ import json
 import os
 from pathlib import Path
 import shutil
+import socket
+import subprocess
 import sys
 import tempfile
 import time
 
+ROOT = Path(__file__).resolve().parents[1]
 if __package__ in (None, ""):
-    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+    sys.path.insert(0, str(ROOT))
 
 from client import status as st  # noqa: E402
 from shared.room_names import room_title  # noqa: E402
@@ -40,7 +44,8 @@ from shared.ui.offscreen import windows_fonts_dir  # noqa: E402
 TOTAL = 16
 NAME = "Board1"
 TWIN_NAME = "Board2"             # όνομα της νέας ταυτότητας του διπλού
-LAB_ROOM, LAB_NAME = "C2627-Εργ", "PC05"   # ο κλώνος παίρνει αίθουσα/όνομα στην έγκριση
+CLONE_NAME = "PC-07"             # όνομα από το παράθυρο του κλώνου («Αποστολή»)
+LAB_ROOM, LAB_NAME = "C2627-Εργ", "PC05"   # ο Director τα αλλάζει στην έγκριση
 PORTS = (51855, 51856, 51859, 51857, 51867)
 PROXY_PORT = 51860
 
@@ -61,10 +66,10 @@ class Client:
             args[args.index("--port") + 1] = str(self.port)
         return [*args, "--status-dump", str(self.dump_file)]
 
-    def start(self) -> Process:
+    def start(self, *extra: str) -> Process:
         self.stop()
         self.dump_file.unlink(missing_ok=True)
-        self.process = Process(["-m", "client.main", *self.args()],
+        self.process = Process(["-m", "client.main", *self.args(), *extra],
                                label=f"Client {self.device.name}", env=self.test.env())
         self.process.wait_for("Client ID:", timeout=40)
         return self.process
@@ -81,6 +86,15 @@ class Client:
                 encoding="utf-8"))["client_id"]
         except (OSError, ValueError, KeyError):
             return None
+
+    def request_change(self, room: str, name: str) -> bool:
+        """Όπως το «Αποστολή»/«Αλλαγή…» του παραθύρου (ίδιος δρόμος, inbox)."""
+        done = subprocess.run([sys.executable, "-m", "client.main",
+                               *self.device.args(self.test.m.cert), "--request-change",
+                               "--room", room, "--computer-name", name],
+                              cwd=ROOT, env=child_env(), capture_output=True, text=True,
+                              encoding="utf-8", errors="replace", timeout=60)
+        return done.returncode == 0
 
     def dump(self) -> dict | None:
         try:
@@ -174,7 +188,7 @@ class LiveTest:
         self.board.start()
         data = self.board.wait_dump(lambda d: d["state"] == st.CONNECTED)
         self.origin = self.board.client_id()
-        return approved and data is not None, f"Board1 εγκρίθηκε με κωδικό και συνδέθηκε"
+        return approved and data is not None, "Board1 εγκρίθηκε με κωδικό και συνδέθηκε"
 
     def s03(self):
         self.proxy = FreezableProxy(PROXY_PORT, PORTS[0], listen="127.0.0.1", source=SECOND_IP)
@@ -258,21 +272,37 @@ class LiveTest:
         mark = self.m.director.mark()
         process = self.lab.start()
         detected = process.wait_for("μοιάζει αντίγραφο", timeout=10) is not None
-        told = process.wait_for("Κλώνος του", "χωρίς κωδικό", timeout=30) is not None
-        line = self.m.director.wait_for("Νέο αίτημα", "κλώνος του", since=mark, timeout=30)
-        self.lab_short = self.short(line)
-        self.lab_id = self.lab.client_id()
-        ok = detected and told and line is not None and self.lab_id != self.origin
-        return ok, (f"ανίχνευση κλώνου {detected}, αίτημα με σύσταση στον Director "
-                    f"{line is not None}")
+        hostname = socket.gethostname()[:64]
+        data = self.lab.wait_dump(lambda d: d["state"] == st.NAMING
+                                  and d["window"]["naming"] is not None)
+        window = (data or {}).get("window") or {}
+        naming = window.get("naming") or {}
+        time.sleep(2)
+        no_request = not self.m.director.seen("Νέο αίτημα", since=mark)
+        ok = (detected and data is not None and window.get("visible")
+              and window.get("tab") == "Πληροφορίες"
+              and (naming.get("room"), naming.get("name")) == (ROOM, hostname)
+              and "Αποστέλλεται αυτόματα σε" in naming.get("countdown", "")
+              and window.get("code") is None and no_request)
+        return ok, (f"ανίχνευση {detected}, παράθυρο ανοιχτό στις Πληροφορίες "
+                    f"{window.get('visible')}, πεδία {naming.get('room')} · {naming.get('name')}, "
+                    f"«{naming.get('countdown')}», κανένα αίτημα ακόμη {no_request}")
 
     def s12(self):
+        mark = self.m.director.mark()
+        sent = self.lab.request_change(ROOM, CLONE_NAME)
+        line = self.m.director.wait_for("Νέο αίτημα", f"| {ROOM} | {CLONE_NAME}", "κλώνος του",
+                                        since=mark, timeout=30)
+        self.lab_short = self.short(line)
+        self.lab_id = self.lab.client_id()
+        expected = f"ως {room_title(ROOM, CLONE_NAME)}: αναμονή έγκρισης από τον Director"
         data = self.lab.wait_dump(lambda d: d["state"] == st.PENDING
-                                  and "Κλώνος του" in (d["window"]["info"] or ""))
-        ok = (data is not None and data["window"]["code"] is None
-              and data["window"]["title"] == st.NEW_COMPUTER
-              and "αναμονή ονόματος και έγκρισης από τον Director" in data["window"]["info"])
-        return ok, f"Client: «{data and data['window']['info']}», τίτλος «Νέος υπολογιστής»"
+                                  and expected in (d["window"]["info"] or ""))
+        ok = (sent and line is not None and data is not None
+              and data["window"]["code"] is None and data["window"]["naming"] is None
+              and self.lab_id not in (None, self.origin))
+        return ok, (f"«Αποστολή» {sent}, αίτημα με σύσταση {ROOM} · {CLONE_NAME} στον Director "
+                    f"{line is not None}, Client: «{data and data['window']['info']}»")
 
     def s13(self):
         mark = self.m.director.mark()
@@ -309,12 +339,16 @@ class LiveTest:
             client.stop()
         self.late = Client(self, self.copy("Late", other_machine=True))
         mark = self.m.director.mark()
-        process = self.late.start()
+        process = self.late.start("--clone-name-seconds", "4")
+        naming = self.late.wait_dump(lambda d: d["state"] == st.NAMING, timeout=20)
+        auto = process.wait_for("αυτόματα (λήξη αναμονής)", timeout=30)
         code_line = process.wait_for("Κωδικός:", timeout=30)
         refused = self.m.director.wait_for("η σύσταση δεν", since=mark, timeout=10)
         data = self.late.wait_dump(lambda d: d["state"] == st.PENDING and d["window"]["code"])
-        ok = code_line is not None and refused is not None and data is not None
-        return ok, ("κλώνος ανακληθείσας ταυτότητας: χωρίς σύσταση, με κωδικό "
+        ok = (naming is not None and auto is not None and code_line is not None
+              and refused is not None and data is not None)
+        return ok, (f"αναμονή ονόματος {naming is not None}, αυτόματη αποστολή στη λήξη "
+                    f"{auto is not None}, χωρίς σύσταση, με κωδικό "
                     f"{data and data['window']['code']}")
 
     def run(self) -> int:
@@ -330,12 +364,12 @@ class LiveTest:
             ("Client: μπάρα «Νέα ταυτότητα από τον Director», χωρίς κωδικό", self.s08),
             ("Έγκριση χωρίς κωδικό: σύνδεση με το νέο όνομα", self.s09),
             ("Τέλος διπλής ταυτότητας, origin στο μητρώο", self.s10),
-            ("Κλώνος από άλλον υπολογιστή: αίτημα με σύσταση", self.s11),
-            ("Client κλώνου: «Νέος υπολογιστής», χωρίς κωδικό", self.s12),
+            ("Κλώνος από άλλον υπολογιστή: παράθυρο για όνομα, κανένα αίτημα ακόμη", self.s11),
+            ("«Αποστολή»: αίτημα με σύσταση, χωρίς κωδικό", self.s12),
             ("Έγκριση κλώνου με όνομα από τον Director", self.s13),
             ("Ανάκληση Board1 μαζί με όσους σύστησε", self.s14),
             ("Οι τρεις υπολογιστές βλέπουν την ανάκληση", self.s15),
-            ("Κλώνος ανακληθείσας ταυτότητας: χρειάζεται κωδικό", self.s16),
+            ("Κλώνος ανακληθείσας ταυτότητας: αυτόματη αποστολή, χρειάζεται κωδικό", self.s16),
         ]
         try:
             for title, function in steps:

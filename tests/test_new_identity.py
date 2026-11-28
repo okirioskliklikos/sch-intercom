@@ -3,6 +3,7 @@ from pathlib import Path
 import socket
 import tempfile
 import threading
+import time
 import unittest
 import uuid
 
@@ -234,6 +235,11 @@ class ClientStatusTests(unittest.TestCase):
         _alarm, info = st.window_bars(snap)
         self.assertIn("Κλώνος του", info)
         self.assertIn("αναμονή ονόματος και έγκρισης από τον Director", info)
+        snap.update(room="C2627-Γ1", name="PC-ΓΡΑΦΕΙΟ")
+        self.assertEqual(_plain_text(st.window_bars(snap)[1]),
+                         "Κλώνος του C2627-Εργ · Πρότυπο ως C2627-Γ1 · PC-ΓΡΑΦΕΙΟ: "
+                         "αναμονή έγκρισης από τον Director")
+        snap.update(room=None, name=None)
         self.assertNotIn("123", st.tooltip(snap))
         snap["enrollment"]["sponsor"]["kind"] = "reset"
         self.assertEqual(st.window_bars(snap)[1],
@@ -273,15 +279,17 @@ class GuiTests(SponsorFixture, unittest.TestCase):
         page.refresh()
         return page
 
-    def test_clone_card_has_tag_origin_and_empty_name(self):
+    def test_clone_card_has_tag_origin_and_client_name(self):
         _client_id, rid, _queued = self.sponsored()
         page = self.page()
         row = page.request_rows[rid]
         self.assertTrue(row.sponsored)
         self.assertEqual(row.tag.text(), TAG_CLONE)
         self.assertIn("του C2627-Εργ · Πρότυπο", row.origin.text())
-        self.assertEqual(row.name_edit.text(), "")
+        # 5C3: το όνομα που έστειλε ο Client, αλλάζει πριν από την έγκριση.
+        self.assertEqual(row.name_edit.text(), "HOST-7")
         self.assertEqual(row.name_edit.placeholderText(), "π.χ. PC05")
+        row.name_edit.setText("")
         self.assertTrue(row.code.isHidden())
         row.approve.click()
         self.assertEqual(row.result.text(), TEXT_NAME_NEEDED)
@@ -367,3 +375,75 @@ class RegistryOriginTests(SponsorFixture, unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def _plain_text(text: str) -> str:
+    return text.replace("<b>", "").replace("</b>", "")
+
+
+class CloneNamingTests(unittest.TestCase):
+    """5C3 (mockup c3-clone-name): κλώνος περιμένει όνομα στο παράθυρο, αυτόματα στη λήξη."""
+
+    def naming_status(self, deadline: float = 1000.0) -> st.ClientStatus:
+        status = st.ClientStatus(clock=lambda: 700.0, client_id=str(uuid.uuid4()))
+        status.update(naming={"origin_room": "C2627-Γ1", "origin_name": "Board1",
+                              "room": "C2627-Γ1", "name": "PC-ΓΡΑΦΕΙΟ", "deadline": deadline})
+        status.set_state(st.NAMING)
+        return status
+
+    def test_texts_mode_and_rows(self):
+        snap = self.naming_status().snapshot()
+        self.assertEqual(st.status_label(snap), "Αναμονή ονόματος")
+        self.assertEqual(st.tone(snap), "wait")
+        self.assertEqual(st.change_mode(snap), st.MODE_NAME)
+        self.assertEqual(st.title(snap), st.NEW_COMPUTER)
+        self.assertEqual(_plain_text(st.window_bars(snap)[1]),
+                         "Αυτός ο υπολογιστής είναι αντίγραφο του C2627-Γ1 · Board1 και χρειάζεται "
+                         "δικό του όνομα. Ο Director τον εγκρίνει χωρίς κωδικό.")
+        rows = {row["label"]: row for row in st.info_rows(snap, now=700.0)}
+        self.assertNotIn("Κλίμακα", rows)
+        self.assertEqual(rows["Υπολογιστής"]["action"], "")
+        self.assertEqual(st.naming_countdown(1000.0, now=728.0),
+                         "Αποστέλλεται αυτόματα σε <b>4:32</b> με αυτά τα στοιχεία")
+        self.assertIn("<b>0:00</b>", st.naming_countdown(10.0, now=20.0))
+        self.assertEqual(st.CLONE_NAME_SECONDS, 300)
+
+    def test_window_opens_on_info_with_fields_and_sends(self):
+        from PySide6.QtWidgets import QApplication
+        from client.qt_client import ClientTray, setup_application
+        setup_application()
+        status = self.naming_status(deadline=time.time() + 300)
+        sent = []
+        tray = ClientTray(status, st.History(Path(tempfile.mkdtemp()) / "h.jsonl"),
+                          tray_available=True, on_change=lambda r, n: sent.append((r, n)))
+        QApplication.processEvents()
+        window = tray.window
+        self.assertTrue(window.isVisible())
+        self.assertEqual(window.current_tab, "Πληροφορίες")
+        dump = window.dump()
+        self.assertEqual((dump["naming"]["room"], dump["naming"]["name"]),
+                         ("C2627-Γ1", "PC-ΓΡΑΦΕΙΟ"))
+        self.assertRegex(dump["naming"]["countdown"],
+                         r"^Αποστέλλεται αυτόματα σε [45]:\d\d με αυτά τα στοιχεία$")
+        self.assertIsNone(dump["code"])
+        card = window.naming_card
+        card.name.setText("PC-07")
+        status.update(detail="x")                       # νέο render: δεν σβήνει ό,τι γράφτηκε
+        QApplication.processEvents()
+        self.assertEqual(card.name.text(), "PC-07")
+        card.name.setText("")
+        card.send.click()
+        self.assertFalse(card.error.isHidden())
+        self.assertEqual(sent, [])
+        card.name.setText("PC-07")
+        card.send.click()
+        self.assertEqual(sent, [("C2627-Γ1", "PC-07")])
+        self.assertFalse(card.send.isEnabled())
+        status.update(naming=None)
+        status.set_state(st.PENDING)
+        QApplication.processEvents()
+        self.assertTrue(card.isHidden())
+        self.assertFalse(card.timer.isActive())
+        tray.tray.hide()
+        window.hide_on_close = False
+        window.close()
