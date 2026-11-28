@@ -77,8 +77,12 @@ def load_settings(folder: Path | None = None) -> dict:
     data = _read_json(Path(folder or data_dir()) / SETTINGS_FILE) or {}
     host = data.get("director_host")
     device = data.get("device")
+    scale = data.get("ui_scale")
+    from shared.ui.theme import UI_SCALES
     return {"director_host": host if isinstance(host, str) and host else None,
-            "device": device if type(device) is int and device >= 0 else None}
+            "device": device if type(device) is int and device >= 0 else None,
+            # 5C2: κλίμακα παραθύρου Client (Πληροφορίες → Κλίμακα), None = προεπιλογή.
+            "ui_scale": scale if type(scale) is int and scale in UI_SCALES else None}
 
 
 def save_settings(folder: Path | None, **changes) -> dict:

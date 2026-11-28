@@ -19,10 +19,12 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
+from shared.room_names import room_title
 
 from shared.client_registry import RegistryError, _atomic_write
 from shared.enrollment import (MAX_PENDING, REQUEST_TTL, EnrollmentError,
                                IncorrectCodeError)
+from shared.change_request import ChangeRequestError
 from director.notices import TEXT_DUPLICATE_STATE
 from shared.identity import ROOM_PATTERN
 from shared.ui import theme
@@ -38,6 +40,7 @@ CODE_LENGTH = 6
 # σύντομα, με την εξήγηση σε tooltip.
 TEXT_APPROVED = "Εγκρίθηκε ✓"
 HINT_APPROVED = "Ο υπολογιστής θα συνδεθεί μόνος του."
+HINT_CHANGE_APPROVED = "Ο υπολογιστής παίρνει τα νέα στοιχεία αμέσως ή στην επόμενη σύνδεση."
 TEXT_DENIED = "Απορρίφθηκε"
 TEXT_EXPIRED = "Δεν υπάρχει πια"
 HINT_EXPIRED = "Το αίτημα έληξε ή απαντήθηκε."
@@ -230,6 +233,13 @@ def check_name(name: str) -> str:
 
 # ------------------------------------------------------------ δεδομένα σελίδας
 
+KIND_ENROLL = "enroll"
+#: 5C2: αίτημα αλλαγής αίθουσας/ονόματος από εγκεκριμένο υπολογιστή (χωρίς κωδικό).
+KIND_CHANGE = "change"
+TAG_CHANGE = "Αλλαγή"
+TEXT_OFFLINE = "εκτός σύνδεσης"
+
+
 @dataclass(frozen=True)
 class RequestView:
     request_id: str
@@ -237,6 +247,11 @@ class RequestView:
     name: str
     created: float
     expires: float
+    kind: str = KIND_ENROLL
+    old_room: str = ""
+    old_name: str = ""
+    #: Μόνο για αλλαγή: αν ο υπολογιστής είναι αυτή τη στιγμή συνδεδεμένος.
+    online: bool = True
 
     @property
     def short_id(self) -> str:
@@ -244,11 +259,23 @@ class RequestView:
 
     @property
     def title(self) -> str:
-        return f"{self.room} · {self.name}"
+        return room_title(self.room, self.name)
+
+    @property
+    def old_title(self) -> str:
+        return room_title(self.old_room, self.old_name)
+
+    @property
+    def key(self) -> str:
+        """Μοναδικό ανάμεσα σε εγγραφές και αλλαγές (το ID της αλλαγής είναι το UUID)."""
+        return f"{self.kind}:{self.request_id}"
 
     def meta(self, now: float) -> str:
-        return (f"ID {self.short_id} · {ago_text(now - self.created)} · "
+        text = (f"ID {self.short_id} · {ago_text(now - self.created)} · "
                 f"{expires_text(self.expires, now)}")
+        if self.kind == KIND_CHANGE and not self.online:
+            text += f" · {TEXT_OFFLINE}"
+        return text
 
 
 @dataclass(frozen=True)
@@ -362,17 +389,36 @@ class SecurityModel:
 
     # --- αιτήματα -----------------------------------------------------------
     def requests(self) -> list[RequestView]:
-        """Τα πιο πρόσφατα πρώτα. Ο κωδικός (SAS) δεν περιλαμβάνεται ποτέ."""
+        """Τα πιο πρόσφατα πρώτα. Ο κωδικός (SAS) δεν περιλαμβάνεται ποτέ.
+
+        5C2: μαζί και τα αιτήματα αλλαγής αίθουσας/ονόματος (``kind="change"``).
+        """
         items = [RequestView(rid, room, name, expires - REQUEST_TTL, expires)
                  for rid, room, name, expires in self.enrollment.pending()]
+        changes = getattr(self.trust, "changes", None)
+        if changes is not None:
+            online = {client_id for client_id, _room, active, _age
+                      in self.broadcaster.status_snapshot() if active}
+            items += [RequestView(r.client_id, r.room, r.name, r.created, r.expires,
+                                  KIND_CHANGE, r.old_room, r.old_name, r.client_id in online)
+                      for r in changes.pending()]
         return sorted(items, key=lambda r: (-r.created, r.request_id))
 
-    def approve(self, request_id: str, code: str) -> Decision:
+    def approve(self, request_id: str, code: str, *, room: str | None = None,
+                name: str | None = None) -> Decision:
+        """Έγκριση εγγραφής με κωδικό· 5C2: με αίθουσα/όνομα όπως διορθώθηκαν στην κάρτα."""
         code = code.strip()
         if not valid_code(code):
             return Decision(f"Ο κωδικός έχει {CODE_LENGTH} ψηφία", False, False)
         try:
-            self.enrollment.decide(request_id, code, approve=True)
+            if room is not None:
+                room = check_room(room)
+            if name is not None:
+                name = check_name(name)
+        except ValueError as exc:
+            return Decision(str(exc), False, False)
+        try:
+            self.enrollment.decide(request_id, code, approve=True, room=room, name=name)
         except IncorrectCodeError as exc:
             if exc.remaining <= 0:
                 return Decision(TEXT_REJECTED, False, True, HINT_REJECTED)
@@ -388,9 +434,24 @@ class SecurityModel:
             return self._failure(exc)
         return Decision(TEXT_DENIED, False, True)
 
+    def approve_change(self, client_id: str) -> Decision:
+        """5C2: ένα κλικ, χωρίς κωδικό· το μητρώο αλλάζει αμέσως."""
+        try:
+            self.trust.changes.decide(client_id, approve=True)
+        except (ChangeRequestError, RegistryError, ValueError) as exc:
+            return self._failure(exc)
+        return Decision(TEXT_APPROVED, True, True, HINT_CHANGE_APPROVED)
+
+    def deny_change(self, client_id: str) -> Decision:
+        try:
+            self.trust.changes.decide(client_id, approve=False)
+        except (ChangeRequestError, RegistryError, ValueError) as exc:
+            return self._failure(exc)
+        return Decision(TEXT_DENIED, False, True)
+
     @staticmethod
     def _failure(exc: Exception) -> Decision:
-        if "No active enrollment request" in str(exc):
+        if "No active enrollment request" in str(exc) or "Δεν υπάρχει ενεργό αίτημα" in str(exc):
             return Decision(TEXT_EXPIRED, False, True, HINT_EXPIRED)
         return Decision(f"Σφάλμα: {exc}", False, True)
 

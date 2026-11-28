@@ -10,8 +10,9 @@ import threading
 import time
 from collections.abc import Callable
 
-from shared.audio import (encode_frame, encode_control, encode_client_settings, MESSAGE_KEEPALIVE,
-                          MESSAGE_STREAM_STOP, MESSAGE_UPDATE_CHECK)
+from shared.audio import (encode_frame, encode_control, encode_client_settings,
+                          encode_change_status, MESSAGE_KEEPALIVE, MESSAGE_STREAM_STOP,
+                          MESSAGE_UPDATE_CHECK)
 from shared.control import (HEARTBEAT_TIMEOUT_SECONDS, KEEPALIVE_INTERVAL_SECONDS,
                             heartbeat_receiver)
 from shared.identity import validate_identity
@@ -37,7 +38,8 @@ class AudioBroadcaster:
     def __init__(self, *, max_clients: int = MAX_CLIENTS,
                  queue_blocks: int = MAX_CLIENT_PENDING_BLOCKS,
                  on_event: Callable[[str], None] | None = None,
-                 heartbeat_timeout: float = HEARTBEAT_TIMEOUT_SECONDS):
+                 heartbeat_timeout: float = HEARTBEAT_TIMEOUT_SECONDS,
+                 on_change_request: Callable[[str, str, str], dict | None] | None = None):
         if heartbeat_timeout <= 0:
             raise ValueError("heartbeat_timeout πρέπει να είναι θετικό")
         self.heartbeat_timeout = heartbeat_timeout
@@ -46,6 +48,8 @@ class AudioBroadcaster:
         self.max_clients = max_clients
         self.queue_blocks = queue_blocks
         self.on_event = on_event or (lambda message: None)
+        #: 5C2: (client_id, αίθουσα, όνομα) → απάντηση προς τον Client ({state, room, name}).
+        self.on_change_request = on_change_request
         self._lock = threading.Lock()
         self._sessions: dict[str, _ClientSession] = {}
         self._offline: dict[str, tuple[str, float]] = {}
@@ -170,7 +174,8 @@ class AudioBroadcaster:
                 f"δίσκος. Στον έναν: client --new-identity και νέα έγκριση.")
 
     def add_client(self, connection: socket.socket, client_id: str, room: str,
-                   address: object = "local", *, name: str | None = None) -> bool:
+                   address: object = "local", *, name: str | None = None,
+                   change_status: dict | None = None) -> bool:
         """Αναλαμβάνει το socket. Διπλό UUID αντικαθιστά την προηγούμενη σύνδεση."""
         validate_identity(client_id, room)
         with self._lock:
@@ -180,11 +185,15 @@ class AudioBroadcaster:
                 return False
             session = _ClientSession(client_id, room, connection, address,
                                      self.queue_blocks, self._remove_client,
-                                     self._record_heartbeat, self.heartbeat_timeout)
+                                     self._record_heartbeat, self.heartbeat_timeout,
+                                     on_change_request=self._change_request)
             session.selected = self._is_selected(session)
             if name is not None:
                 session.name = name
                 session.enqueue(encode_client_settings(room, name))
+            if change_status is not None:
+                # 5C2: σε κάθε σύνδεση ο Client μαθαίνει τι έγινε με το αίτημά του.
+                session.enqueue(encode_change_status(**change_status))
             self._sessions[client_id] = session
             self._offline.pop(client_id, None)
             self._full.pop(client_id, None)
@@ -243,6 +252,31 @@ class AudioBroadcaster:
             session.set_selected(self._is_selected(session))
             session.enqueue(frame)
 
+    def send_change_status(self, client_id: str, status: dict) -> bool:
+        """5C2: απόφαση για αίτημα αλλαγής προς τον Client, αν είναι συνδεδεμένος."""
+        frame = encode_change_status(**status)
+        with self._lock:
+            session = self._sessions.get(client_id)
+            if session is None:
+                return False
+            session.enqueue(frame)
+        return True
+
+    def _change_request(self, session: "_ClientSession", room: str, name: str) -> None:
+        """Από το νήμα ανάγνωσης του Client: αίτημα αλλαγής αίθουσας/ονόματος (v8)."""
+        with self._lock:
+            if self._sessions.get(session.client_id) is not session:
+                return
+        if self.on_change_request is None:
+            return
+        try:
+            status = self.on_change_request(session.client_id, room, name)
+        except ValueError as exc:
+            self.on_event(f"[Director] Αίτημα αλλαγής {session.client_id} δεν έγινε δεκτό: {exc}")
+            return
+        if status is not None:
+            session.enqueue(encode_change_status(**status))
+
     def request_update_check(self, client_ids=None) -> int:
         """Φάση 5B2: «κάνε CHECK ενημέρωσης τώρα» (None = όλοι). Επιστρέφει πόσοι το πήραν."""
         frame = encode_control(MESSAGE_UPDATE_CHECK)
@@ -294,8 +328,10 @@ class _ClientSession:
                  address: object, queue_blocks: int,
                  on_disconnect: Callable[["_ClientSession"], None],
                  on_heartbeat: Callable[["_ClientSession", float], None] | None = None,
-                 heartbeat_timeout: float = HEARTBEAT_TIMEOUT_SECONDS):
+                 heartbeat_timeout: float = HEARTBEAT_TIMEOUT_SECONDS,
+                 on_change_request: Callable[["_ClientSession", str, str], None] | None = None):
         self.client_id = client_id
+        self.on_change_request = on_change_request
         self.room = room
         self.name = ""
         self.connection = connection
@@ -357,7 +393,9 @@ class _ClientSession:
         try:
             heartbeat_receiver(self.connection, self.stopped,
                                lambda at: self.on_heartbeat(self, at),
-                               timeout=self.heartbeat_timeout)
+                               timeout=self.heartbeat_timeout,
+                               on_change_request=None if self.on_change_request is None
+                               else lambda room, name: self.on_change_request(self, room, name))
         except (OSError, EOFError, ValueError, TimeoutError):
             pass
         finally:

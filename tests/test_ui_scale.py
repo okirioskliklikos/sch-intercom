@@ -48,7 +48,7 @@ class ScaleMetricsTests(unittest.TestCase):
         self.assertEqual(theme.default_ui_scale("linux"), 100)
         self.assertEqual(theme.default_ui_scale("darwin"), 100)
         self.assertIn(theme.default_ui_scale(), theme.UI_SCALES)
-        self.assertEqual(theme.UI_SCALES, (80, 90, 100, 110, 125))
+        self.assertEqual(theme.UI_SCALES, (70, 80, 90, 100, 110, 125, 135))
 
 
 @unittest.skipUnless(HAVE_QT, "χρειάζεται PySide6")
@@ -147,7 +147,7 @@ class AppearanceTabTests(unittest.TestCase):
 
     def test_options_show_current_scale_without_restart_note(self):
         self.assertEqual([b.text() for b in self.page.scale_buttons.values()],
-                         ["80%", "90%", "100%", "110%", "125%"])
+                         ["70%", "80%", "90%", "100%", "110%", "125%", "135%"])
         self.assertTrue(self.page.scale_buttons[100].isChecked())
         self.assertFalse(self.page.scale_note_row.isVisible())
 

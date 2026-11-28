@@ -165,15 +165,63 @@ def sas_code(unsigned: dict, director_nonce: str) -> str:
 
 
 class Pending:
-    def __init__(self, request: dict, code: str, created: float, attempts: int = 0):
+    def __init__(self, request: dict, code: str, created: float, attempts: int = 0,
+                 edit: dict | None = None, amend_seq: int = 0):
         self.request = request  # υπογεγραμμένο αίτημα (μαζί με proof)
         self.code = code
         self.created = created  # wall clock: τα αιτήματα επιβιώνουν επανεκκίνηση
         self.attempts = attempts  # λάθος κωδικοί μέχρι τώρα (σώζονται στο αρχείο)
+        #: 5C2: διορθωμένη αίθουσα/όνομα (από τον Client με «Αλλαγή…» ή από τον Manager
+        #: στην κάρτα). Το υπογεγραμμένο αίτημα και ο κωδικός μένουν ίδια.
+        self.edit = edit
+        self.amend_seq = amend_seq  # τελευταία διόρθωση από τον Client (όχι επανάληψη)
 
     @property
     def expires(self) -> float:
         return self.created + REQUEST_TTL
+
+    @property
+    def room(self) -> str:
+        return (self.edit or {}).get("room") or self.request["room"]
+
+    @property
+    def name(self) -> str:
+        return (self.edit or {}).get("name") or self.request["name"]
+
+
+def make_amend(request_id: str, client_id: str, room: str, name: str, seq: int,
+               encrypted_key: bytes, password: bytes) -> dict:
+    """5C2: διόρθωση αίθουσας/ονόματος αιτήματος που περιμένει, υπογεγραμμένη με το
+    κλειδί του αιτήματος· ο κωδικός μένει ο ίδιος."""
+    validate_identity(client_id, room)
+    _name(name)
+    unsigned = {"type": "amend", "version": PROTOCOL, "request_id": request_id,
+                "client_id": client_id, "room": room, "name": name, "seq": int(seq)}
+    key = serialization.load_pem_private_key(encrypted_key, password=password)
+    if not isinstance(key, ec.EllipticCurvePrivateKey):
+        raise EnrollmentError("Expected ECDSA Client key")
+    return {**unsigned, "proof": base64.b64encode(
+        key.sign(canonical(unsigned), ec.ECDSA(hashes.SHA256()))).decode("ascii")}
+
+
+def _check_amend(message: dict, pending: "Pending") -> dict:
+    expected = {"type", "version", "request_id", "client_id", "room", "name", "seq", "proof"}
+    if set(message) != expected or message["type"] != "amend" or message["version"] != PROTOCOL:
+        raise EnrollmentError("Invalid amend fields")
+    try:
+        validate_identity(message["client_id"], message["room"])
+        _name(message["name"])
+        if type(message["seq"]) is not int or message["seq"] <= pending.amend_seq:
+            raise ValueError
+        if message["client_id"] != pending.request["client_id"]:
+            raise ValueError
+        cert = x509.load_pem_x509_certificate(pending.request["cert_pem"].encode("ascii"))
+        unsigned = {k: message[k] for k in expected - {"proof"}}
+        signature = base64.b64decode(message["proof"], validate=True)
+        cert.public_key().verify(signature, canonical(unsigned), ec.ECDSA(hashes.SHA256()))
+    except (ValueError, KeyError, TypeError, InvalidSignature) as exc:
+        raise EnrollmentError("Invalid amend proof") from exc
+    return message
 
 
 class EnrollmentServer:
@@ -226,6 +274,15 @@ class EnrollmentServer:
             try:
                 request, code, created = item["request"], item["code"], float(item["created"])
                 attempts = item.get("attempts", 0)
+                edit = item.get("edit")
+                amend_seq = item.get("amend_seq", 0)
+                if edit is not None:
+                    if not isinstance(edit, dict) or set(edit) != {"room", "name"}:
+                        raise ValueError
+                    validate_identity(request["client_id"], edit["room"])
+                    _name(edit["name"])
+                if type(amend_seq) is not int:
+                    raise ValueError
                 unsigned = _unsigned_request(request)  # ξαναελέγχεται η υπογραφή
                 if not (isinstance(code, str) and len(code) == 6 and code.isdigit()):
                     raise ValueError
@@ -235,7 +292,7 @@ class EnrollmentServer:
                 continue
             if created <= now < created + REQUEST_TTL:
                 self._pending[unsigned["request_id"]] = Pending(request, code, created,
-                                                                attempts)
+                                                                attempts, edit, amend_seq)
 
     def _save(self) -> None:
         """Ατομική εγγραφή· καλείται με κρατημένο το lock."""
@@ -243,7 +300,9 @@ class EnrollmentServer:
             return
         data = {"version": PENDING_FILE_VERSION, "requests": [
             {"request": p.request, "code": p.code, "created": p.created,
-             "attempts": p.attempts}
+             "attempts": p.attempts,
+             **({"edit": p.edit} if p.edit else {}),
+             **({"amend_seq": p.amend_seq} if p.amend_seq else {})}
             for p in self._pending.values()]}
         path = self.pending_file
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -370,6 +429,9 @@ class EnrollmentServer:
                 raw.settimeout(NETWORK_TIMEOUT)
                 with self.context.wrap_socket(raw, server_side=True) as stream:
                     request = read_message(stream)
+                    if request.get("type") == "amend":
+                        self._amend(stream, request)
+                        return
                     unsigned = _unsigned_request(request)
                     request_id = unsigned["request_id"]
                     nonce = base64.b64encode(secrets.token_bytes(32)).decode("ascii")
@@ -407,15 +469,45 @@ class EnrollmentServer:
         finally:
             self._slots.release()
 
+    def _amend(self, stream, message: dict) -> None:
+        """5C2: ο Client διορθώνει αίθουσα/όνομα του αιτήματος που περιμένει (ίδιος κωδικός)."""
+        with self._lock:
+            self._purge()
+            pending = self._pending.get(message.get("request_id"))
+            if pending is None:
+                send_message(stream, {"type": "rejected", "reason": "unknown"})
+                raise EnrollmentError("Amend for unknown request")
+            _check_amend(message, pending)
+            pending.edit = {"room": message["room"], "name": message["name"]}
+            pending.amend_seq = message["seq"]
+            self._save()
+        send_message(stream, {"type": "amended", "request_id": message["request_id"]})
+        self.log(f"[Εγγραφή] Διόρθωση αιτήματος {message['request_id'][:8]} | "
+                 f"{message['room']} | {message['name']}")
+
+    def edit(self, request_id: str, room: str, name: str) -> None:
+        """5C2: ο Manager διορθώνει αίθουσα/όνομα στην κάρτα πριν από την έγκριση."""
+        with self._lock:
+            self._purge()
+            pending = self._pending.get(request_id)
+            if pending is None:
+                raise EnrollmentError("No active enrollment request")
+            validate_identity(pending.request["client_id"], room)
+            _name(name)
+            pending.edit = {"room": room, "name": name}
+            self._save()
+
     # ------------------------------------------------------------ απόφαση
     def pending(self) -> list[tuple[str, str, str, float]]:
-        """Εκκρεμή αιτήματα (ID, αίθουσα, όνομα, λήξη) χωρίς τον SAS."""
+        """Εκκρεμή αιτήματα (ID, αίθουσα, όνομα, λήξη) χωρίς τον SAS.
+
+        Αίθουσα/όνομα με τις διορθώσεις (5C2) αν υπάρχουν.
+        """
         with self._lock:
             self._purge()
             items = sorted(self._pending.items(),
-                           key=lambda item: (item[1].request["room"], item[1].request["name"]))
-            return [(rid, p.request["room"], p.request["name"], p.expires)
-                    for rid, p in items]
+                           key=lambda item: (item[1].room, item[1].name))
+            return [(rid, p.room, p.name, p.expires) for rid, p in items]
 
     def resolve(self, prefix: str) -> str:
         """Πλήρες ID από μοναδικό πρόθεμα (≥ 4 χαρακτήρες), για ευκολία στο CLI."""
@@ -428,7 +520,8 @@ class EnrollmentServer:
         return matches[0]
 
     def decide(self, request_id: str, code: str | None = None, *,
-               approve: bool = False) -> dict:
+               approve: bool = False, room: str | None = None,
+               name: str | None = None) -> dict:
         """Έγκριση με τον κωδικό του συγκεκριμένου αιτήματος ή απόρριψη.
 
         Λάθος κωδικός μετρά προσπάθεια· μετά από ``MAX_CODE_ATTEMPTS`` λάθη το αίτημα
@@ -441,7 +534,13 @@ class EnrollmentServer:
             if pending is None:
                 raise EnrollmentError("No active enrollment request")
             req = pending.request
-            info = {"client_id": req["client_id"], "room": req["room"], "name": req["name"]}
+            # 5C2: διορθώσεις από την κάρτα του Manager τη στιγμή της έγκρισης.
+            if room is not None:
+                validate_identity(req["client_id"], room)
+            if name is not None:
+                _name(name)
+            info = {"client_id": req["client_id"], "room": room or pending.room,
+                    "name": name or pending.name}
             try:
                 if approve and not (isinstance(code, str)
                                     and hmac.compare_digest(code, pending.code)):
@@ -452,11 +551,29 @@ class EnrollmentServer:
                     raise IncorrectCodeError(max(remaining, 0))
                 del self._pending[request_id]
                 if approve:
-                    self.trust.approve(req["client_id"], req["room"],
-                                       req["cert_pem"].encode("ascii"), name=req["name"])
+                    self.trust.approve(req["client_id"], info["room"],
+                                       req["cert_pem"].encode("ascii"), name=info["name"])
                 return info
             finally:
                 self._save()
+
+
+def amend_enrollment(host: str, port: int, cafile: Path, server_name: str,
+                     message: dict) -> None:
+    """5C2: στέλνει τη διόρθωση (``make_amend``) στη θύρα εγγραφής του Manager."""
+    ctx = client_context(cafile)
+    raw = socket.create_connection((host, port), timeout=NETWORK_TIMEOUT)
+    try:
+        with connect_tls(raw, ctx, server_name) as conn:
+            conn.settimeout(NETWORK_TIMEOUT)
+            send_message(conn, message)
+            reply = read_message(conn)
+            if reply.get("type") == "rejected":
+                raise EnrollmentError("Το αίτημα εγγραφής δεν υπάρχει πια στον Manager")
+            if reply.get("type") != "amended" or reply.get("request_id") != message["request_id"]:
+                raise EnrollmentError("Unexpected amend reply")
+    finally:
+        raw.close()
 
 
 def enroll_client(host: str, port: int, cafile: Path, server_name: str,

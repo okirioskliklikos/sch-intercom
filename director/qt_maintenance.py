@@ -935,7 +935,7 @@ class SettingsPage(QWidget):
         column.setContentsMargins(0, 0, px(theme.SCROLL_GAP), 0)
         column.setSpacing(px(theme.CARD_SPACING))
         self.scale_card = self._build_scale_card()
-        self.scale_card.setFixedWidth(px(theme.MAINTENANCE_CARD))
+        self.scale_card.setFixedWidth(px(theme.SCALE_CARD))   # 7 επιλογές (5C2)
         column.addWidget(self.scale_card, 0, Qt.AlignmentFlag.AlignLeft)
         column.addStretch(1)
         self.appearance_scroll = _scroll(appearance)

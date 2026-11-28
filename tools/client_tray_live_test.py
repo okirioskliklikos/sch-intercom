@@ -29,12 +29,13 @@ if __package__ in (None, ""):
 from client import status as st  # noqa: E402
 from shared.ui.offscreen import windows_fonts_dir  # noqa: E402
 from shared.version import APP_VERSION  # noqa: E402
+from shared.room_names import room_title, short_room  # noqa: E402
 from tools.manager_role_live_test import ROOM, TestDevice, TestMachine  # noqa: E402
 from tools.mtls_live_test import JOINED, Process, child_env  # noqa: E402
 
 TOTAL = 15
 NAME = "Board1"
-TITLE = f"{ROOM} · {NAME}"
+TITLE = room_title(ROOM, NAME)     # «Γ1 · Board1» στη σχολική χρονιά 2026-27
 
 
 class ToneMachine(TestMachine):
@@ -161,8 +162,8 @@ class LiveTest:
         menu = data["menu"]
         expected = f"{TITLE} — Αναμονή έγκρισης, κωδικός {st.format_code(self.code)}"
         texts = [item["text"] for item in menu]
-        ok = (data["tooltip"] == expected and texts == [TITLE, "Αναμονή έγκρισης", "Άνοιγμα"]
-              and [item["enabled"] for item in menu] == [False, False, True]
+        ok = (data["tooltip"] == expected and texts == [TITLE, "Αναμονή έγκρισης", "Ιστορικό…", "Πληροφορίες…"]
+              and [item["enabled"] for item in menu] == [False, False, True, True]
               and not any("Έξοδ" in text for text in texts))
         return ok, f"tooltip «{data['tooltip']}», μενού {texts}"
 
@@ -184,7 +185,7 @@ class LiveTest:
         data = self.dump()
         texts = [item["text"] for item in data["menu"]]
         ok = (data["tooltip"] == f"{TITLE} — Συνδεδεμένος"
-              and texts == [TITLE, "Συνδεδεμένος", "Άνοιγμα"]
+              and texts == [TITLE, "Συνδεδεμένος", "Ιστορικό…", "Πληροφορίες…"]
               and data["window"]["status"] == "● Συνδεδεμένος"
               and data["window"]["alarm"] is None)
         return ok, f"tooltip «{data['tooltip']}», μενού {texts}"
@@ -194,8 +195,8 @@ class LiveTest:
         rows = {row["label"]: row["value"] for row in data["window"]["info_rows"]}
         der = ssl.PEM_cert_to_DER_cert(self.m.cert.read_text(encoding="ascii"))
         fingerprint = st.short_fingerprint(hashlib.sha256(der).hexdigest())
-        expected = {"Αίθουσα": ROOM, "Υπολογιστής": NAME, "Manager": "127.0.0.1",
-                    "Αποτύπωμα Manager": fingerprint, "Έκδοση": APP_VERSION,
+        expected = {"Αίθουσα": short_room(ROOM), "Υπολογιστής": NAME, "Director": "127.0.0.1",
+                    "Αποτύπωμα Director": fingerprint, "Έκδοση": APP_VERSION,
                     "ID υπολογιστή": self.device.client_id, "Κατάσταση": "Συνδεδεμένος"}
         wrong = {k: rows.get(k) for k, v in expected.items() if rows.get(k) != v}
         ok = not wrong and "Ένταση ανακοίνωσης" in rows and "Συσκευή ήχου" in rows
@@ -234,7 +235,7 @@ class LiveTest:
         finally:
             self.m.director.send("none")
         time.sleep(2)
-        self.start_client(show_window=True)    # όπως «Άνοιγμα» από το tray
+        self.start_client(show_window=True)    # όπως «Ιστορικό…» από το tray
         data = self.wait_dump(lambda d: d["state"] == st.CONNECTED and d["window"]["visible"],
                               timeout=40)
         self.events_before = len(self.history_events())
@@ -306,10 +307,10 @@ class LiveTest:
             ("Αίτηση εγγραφής: κωδικός και αρχείο αιτήματος", self.s02),
             ("Αναμονή έγκρισης: παράθυρο ανοίγει μόνο του με τον κωδικό, κίτρινη κουκκίδα",
              self.s03),
-            ("Tooltip με κωδικό, μενού δύο γκρι γραμμές + Άνοιγμα, χωρίς Έξοδο", self.s04),
+            ("Tooltip με κωδικό, μενού δύο γκρι γραμμές + Ιστορικό…/Πληροφορίες…, χωρίς Έξοδο", self.s04),
             ("Έγκριση στον Manager: πράσινη κουκκίδα, κωδικός φεύγει", self.s05),
             ("Tooltip/μενού «Συνδεδεμένος»", self.s06),
-            ("Πληροφορίες: αίθουσα, PC, Manager, αποτύπωμα, έκδοση, ID", self.s07),
+            ("Πληροφορίες: αίθουσα, PC, Director, αποτύπωμα, έκδοση, ID", self.s07),
             ("Βάση σύγκρισης: ανακοίνωση με τον Client χωρίς tray", self.s08),
             ("Ανακοίνωση με tray: γραμμή «σε εξέλιξη» στο Ιστορικό", self.s09),
             ("Ήχος με tray και ανοιχτό παράθυρο όσο καλός όσο χωρίς tray", self.s10),

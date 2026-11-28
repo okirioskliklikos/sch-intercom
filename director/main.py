@@ -36,6 +36,7 @@ from shared.enrollment import (EnrollmentError, EnrollmentServer, ENROLL_PORT,
                                IncorrectCodeError)
 from shared.discovery import announce, director_id, DISCOVERY_PORT
 from shared.identity import ProtocolMismatch, receive_hello_details, send_welcome
+from shared.change_request import DIRECTOR_FILE as CHANGES_FILE, ChangeRequests
 from shared.transport_security import accept_tls, server_context
 from shared.audio import BLOCK_BYTES, BLOCK_SAMPLES, CHANNELS, DEFAULT_PORT, DTYPE, SAMPLE_RATE
 
@@ -48,11 +49,18 @@ class RoleAwareEnrollmentServer(EnrollmentServer):
     """Ελέγχει ρόλο ΠΡΙΝ αφαιρεθεί το εκκρεμές αίτημα από το decide."""
 
     def decide(self, request_id: str, code: str | None = None, *,
-               approve: bool = False) -> dict:
+               approve: bool = False, room: str | None = None,
+               name: str | None = None) -> dict:
         if self.pending_file is not None:
             require_primary(load_manager_state(
                 manager_state_path(self.pending_file)))
-        return super().decide(request_id, code, approve=approve)
+        return super().decide(request_id, code, approve=approve, room=room, name=name)
+
+    def edit(self, request_id: str, room: str, name: str) -> None:
+        if self.pending_file is not None:
+            require_primary(load_manager_state(
+                manager_state_path(self.pending_file)))
+        super().edit(request_id, room, name)
 
 
 class DirectorStats:
@@ -113,6 +121,9 @@ def show_help() -> str:
   approve <ID> <κωδικός>  Έγκριση με τον κωδικό που έγραψε ο Client
                  (ID = οι 8 χαρακτήρες του pending· 3 προσπάθειες κωδικού)
   deny <ID>      Απόρριψη αιτήματος εγγραφής
+  changes        Αιτήματα αλλαγής αίθουσας/ονόματος από υπολογιστές (χωρίς κωδικό)
+  approve-change <ID> / deny-change <ID>  Έγκριση/απόρριψη αιτήματος αλλαγής
+                 (ID = οι 8 πρώτοι χαρακτήρες του UUID)
   set-room <UUID> <αίθουσα>  Αλλαγή αίθουσας χωρίς νέο κλειδί
   set-name <UUID> <όνομα>    Αλλαγή ονόματος χωρίς νέο κλειδί
   serve on [force] / serve off      Έναρξη/διακοπή εξυπηρέτησης
@@ -286,7 +297,7 @@ def _reject_full(connection: socket.socket, broadcaster: AudioBroadcaster, clien
 def _admit_client(connection: socket.socket, address, broadcaster: AudioBroadcaster,
                   tls_context: ssl.SSLContext, *,
                   registry: SignedClientRegistry | None = None,
-                  reports=None) -> None:
+                  reports=None, changes: ChangeRequests | None = None) -> None:
     """TLS και HELLO ενός Client, σε δικό του νήμα ώστε να μην καθυστερεί τους άλλους."""
     # Το TLS ολοκληρώνεται πριν επιτραπεί οποιοδήποτε HELLO/PCM.
     try:
@@ -321,8 +332,10 @@ def _admit_client(connection: socket.socket, address, broadcaster: AudioBroadcas
                     return
                 send_welcome(connection, accepted=True, registry_version=registry_version,
                              registry_hash=registry_hash)
+                status = changes.status_for(client_id) if changes is not None else None
                 if not broadcaster.add_client(connection, client_id, entry["room"],
-                                              address, name=entry.get("name") or ""):
+                                              address, name=entry.get("name") or "",
+                                              change_status=status):
                     print(f"[Director] Όριο Clients: {broadcaster.max_clients}", flush=True)
                 return
         # Legacy isolated transport tests only; production always supplies registry.
@@ -358,6 +371,32 @@ class RegistryTrust:
         self._context = registry.tls_server_context(certfile, keyfile)
         self._manager_state_path = manager_state_path(registry.path)
         self.reports = RegistryReports()
+        #: 5C2: αιτήματα αλλαγής αίθουσας/ονόματος· ο broadcaster δίνεται με το ``attach``.
+        self._broadcaster: AudioBroadcaster | None = None
+        self.changes = ChangeRequests(registry.path.with_name(CHANGES_FILE),
+                                      apply=self._apply_change,
+                                      log=lambda line: print(line, flush=True))
+
+    def attach(self, broadcaster: AudioBroadcaster) -> None:
+        """Συνδέει τα αιτήματα αλλαγής με τις ζωντανές συνδέσεις (5C2)."""
+        self._broadcaster = broadcaster
+        broadcaster.on_change_request = self.change_request
+        self.changes.notify = broadcaster.send_change_status
+
+    def change_request(self, client_id: str, room: str, name: str) -> dict:
+        """Από τη σύνδεση εγκεκριμένου Client: νέο αίτημα· η απάντηση προς τον Client."""
+        with self.registry.lock:
+            entry = self.registry.approved_entry(client_id)
+            if entry is None:
+                raise ValueError("Ο υπολογιστής δεν είναι εγκεκριμένος")
+            current_room, current_name = entry["room"], entry.get("name") or ""
+        return self.changes.submit(client_id, room, name, current_room=current_room,
+                                   current_name=current_name)
+
+    def _apply_change(self, client_id: str, room: str, name: str) -> None:
+        if self._broadcaster is None:
+            raise RegistryError("Ο Manager δεν τρέχει")
+        self.update_info(client_id, self._broadcaster, room=room, name=name)
 
     def reported(self) -> ReportedRegistry | None:
         """Νεότερο/διαφορετικό μητρώο που ανέφεραν εγκεκριμένοι Clients (4.2D3)."""
@@ -407,6 +446,7 @@ class RegistryTrust:
             require_primary(load_manager_state(self._manager_state_path))
             self.registry.revoke(client_id)
             self.reports.forget(client_id)
+            self.changes.forget(client_id)
             broadcaster.disconnect_client(client_id)
             self._context = self.registry.tls_server_context(self._certfile, self._keyfile)
 
@@ -441,7 +481,7 @@ def accept_clients(server: socket.socket, broadcaster: AudioBroadcaster,
                    stop: threading.Event, *, tls_context: ssl.SSLContext | None = None,
                    max_pending: int = MAX_PENDING_HANDSHAKES,
                    registry: SignedClientRegistry | None = None,
-                   context_provider=None, reports=None) -> None:
+                   context_provider=None, reports=None, changes=None) -> None:
     """Αποδέχεται νέους Clients ανεξάρτητα από την καταγραφή ήχου.
 
     Το νήμα αυτό μόνο δέχεται συνδέσεις. Το TLS και το HELLO κάθε Client γίνονται
@@ -479,7 +519,7 @@ def accept_clients(server: socket.socket, broadcaster: AudioBroadcaster,
             try:
                 current_tls = context_provider() if context_provider is not None else tls_context
                 _admit_client(connection, address, broadcaster, current_tls, registry=registry,
-                              reports=reports)
+                              reports=reports, changes=changes)
             finally:
                 pending.release()
 
@@ -668,6 +708,21 @@ def command_loop(broadcaster: AudioBroadcaster, stop: threading.Event,
                 request_id = enrollment.resolve(values[0])
                 info = enrollment.decide(request_id, approve=False)
                 print(f"Απορρίφθηκε: {info['room']} | {info['name']}", flush=True)
+            elif command == "changes" and not values and trust is not None:
+                requests = trust.changes.pending()
+                if not requests:
+                    print("Δεν υπάρχουν αιτήματα αλλαγής.", flush=True)
+                for request in requests:
+                    until = time.strftime("%d/%m %H:%M", time.localtime(request.expires))
+                    print(f"  {request.client_id[:8]} | {request.old_room} · {request.old_name}"
+                          f" → {request.room} · {request.name} | λήγει {until}", flush=True)
+            elif command in ("approve-change", "deny-change") and len(values) == 1 \
+                    and trust is not None:
+                client_id = trust.changes.resolve(values[0])
+                decided = trust.changes.decide(client_id, approve=command == "approve-change")
+                print(("Εγκρίθηκε" if command == "approve-change" else "Απορρίφθηκε") +
+                      f" η αλλαγή: {decided.old_room} · {decided.old_name} → "
+                      f"{decided.room} · {decided.name}", flush=True)
             elif command == "set-room" and len(values) == 2 and trust is not None:
                 info = trust.update_info(values[0], broadcaster, room=values[1])
                 print(f"Ενημερώθηκε αίθουσα: {info['room']}", flush=True)
@@ -808,7 +863,7 @@ def main() -> None:
         trust = RegistryTrust(registry, args.tls_cert, args.tls_key)
         secure_accept = partial(accept_clients, tls_context=trust.context(),
                                 registry=registry, context_provider=trust.context,
-                                reports=trust.reports)
+                                reports=trust.reports, changes=trust.changes)
         # Η θύρα εγγραφής είναι πάντα ανοιχτή (απόφαση χρήστη 22/11/2026): ανοίγει με το
         # CLI παρακάτω ή με το GuiRuntime.start στο --gui.
         enrollment = RoleAwareEnrollmentServer(args.tls_cert, args.tls_key, trust,
@@ -827,6 +882,7 @@ def main() -> None:
             return
 
         broadcaster = AudioBroadcaster(max_clients=MAX_CLIENTS, on_event=lambda s: print(s, flush=True))
+        trust.attach(broadcaster)
         stop = threading.Event()
         stats = DirectorStats()
         identifier = director_id(args.director_id_file)

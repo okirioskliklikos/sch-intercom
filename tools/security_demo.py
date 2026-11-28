@@ -321,7 +321,7 @@ def main() -> None:
     parser.add_argument("--notices", choices=("none", "full", "duplicate", "both"),
                         default="none", help="4.3C2: ειδοποιήσεις «γεμάτος» / ίδια ταυτότητα")
     parser.add_argument("--page", choices=("home", "security", "settings"), default="security")
-    parser.add_argument("--scale", type=int, choices=(80, 90, 100, 110, 125), default=None,
+    parser.add_argument("--scale", type=int, choices=(70, 80, 90, 100, 110, 125, 135), default=None,
                         help="κλίμακα περιβάλλοντος %% (προεπιλογή: όπως η εφαρμογή, 90 στα Windows)")
     parser.add_argument("--screenshot", type=Path, default=None,
                         help="μόνο στιγμιότυπο (offscreen) και έξοδος")

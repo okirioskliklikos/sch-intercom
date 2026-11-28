@@ -7,6 +7,7 @@ Manager (mockup 4.3C2, απόφαση χρήστη 24/11/2026). Τα δεδομ�
 from __future__ import annotations
 
 from html import escape
+from shared.room_names import room_title
 
 #: Πόσοι υπολογιστές σε αναμονή ονομάζονται· οι υπόλοιποι γίνονται «και N ακόμη».
 FULL_NAMES_SHOWN = 3
@@ -18,7 +19,7 @@ DUPLICATE_HINT_END = "και νέα έγκριση"
 
 
 def _label(room: str, name: str | None) -> str:
-    return f"{room} · {name}" if name else room
+    return room_title(room, name)
 
 
 def full_html(waiting: list[tuple[str, str, str]], limit: int) -> str | None:

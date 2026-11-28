@@ -11,6 +11,7 @@ from __future__ import annotations
 from pathlib import Path
 import time
 from collections.abc import Callable
+from shared.room_names import room_title, short_room
 
 from PySide6.QtCore import QRegularExpression, QSize, Qt, QTimer
 from PySide6.QtGui import QAction, QColor, QFontDatabase, QPalette, QRegularExpressionValidator
@@ -21,7 +22,8 @@ from PySide6.QtWidgets import (QApplication, QFrame, QGraphicsDropShadowEffect, 
 
 from director.qt_gui import (ElidedLabel, SplitHandle, StatusDot, _repolish, fit_tab_text,
                              load_layout_settings, px, save_layout_settings)
-from director.security import (CODE_LENGTH, TEXT_CHANGES_PRIMARY_ONLY, TEXT_PRIMARY_ONLY,
+from director.security import (CODE_LENGTH, KIND_CHANGE, TAG_CHANGE,
+                               TEXT_CHANGES_PRIMARY_ONLY, TEXT_PRIMARY_ONLY,
                                ComputerView, Decision, RequestView, RoleStatus, RoomView,
                                SecurityModel, computers_text)
 from director.notices import duplicate_tooltip
@@ -152,14 +154,20 @@ def _label(text: str, name: str) -> QLabel:
 
 
 class RequestRow(QFrame):
-    """Κάρτα αιτήματος: «Αίθουσα · Υπολογιστής» με αποτέλεσμα πάνω δεξιά, ID/χρόνοι,
-    και πεδίο κωδικού που γεμίζει αριστερά με Έγκριση/Απόρριψη τέρμα δεξιά."""
+    """Κάρτα αιτήματος (ui-style.md §6, §10).
+
+    Πρώτη εγκατάσταση (5C2, mockup ``#mgr-edit-request``): πάνω ID/χρόνοι με το
+    αποτέλεσμα δεξιά, δύο πεδία Αίθουσα/Υπολογιστής που διορθώνονται πριν από την
+    έγκριση, και πεδίο κωδικού που γεμίζει αριστερά με Έγκριση/Απόρριψη τέρμα δεξιά.
+    Αλλαγή (``#mgr-change``): ετικέτα «Αλλαγή», παλιό σε γκρι, «→ νέο» έντονο, χωρίς κωδικό.
+    """
 
     def __init__(self, request: RequestView, on_approve: Callable[[str, str], None],
                  on_deny: Callable[[str], None], parent=None):
         super().__init__(parent)
         self.setObjectName("card")
         self.request = request
+        self.change = request.kind == KIND_CHANGE
         self.final = False
         layout = QVBoxLayout(self)
         layout.setContentsMargins(px(14), px(10), px(14), px(11))
@@ -167,15 +175,46 @@ class RequestRow(QFrame):
         top = QHBoxLayout()
         top.setContentsMargins(0, 0, 0, 0)
         top.setSpacing(px(10))
-        self.title = ElidedLabel(request.title)
-        self.title.setObjectName("requestTitle")
+        self.title = ElidedLabel(request.old_title if self.change else request.title)
+        self.title.setObjectName("requestOld" if self.change else "requestTitle")
         self.result = _label("", "result")
         self.result.hide()
-        top.addWidget(self.title, 1)
+        self.meta = _label("", "small")
+        if self.change:
+            self.tag = _label(TAG_CHANGE, "requestTag")
+            top.addWidget(self.tag, 0, Qt.AlignmentFlag.AlignVCenter)
+            top.addWidget(self.title, 1)
+        else:
+            # Ο τίτλος εμφανίζεται μόνο όταν κλείσει το αίτημα, στη θέση των πεδίων.
+            self.title.hide()
+            top.addWidget(self.title, 1)
+            top.addWidget(self.meta, 1)
         top.addWidget(self.result, 0, Qt.AlignmentFlag.AlignRight)
         layout.addLayout(top)
-        self.meta = _label("", "small")
-        layout.addWidget(self.meta)
+        self.room_edit = self.name_edit = None
+        if self.change:
+            arrow_row = QHBoxLayout()
+            arrow_row.setContentsMargins(0, 0, 0, 0)
+            arrow_row.setSpacing(px(6))
+            arrow = QLabel("→")
+            arrow.setObjectName("requestArrow")
+            self.new_title = ElidedLabel(request.title)
+            self.new_title.setObjectName("requestTitle")
+            arrow_row.addWidget(arrow)
+            arrow_row.addWidget(self.new_title, 1)
+            layout.addLayout(arrow_row)
+            self.meta.setWordWrap(True)
+            layout.addWidget(self.meta)
+        else:
+            self.fields = QWidget()
+            fields = QHBoxLayout(self.fields)
+            fields.setContentsMargins(0, 0, 0, 0)
+            fields.setSpacing(px(8))
+            self.room_edit = self._field(request.room, "Αίθουσα")
+            self.name_edit = self._field(request.name, "Υπολογιστής")
+            fields.addWidget(self.room_edit, 1)
+            fields.addWidget(self.name_edit, 1)
+            layout.addWidget(self.fields)
 
         self.actions = QWidget()
         actions = QHBoxLayout(self.actions)
@@ -214,7 +253,12 @@ class RequestRow(QFrame):
         for button in (self.approve, self.deny):
             button.setIconSize(icon_size)
             button.setCursor(Qt.CursorShape.PointingHandCursor)
-        actions.addWidget(self.code, 1)
+        if self.change:
+            # Χωρίς κωδικό: εγκεκριμένος υπολογιστής μέσα από mTLS (phase5.md §6.4).
+            self.code.hide()
+            actions.addStretch(1)
+        else:
+            actions.addWidget(self.code, 1)
         actions.addWidget(self.approve)
         actions.addWidget(self.deny)
         layout.addWidget(self.actions)
@@ -223,6 +267,23 @@ class RequestRow(QFrame):
         self.approve.clicked.connect(lambda: on_approve(rid, self.code.text()))
         self.code.returnPressed.connect(lambda: on_approve(rid, self.code.text()))
         self.deny.clicked.connect(lambda: on_deny(rid))
+
+    def _field(self, value: str, label: str) -> QLineEdit:
+        edit = QLineEdit(value)
+        edit.setObjectName("codeInput")
+        edit.setMaxLength(64)
+        edit.setAccessibleName(label)
+        edit.setToolTip(label)
+        edit.setMinimumWidth(px(60))
+        return edit
+
+    def edited(self) -> tuple[str | None, str | None]:
+        """Αίθουσα/όνομα όπως είναι στα πεδία (None αν δεν άλλαξαν)."""
+        if self.room_edit is None:
+            return None, None
+        room, name = self.room_edit.text().strip(), self.name_edit.text().strip()
+        return (None if room == self.request.room else room,
+                None if name == self.request.name else name)
 
     def set_meta(self, now: float) -> None:
         text = self.request.meta(now)
@@ -237,10 +298,22 @@ class RequestRow(QFrame):
         if decision.final:
             self.final = True
             self.actions.hide()
+            if not self.change:
+                room = self.room_edit.text().strip() or self.request.room
+                name = self.name_edit.text().strip() or self.request.name
+                self.title.setText(room_title(room, name))
+                self.fields.hide()
+                self.meta.hide()
+                self.title.show()
             _repolish(self.title, final="true")
         else:
             self.code.clear()
             self.code.setFocus()
+
+
+def _content(request: RequestView) -> tuple:
+    return (request.kind, request.room, request.name, request.old_room, request.old_name,
+            request.created)
 
 
 class ComputerRow(QWidget):
@@ -313,7 +386,8 @@ class RoomHeader(QWidget):
         layout.setSpacing(px(9))
         self.setMinimumHeight(px(30))
         self.dot = StatusDot(theme.ROOM_DOT_OFFLINE)
-        self.name = ElidedLabel(room.room)
+        # Σύντομη αίθουσα της τρέχουσας χρονιάς (π.χ. «Γ1»)· το πλήρες όνομα στο tooltip.
+        self.name = ElidedLabel(short_room(room.room), tooltip=room.room)
         self.name.setObjectName("roomTitle")
         self.count = _label(computers_text(len(room.computers)), "small")
         # ✓ «ενημερωμένη»: ≥1 online υπολογιστής έχει την τρέχουσα έκδοση πακέτου.
@@ -330,7 +404,7 @@ class RoomHeader(QWidget):
         self.actions = {"rename_room": QAction(_menu_icon("edit"), "Μετονομασία αίθουσας…")}
         if page is not None:
             self.actions["rename_room"].triggered.connect(lambda: page.rename_room(name))
-        self.menu_button = _menu_button(f"Ενέργειες για την αίθουσα {name}",
+        self.menu_button = _menu_button(f"Ενέργειες για την αίθουσα {short_room(name)}",
                                         [self.actions["rename_room"]])
         layout.addWidget(self.menu_button)
 
@@ -691,7 +765,11 @@ class SecurityPage(QWidget):
         row = self.request_rows.get(request_id)
         if row is None or row.final:
             return
-        decision = self.model.approve(request_id, code)
+        if row.change:
+            decision = self.model.approve_change(request_id)
+        else:
+            room, name = row.edited()
+            decision = self.model.approve(request_id, code, room=room, name=name)
         row.show_decision(decision)
         if decision.final:
             self.finished[request_id] = self.clock()
@@ -701,7 +779,8 @@ class SecurityPage(QWidget):
         row = self.request_rows.get(request_id)
         if row is None or row.final:
             return
-        decision = self.model.deny(request_id)
+        decision = (self.model.deny_change(request_id) if row.change
+                    else self.model.deny(request_id))
         row.show_decision(decision)
         self.finished[request_id] = self.clock()
         self.refresh()
@@ -724,7 +803,7 @@ class SecurityPage(QWidget):
         computer = self._computer(client_id)
         if computer is None:
             return
-        name = self.ask_text("Μετονομασία", f"Νέο όνομα για «{computer.name}» ({computer.room}):",
+        name = self.ask_text("Μετονομασία", f"Νέο όνομα για «{computer.name}» ({short_room(computer.room)}):",
                              computer.name)
         if name is None or name.strip() == computer.name:
             return
@@ -759,7 +838,7 @@ class SecurityPage(QWidget):
         computer = self._computer(client_id)
         if computer is None:
             return
-        question = (f"Ανάκληση του «{computer.name}» ({computer.room});\n\n"
+        question = (f"Ανάκληση του «{computer.name}» ({short_room(computer.room)});\n\n"
                     "Ο υπολογιστής αποσυνδέεται αμέσως. Για να ξαναμπεί χρειάζεται "
                     "νέα εγγραφή με νέο κλειδί.")
         if self.confirm("Ανάκληση υπολογιστή", question, "Ανάκληση"):
@@ -842,8 +921,16 @@ class SecurityPage(QWidget):
                 del self.finished[rid]
         keep = wanted + [rid for rid in self.request_rows
                          if rid in self.finished and rid not in wanted]
+        views = {r.request_id: r for r in requests}
+        # 5C2: νέο αίτημα αλλαγής του ίδιου υπολογιστή (άλλες τιμές) → νέα κάρτα.
+        replaced = [rid for rid, row in self.request_rows.items()
+                    if not row.final and rid in views and _content(views[rid]) != _content(row.request)]
+        for rid in replaced:
+            self.request_rows.pop(rid).deleteLater()
+        for rid, row in self.request_rows.items():
+            if rid in views and not row.final:
+                row.request = views[rid]   # π.χ. online/εκτός σύνδεσης στη γραμμή ID
         if keep != list(self.request_rows):
-            views = {r.request_id: r for r in requests}
             old = self.request_rows
             self.request_rows = {}
             while self.requests_layout.count():

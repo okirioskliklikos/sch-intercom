@@ -32,6 +32,8 @@ MESSAGE_KEEPALIVE = 1
 MESSAGE_STREAM_STOP = 2
 MESSAGE_CLIENT_SETTINGS = 3
 MESSAGE_UPDATE_CHECK = 4
+#: 5C2 (πρωτόκολλο σύνδεσης v8): κατάσταση αιτήματος αλλαγής, JSON (shared.change_request).
+MESSAGE_CHANGE_STATUS = 5
 MAX_SETTINGS_BYTES = 512
 _HEADER = struct.Struct("!2sBBIIQ")
 HEADER_BYTES = _HEADER.size
@@ -121,6 +123,14 @@ def decode_client_settings(payload: bytes) -> dict:
     # The canonical encoder also enforces both field limits.
     encode_client_settings(data["room"], data["name"])
     return data
+
+
+def encode_change_status(state: str, room: str = "", name: str = "") -> bytes:
+    """Director → Client: τι έγινε με το αίτημα αλλαγής αίθουσας/ονόματος (5C2)."""
+    from shared.change_request import encode_status
+    payload = encode_status(state, room, name)
+    return _HEADER.pack(PROTOCOL_MAGIC, PROTOCOL_VERSION,
+                        MESSAGE_CHANGE_STATUS, len(payload), 0, 0) + payload
 
 
 def send_frame(connection: socket.socket, pcm: bytes, seq: int = 0,
