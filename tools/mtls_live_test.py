@@ -46,20 +46,24 @@ def child_env() -> dict:
     env = dict(os.environ)
     env["PYTHONUNBUFFERED"] = "1"
     env["PYTHONIOENCODING"] = "utf-8"
+    # 5C1: οι δοκιμές τρέχουν τον Client χωρίς tray/παράθυρο (όπως πριν)· η δοκιμή του tray
+    # (client_tray_live_test) το αφαιρεί ρητά.
+    env["SCH_INTERCOM_NO_TRAY"] = "1"
     return env
 
 
 class Process:
     """Διεργασία με συλλογή εξόδου, για αναζήτηση μηνυμάτων με timeout."""
 
-    def __init__(self, args: list[str], *, label: str, show: bool = True):
+    def __init__(self, args: list[str], *, label: str, show: bool = True,
+                 env: dict | None = None):
         self.label = label
         self.show = show
         self.lines: list[str] = []
         self.closed = False
         self._cond = threading.Condition()
         self.proc = subprocess.Popen(
-            [sys.executable, *args], cwd=ROOT, env=child_env(),
+            [sys.executable, *args], cwd=ROOT, env=env or child_env(),
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
             text=True, encoding="utf-8", errors="replace", bufsize=1)
         threading.Thread(target=self._read, daemon=True).start()

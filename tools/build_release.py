@@ -32,10 +32,11 @@ from shared.version import APP_VERSION, parse_version  # noqa: E402
 from tools import make_portable as mp  # noqa: E402
 
 PACKAGES = ("client", "shared")
-#: Εξαρτήσεις Client στα Windows (ένταση/εφαρμογές/media: docs/windows-audio-check.md).
+#: Εξαρτήσεις Client στα Windows (ένταση/εφαρμογές/media: docs/windows-audio-check.md·
+#: PySide6-Essentials για το tray και το παράθυρο του Client, 5C1).
 REQUIREMENTS = ("sounddevice>=0.5,<1", "cryptography>=42", "pycaw", "comtypes", "psutil",
                 "winrt-runtime", "winrt-Windows.Media.Control", "winrt-Windows.Foundation",
-                "winrt-Windows.Foundation.Collections")
+                "winrt-Windows.Foundation.Collections", "PySide6-Essentials>=6.6,<7")
 ISS = ROOT / "installer" / "sch-intercom-client.iss"
 #: Inno Setup 7 (τρέχουσα) ή 6· προτιμάται η νεότερη.
 ISCC_CANDIDATES = tuple(
