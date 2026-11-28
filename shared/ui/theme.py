@@ -114,7 +114,8 @@ class Metrics:
 # Κλίμακα περιβάλλοντος (Ρυθμίσεις → Εμφάνιση, απόφαση χρήστη 24/11/2026): ποσοστό
 # που πολλαπλασιάζει τη βάση, άρα γράμματα, αποστάσεις και εικονίδια μαζί. Στα
 # Windows (Segoe UI 9pt → ελάχιστο 12pt) προεπιλογή 90%, αλλού 100%.
-UI_SCALES = (80, 90, 100, 110, 125)
+# 70% και 135% προστέθηκαν με το 5C2 (απόφαση χρήστη 28/11/2026)· ίδιες τιμές στον Client.
+UI_SCALES = (70, 80, 90, 100, 110, 125, 135)
 UI_SCALE_DEFAULT = 100
 UI_SCALE_DEFAULT_WINDOWS = 90
 
@@ -185,7 +186,8 @@ SECTION_GAP = 16            # απόσταση από το διαχωριστι�
 REQUEST_CARD_SPACING = 10   # απόσταση ανάμεσα στις κάρτες αιτημάτων
 # Πιστοποιητικά / Συντήρηση (ui-style.md §7–§8)
 IDENTITY_CARD_MAX = 700     # κάρτες «Ταυτότητα Manager» και «Ρόλος Manager»
-SCALE_OPTION = 62          # ελάχιστο πλάτος επιλογής «80%» … «125%» (Ρυθμίσεις → Εμφάνιση)
+SCALE_OPTION = 62          # ελάχιστο πλάτος επιλογής «70%» … «135%» (Ρυθμίσεις → Εμφάνιση)
+SCALE_CARD = 560            # κάρτα «Κλίμακα περιβάλλοντος»: 7 επιλογές σε μία σειρά
 MAINTENANCE_CARD = 420      # κάρτες «Backup» / «Επαναφορά» (δίπλα-δίπλα όταν χωρούν)
 UPDATES_PACKAGE_CARD = 420  # Ρυθμίσεις → Ενημερώσεις: κάρτα «Πακέτο Client» (5B3)
 UPDATES_COMPUTERS_MIN = 560 # κάτω από αυτό η κάρτα «Υπολογιστές» πάει κάτω από το πακέτο
@@ -196,9 +198,8 @@ DIALOG_WIDTH = 490          # διάλογοι backup/επαναφοράς
 FIELD_HEIGHT = 32           # πεδία κειμένου/κωδικού στους διαλόγους
 KV_GAP = 18                 # απόσταση ετικέτας–τιμής
 # Client — tray και παράθυρο (ui-style.md §10, 5C1)
-CLIENT_WINDOW_W = 640
+CLIENT_WINDOW_W = 780       # 5C2: με αριστερή μπάρα όπως ο Director (SIDEBAR_WIDTH)
 CLIENT_WINDOW_H = 600
-CLIENT_MARGIN = 18
 CLIENT_CODE = 34            # κωδικός εγγραφής, mono semibold
 TRAY_DOT = 5 / 24           # ακτίνα κουκκίδας ως κλάσμα του εικονιδίου
 TRAY_DOT_RING = 1.6 / 24    # λευκό δαχτυλίδι γύρω από την κουκκίδα
@@ -228,6 +229,18 @@ QMainWindow, #page {{
 #brand {{
     font-size: {m.font_pt(FONT_CARD_TITLE)}pt;
     font-weight: 600;
+}}
+#brandSub {{
+    color: {TEXT_MUTED};
+    font-size: {m.font_pt(FONT_SMALL)}pt;
+}}
+#sidebarRule {{
+    background: {CARD_BORDER};
+    border: none;
+}}
+#sidebarWho {{
+    font-weight: 600;
+    background: transparent;
 }}
 #navItem {{
     text-align: left;
@@ -439,6 +452,18 @@ QScrollBar::add-page, QScrollBar::sub-page {{
 }}
 #requestTitle, #roomTitle {{
     font-weight: 600;
+}}
+#requestOld, #requestArrow {{
+    color: {TEXT_MUTED};
+}}
+#requestTag {{
+    background: {PRIMARY_LIGHT};
+    border: 1px solid {PRIMARY};
+    border-radius: {px(9)}px;
+    color: {PRIMARY};
+    font-size: {m.font_pt(FONT_SMALL)}pt;
+    font-weight: 600;
+    padding: 0px {px(8)}px;
 }}
 #roomTitle {{
     font-size: {m.font_pt(FONT_ROOM)}pt;

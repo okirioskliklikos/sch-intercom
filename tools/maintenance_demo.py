@@ -90,7 +90,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--page", choices=("maintenance", "appearance", "certificates"),
                         default="maintenance")
-    parser.add_argument("--scale", type=int, choices=(80, 90, 100, 110, 125), default=None,
+    parser.add_argument("--scale", type=int, choices=(70, 80, 90, 100, 110, 125, 135), default=None,
                         help="κλίμακα περιβάλλοντος %% (προεπιλογή: όπως η εφαρμογή, 90 στα Windows)")
     parser.add_argument("--role", choices=security_demo.ROLE_SCENARIOS, default="primary",
                         help="σενάριο Κύριου/Εφεδρικού (όπως στο security_demo)")

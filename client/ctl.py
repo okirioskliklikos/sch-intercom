@@ -178,6 +178,14 @@ def enroll(layout: Layout, room: str | None, name: str | None, *, pause: bool) -
     return code
 
 
+def request_change(layout: Layout, room: str, name: str) -> int:
+    """5C2: αίτημα αλλαγής αίθουσας/ονόματος· το στέλνει ο Client που τρέχει (χωρίς κωδικό
+    αν είναι εγκεκριμένος, αλλιώς διόρθωση ή νέα αίτηση εγγραφής, όπως το «Αλλαγή…»)."""
+    command = layout.module_command("client.main", "--request-change", "--room", room,
+                                    "--computer-name", name)
+    return subprocess.call(command, env=layout.child_env(layout.current_version()))
+
+
 def purge(layout: Layout) -> None:
     """«Πλήρης αφαίρεση»: σβήνει ταυτότητα, κλειδιά και ρυθμίσεις του Client."""
     stop(layout)
@@ -208,12 +216,17 @@ def build_parser() -> argparse.ArgumentParser:
     actions.add_argument("--show-settings", action="store_true", help="Τοπικές ρυθμίσεις")
     actions.add_argument("--enroll", action="store_true",
                          help="Νέα αίτηση εγγραφής (δείχνει τον κωδικό για τον Manager)")
+    actions.add_argument("--request-change", action="store_true",
+                         help="Αίτημα αλλαγής αίθουσας/ονόματος στον Director (με --room και "
+                              "--computer-name)")
     actions.add_argument("--purge", action="store_true",
                          help="Πλήρης αφαίρεση ταυτότητας και ρυθμίσεων (με --yes)")
     actions.add_argument("--install-finish", metavar="ΕΚΔΟΣΗ", default=None,
                          help=argparse.SUPPRESS)
-    parser.add_argument("--room", default=None, help="Με --enroll: αίθουσα")
-    parser.add_argument("--computer-name", default=None, help="Με --enroll: όνομα υπολογιστή")
+    parser.add_argument("--room", default=None,
+                        help="Με --enroll/--request-change: αίθουσα")
+    parser.add_argument("--computer-name", default=None,
+                        help="Με --enroll/--request-change: όνομα υπολογιστή")
     parser.add_argument("--pause", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--yes", action="store_true", help="Επιβεβαίωση για --purge")
     parser.add_argument("--no-restart", action="store_true",
@@ -264,6 +277,10 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if args.enroll:
         return enroll(layout, args.room, args.computer_name, pause=args.pause)
+    if args.request_change:
+        if not args.room or not args.computer_name:
+            parser.error("--request-change χρειάζεται --room και --computer-name")
+        return request_change(layout, args.room, args.computer_name)
     if args.purge:
         if not args.yes:
             parser.error("Η πλήρης αφαίρεση σβήνει την ταυτότητα (χρειάζεται νέα έγκριση)· "

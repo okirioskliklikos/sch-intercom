@@ -13,6 +13,7 @@ import socket
 import threading
 import time
 from collections.abc import Callable
+from shared.room_names import short_room
 
 from PySide6.QtCore import (QElapsedTimer, QPointF, QRectF, QSize, Qt, QTimer,
                             QVariantAnimation)
@@ -33,7 +34,9 @@ from director.serving import ServingController, SocketServingService
 import uuid
 from shared.ui import icons, theme
 
-WINDOW_TITLE = "School Intercom — Διεύθυνση"
+WINDOW_TITLE = "School Intercom — Director"   # 5C2 (Client: «— αίθουσα · PC»)
+#: Υπότιτλος κάτω από το «School Intercom» στην αριστερή μπάρα (ο Client: «Client»).
+BRAND_SUB = "Director"
 PAGE_TITLE = "Κεντρική λειτουργία"
 REFRESH_MS = 100
 NOTICE_SECONDS = 4.0
@@ -304,10 +307,10 @@ class StatusDot(QWidget):
 class ElidedLabel(QLabel):
     """Κείμενο που κόβεται με «…» όταν δεν χωρά στο πλάτος (tooltip το πλήρες)."""
 
-    def __init__(self, text: str, parent=None):
+    def __init__(self, text: str, parent=None, *, tooltip: str | None = None):
         super().__init__(text, parent)
         self.full_text = text
-        self.setToolTip(text)
+        self.setToolTip(tooltip or text)
         self.setMinimumWidth(1)
 
     def resizeEvent(self, event) -> None:
@@ -346,7 +349,8 @@ class RoomRow(QWidget):
         self.checkbox.setFixedWidth(px(18))  # χωρίς κείμενο: όχι κενό spacing
         self.checkbox.setAccessibleName(room)
         # Το όνομα κόβεται με «…» μόνο όταν φτάνει στην κουκκίδα (ui-style.md §5).
-        self.label = ElidedLabel(room)
+        # 5C2: «Γ1» για την τρέχουσα σχολική χρονιά· το πλήρες όνομα στο tooltip.
+        self.label = ElidedLabel(short_room(room), tooltip=room)
         self.label.setObjectName("roomName")
         self.dot = StatusDot(theme.ROOM_DOT_OFFLINE)
         layout.addWidget(self.checkbox)
@@ -660,10 +664,16 @@ class DirectorWindow(QMainWindow):
         brand.setSpacing(px(8))
         logo = QLabel()
         logo.setPixmap(icons.app_pixmap(px(theme.BRAND_ICON)))
+        names = QVBoxLayout()
+        names.setSpacing(0)
         name = QLabel("School Intercom")
         name.setObjectName("brand")
-        brand.addWidget(logo)
-        brand.addWidget(name, 1)
+        self.brand_sub = QLabel(BRAND_SUB)
+        self.brand_sub.setObjectName("brandSub")
+        names.addWidget(name)
+        names.addWidget(self.brand_sub)
+        brand.addWidget(logo, 0, Qt.AlignmentFlag.AlignVCenter)
+        brand.addLayout(names, 1)
         layout.addLayout(brand)
 
         self.nav_buttons: dict[str, QPushButton] = {}
@@ -1667,6 +1677,8 @@ class GuiRuntime:
         self.stop = threading.Event()
         self.broadcaster = AudioBroadcaster(max_clients=MAX_CLIENTS,
                                             on_event=lambda s: print(s, flush=True))
+        if trust is not None and hasattr(trust, "attach"):
+            trust.attach(self.broadcaster)   # 5C2: αιτήματα αλλαγής από Clients
         self.microphone = DirectorMicrophone(stream_microphone, self.broadcaster,
                                              device=args.device, latency=args.latency)
         self.window: DirectorWindow | None = None

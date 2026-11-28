@@ -2,6 +2,7 @@
 
     python -m tools.client_demo [--state connected|pending|revoked|full|live] [--tab history|info]
     python -m tools.client_demo --screenshot out.png [--tray tray.png]
+    python -m tools.client_demo --screenshot out.png --dialog change|scale   (5C2)
 
 Χωρίς --screenshot ανοίγει το παράθυρο (και το εικονίδιο tray, αν υπάρχει)· τα δεδομένα
 είναι προσωρινά και σβήνονται στο κλείσιμο.
@@ -20,7 +21,8 @@ if __package__ in (None, ""):
 
 from client import status as st  # noqa: E402
 
-STATES = ("connected", "pending", "revoked", "full", "live", "update-failed")
+STATES = ("connected", "pending", "revoked", "full", "live", "update-failed",
+          "change-pending", "change-denied")
 FINGERPRINT = "84285ca1" + "3f" * 24 + "7e419d33"
 
 
@@ -40,7 +42,7 @@ def build(folder: Path, scenario: str, now: float) -> tuple[st.ClientStatus, st.
             json.dumps({"v": 1, "kind": "live", "start": start, "end": start + length}) + "\n"
             for start, length in events), encoding="utf-8")
     history = st.History(history_file).load()
-    status = st.ClientStatus(room="C2627-Γ1", name="Board1", version="1.0.6",
+    status = st.ClientStatus(room="C2627-Γ1", name="Board1", version="1.0.6", scale=90,
                              client_id="8c572527-3f1e-4b0a-9d21-6e0c41a0e2b7")
     if scenario == "pending":
         status.update(client_id="5e0b19c4-8d27-4c11-b6f0-2a9c3e7d4410", manager="192.168.1.10",
@@ -58,6 +60,9 @@ def build(folder: Path, scenario: str, now: float) -> tuple[st.ClientStatus, st.
         status.set_state(st.FULL)
     elif scenario == "update-failed":
         status.set_update("failed", "1.0.7", "Η νέα έκδοση δεν συνδέθηκε (επιστροφή στην 1.0.6)")
+    elif scenario in ("change-pending", "change-denied"):
+        status.update(change={"room": "C2627-Γ2", "name": "Board1",
+                              "state": scenario.split("-")[1]})
     elif scenario == "live":
         history.begin()
         status.update(live_since=time.time())
@@ -68,7 +73,10 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--state", choices=STATES, default="connected")
     parser.add_argument("--tab", choices=("history", "info"), default=None)
-    parser.add_argument("--scale", type=int, choices=(80, 90, 100, 110, 125), default=None)
+    parser.add_argument("--scale", type=int, choices=(70, 80, 90, 100, 110, 125, 135),
+                        default=None)
+    parser.add_argument("--dialog", choices=("change", "scale"), default=None,
+                        help="με --screenshot: και ο διάλογος «Αλλαγή…» ή «Κλίμακα»")
     parser.add_argument("--screenshot", type=Path, default=None,
                         help="μόνο στιγμιότυπο παραθύρου (offscreen) και έξοδος")
     parser.add_argument("--tray", type=Path, default=None,
@@ -87,7 +95,8 @@ def main() -> int:
         status, history = build(Path(temp), args.state, time.time())
         tray = ClientTray(status, history)
         window = tray.window
-        tab = args.tab or ("info" if args.state in ("pending", "update-failed") else "history")
+        tab = args.tab or ("info" if args.state in ("pending", "update-failed") or
+                           args.state.startswith("change") or args.dialog else "history")
         window.show_tab("Πληροφορίες" if tab == "info" else "Ιστορικό")
         if args.tray:
             sizes = (16, 24, 32, 64)
@@ -109,6 +118,18 @@ def main() -> int:
                 app.processEvents()
             window.grab().save(str(args.screenshot))
             print(f"Στιγμιότυπο: {args.screenshot}")
+            if args.dialog:
+                def hook(dialog):
+                    dialog.show()
+                    for _ in range(5):
+                        app.processEvents()
+                    target = args.screenshot.with_name(
+                        f"{args.screenshot.stem}-{args.dialog}{args.screenshot.suffix}")
+                    dialog.grab().save(str(target))
+                    print(f"Διάλογος: {target}")
+                    return 0
+                tray.dialog_hook = hook
+                tray.action(args.dialog)
         elif not args.tray:
             window.show()
             window.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, False)

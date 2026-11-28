@@ -7,6 +7,7 @@
 
 import argparse
 import os
+import queue
 import random
 from pathlib import Path
 import socket
@@ -17,19 +18,22 @@ from collections.abc import Callable
 
 from shared.audio import (BLOCK_BYTES, BLOCK_MS, BLOCK_SAMPLES, CHANNELS, DEFAULT_PORT,
                           DTYPE, SAMPLE_RATE, Frame, MESSAGE_STREAM_STOP,
-                          MESSAGE_CLIENT_SETTINGS, MESSAGE_UPDATE_CHECK,
+                          MESSAGE_CLIENT_SETTINGS, MESSAGE_UPDATE_CHECK, MESSAGE_CHANGE_STATUS,
                           decode_client_settings, receive_message)
 from shared.jitter import DelayTracker, JitterBuffer
 from shared.identity import (ManagerFull, ProtocolMismatch, load_identity, receive_welcome,
                              send_hello)
-from shared.enrollment import ENROLL_PORT, make_request, enroll_client
+from shared.enrollment import (ENROLL_PORT, amend_enrollment, make_amend, make_request,
+                               enroll_client)
+from shared import change_request as cr
 from shared.client_hints import load_hints, save_hints
 from shared.registry_seen import load_seen, manager_key, record_seen
 from shared.device_identity import create_device_identity, replace_device_identity
 from shared.transport_security import client_context, connect_tls, DEFAULT_SERVER_NAME
 from shared.discovery import discover_candidates, DISCOVERY_PORT
 from shared.manager_pin import load_pin, save_pin
-from client.install_paths import MANAGER_CERT, Layout, data_dir, load_settings
+from client.install_paths import MANAGER_CERT, Layout, data_dir, load_settings, save_settings
+from client.changes import ChangeController, watch_inbox
 from client.updater import AnnouncementState, Updater, peer_host
 from client.supervisor import RESULT_FILE, TRIAL_ENV, send_command
 from shared.update_protocol import UPDATE_PORT
@@ -109,12 +113,14 @@ def pump_frames(
     test_report=None,
     announcement: AnnouncementState | None = None,
     update_check: Callable[[], None] | None = None,
+    change_status: Callable[[dict], None] | None = None,
 ) -> None:
     """PCM/έλεγχος στην ίδια κατεύθυνση TCP, χωρίς reconnect σε αναμονή.
 
     test_report: μόνο στις δοκιμές 4.4 (``--test-report``)· καταγράφει λήψεις και STOP.
     announcement: 5B2, η λήψη ενημέρωσης σταματά όσο παίζει ανακοίνωση.
     update_check: 5B2, ο Manager ζήτησε CHECK ενημέρωσης τώρα («Έναρξη τώρα»).
+    change_status: 5C2, απάντηση του Director για το αίτημα αλλαγής αίθουσας/ονόματος.
     Άγνωστα μικρά μηνύματα ελέγχου (νεότερου Manager) αγνοούνται.
     """
     received = 0
@@ -159,6 +165,12 @@ def pump_frames(
         elif message.kind == MESSAGE_UPDATE_CHECK:
             if update_check is not None:
                 update_check()
+        elif message.kind == MESSAGE_CHANGE_STATUS:
+            if change_status is not None:
+                try:
+                    change_status(cr.decode_status(message.payload))
+                except (OSError, ValueError) as exc:
+                    print(f"[Client] Αγνοείται απάντηση αιτήματος αλλαγής: {exc}", flush=True)
         elif message.kind == MESSAGE_STREAM_STOP:
             if test_report is not None:
                 test_report.event("stop", underruns=jitter.underruns, dropped=jitter.dropped)
@@ -217,6 +229,7 @@ def play_stream(
     announcement: AnnouncementState | None = None,
     update_check: Callable[[], None] | None = None,
     on_output: Callable[[object], None] | None = None,
+    change_status: Callable[[dict], None] | None = None,
 ) -> None:
     import sounddevice as sd
 
@@ -288,7 +301,8 @@ def play_stream(
             pump_frames(connection, jitter, delay,
                         report=lambda line: print(line, flush=True), volume=volume,
                         settings_callback=settings_callback, test_report=test_report,
-                        announcement=announcement, update_check=update_check)
+                        announcement=announcement, update_check=update_check,
+                        change_status=change_status)
         finally:
             if volume is not None:
                 # Δίκτυο/τερματισμός: καλύτερα αποκατάσταση παρά παραμονή σε
@@ -567,6 +581,10 @@ def build_parser() -> argparse.ArgumentParser:
                         help="Ξεχωριστή θύρα εγγραφής Director")
     parser.add_argument("--computer-name", default=None,
                         help="Προτεινόμενο όνομα υπολογιστή στην εγγραφή")
+    parser.add_argument("--request-change", action="store_true",
+                        help="Αίτημα αλλαγής αίθουσας/ονόματος (με --room και "
+                             "--computer-name)· το στέλνει ο Client που τρέχει, χωρίς κωδικό "
+                             "αν είναι ήδη εγκεκριμένος")
     parser.add_argument("--client-hints-file", type=Path,
                         default=data / "client-hints.json",
                         help="Τελευταία στοιχεία που όρισε ο Manager")
@@ -657,6 +675,9 @@ def main() -> None:
     # 4.3C1: κλωνοποιημένος υπολογιστής ή ρητή νέα ταυτότητα. Τα παλιά αρχεία
     # μετακινούνται (όχι διαγραφή) και ακολουθεί νέα αίτηση εγγραφής.
     pin_file = args.identity_file.with_name("manager-pin.json")
+    data_folder = args.identity_file.parent
+    pending_file = args.identity_file.with_name(st.PENDING_FILE)
+    change_file = args.identity_file.with_name(cr.CLIENT_FILE)
     reset_label, old_room = None, previous_room(args.identity_file)
     if args.new_identity:
         reset_label = PREVIOUS
@@ -670,53 +691,89 @@ def main() -> None:
             reset_label = CLONED
             print(f"[Client] Αυτός ο υπολογιστής μοιάζει αντίγραφο άλλου ({reason}). "
                   "Η ταυτότητα του άλλου υπολογιστή δεν χρησιμοποιείται.", flush=True)
-    if reset_label is not None:
-        folder = archive_identity([args.identity_file, args.client_credentials_dir,
-                                   args.client_hints_file], reset_label)
-        print("[Client] Δημιουργείται νέα ταυτότητα· χρειάζεται νέα έγκριση στον Manager."
-              + (f" Τα παλιά αρχεία: {folder}" if folder else ""), flush=True)
 
-    room_override = args.room or (old_room if reset_label is not None else None)
-    client_id, room = load_identity(args.identity_file, room_override=room_override)
-    if args.new_client_key:
-        certfile, keyfile, password = replace_device_identity(args.client_credentials_dir,
-                                                              client_id)
-        print("Δημιουργήθηκε νέο κλειδί Client· το παλιό διαγράφηκε.", flush=True)
-    else:
-        certfile, keyfile, password = create_device_identity(args.client_credentials_dir,
-                                                             client_id)
-    try:
-        remember_machine(args.client_credentials_dir)
-    except OSError as exc:
-        print(f"[Client] Δεν σημειώθηκε το αποτύπωμα του υπολογιστή: {exc}", flush=True)
+    #: Η τρέχουσα ταυτότητα· 5C2: αλλάζει χωρίς επανεκκίνηση με «Αλλαγή…» μετά από ανάκληση.
+    ident: dict = {}
+
+    def activate(label: str | None, room_override: str | None, *, new_key: bool = False,
+                 extra: tuple[Path, ...] = ()) -> None:
+        if label is not None:
+            folder = archive_identity([args.identity_file, args.client_credentials_dir,
+                                       args.client_hints_file, *extra], label)
+            print("[Client] Δημιουργείται νέα ταυτότητα· χρειάζεται νέα έγκριση στον Manager."
+                  + (f" Τα παλιά αρχεία: {folder}" if folder else ""), flush=True)
+        client_id, room = load_identity(args.identity_file, room_override=room_override)
+        if new_key:
+            certfile, keyfile, password = replace_device_identity(args.client_credentials_dir,
+                                                                  client_id)
+            print("Δημιουργήθηκε νέο κλειδί Client· το παλιό διαγράφηκε.", flush=True)
+        else:
+            certfile, keyfile, password = create_device_identity(args.client_credentials_dir,
+                                                                 client_id)
+        try:
+            remember_machine(args.client_credentials_dir)
+        except OSError as exc:
+            print(f"[Client] Δεν σημειώθηκε το αποτύπωμα του υπολογιστή: {exc}", flush=True)
+        ident.update(client_id=client_id, room=room, certfile=certfile, keyfile=keyfile,
+                     password=password,
+                     context=client_context(args.tls_ca, certfile=certfile, keyfile=keyfile,
+                                            password=password))
+
+    # Με --request-change η --room είναι η ζητούμενη, όχι η αίθουσα της ταυτότητας.
+    room_override = None if args.request_change else args.room
+    activate(reset_label, room_override or (old_room if reset_label is not None else None),
+             new_key=args.new_client_key)
+    client_id = ident["client_id"]
+
+    if args.request_change:
+        if not args.room or not args.computer_name:
+            parser.error("--request-change χρειάζεται --room και --computer-name")
+        try:
+            ChangeController.write_inbox(data_folder, client_id, args.room, args.computer_name)
+        except (OSError, ValueError) as exc:
+            parser.exit(2, f"Το αίτημα αλλαγής δεν καταχωρήθηκε: {exc}\n")
+        print(f"Αίτημα αλλαγής σε {args.room} · {args.computer_name}: το στέλνει ο Client "
+              "στον Director (αν δεν τρέχει, στην επόμενη εκκίνηση).", flush=True)
+        return
 
     # 5C1: κατάσταση για tray/παράθυρο (υπάρχει και χωρίς GUI· κοστίζει ελάχιστα).
-    pending_file = args.identity_file.with_name(st.PENDING_FILE)
     hints = load_hints(args.client_hints_file)
     pending = st.load_pending(pending_file, client_id)
+    try:
+        ui_scale = load_settings(data_folder)["ui_scale"]
+    except ValueError:
+        ui_scale = None
+    from shared.ui.theme import default_ui_scale
     status = st.ClientStatus(
-        room=(pending or {}).get("room") or hints.get("room") or room,
+        room=(pending or {}).get("room") or hints.get("room") or ident["room"],
         name=(pending or {}).get("name") or hints.get("name"),
         client_id=client_id, volume=args.announcement_volume, mute_others=args.mute_others,
-        approved_before=args.registry_seen_file.exists(), enrollment=pending)
+        approved_before=args.registry_seen_file.exists(), enrollment=pending,
+        scale=ui_scale or default_ui_scale())
+    changes = ChangeController(change_file, client_id, status=status)
 
-    def submit_enrollment() -> None:
-        hints = load_hints(args.client_hints_file)
-        proposed_room = args.room or hints.get("room") or room
-        computer_name = args.computer_name or hints.get("name") or socket.gethostname()[:64]
-        request = make_request(client_id, proposed_room, computer_name,
-                               certfile.read_bytes(), keyfile.read_bytes(), password)
+    def enrollment_hosts() -> list[str]:
         if args.host:
-            hosts = [args.host]
-        else:
-            # 4.3C1: όπως στη σύνδεση, κάθε υποψήφιος ελέγχεται με TLS στο enroll_client.
-            hosts = list(dict.fromkeys(item[0] for item in discover_candidates(
-                udp_port=args.discovery_port,
-                preferred_id=(load_pin(pin_file) or {}).get("director_id"))))
-            if not hosts:
-                raise ConnectionError("Δεν βρέθηκε Manager για εγγραφή. Δώστε --host.")
+            return [args.host]
+        # 4.3C1: όπως στη σύνδεση, κάθε υποψήφιος ελέγχεται με TLS στο enroll_client.
+        hosts = list(dict.fromkeys(item[0] for item in discover_candidates(
+            udp_port=args.discovery_port,
+            preferred_id=(load_pin(pin_file) or {}).get("director_id"))))
+        if not hosts:
+            raise ConnectionError("Δεν βρέθηκε Manager για εγγραφή. Δώστε --host.")
+        return hosts
+
+    def submit_enrollment(proposed_room: str | None = None,
+                          computer_name: str | None = None) -> None:
+        hints = load_hints(args.client_hints_file)
+        proposed_room = proposed_room or args.room or hints.get("room") or ident["room"]
+        computer_name = (computer_name or args.computer_name or hints.get("name")
+                         or socket.gethostname()[:64])
+        request = make_request(ident["client_id"], proposed_room, computer_name,
+                               ident["certfile"].read_bytes(), ident["keyfile"].read_bytes(),
+                               ident["password"])
         errors = []
-        for enrollment_host in hosts:
+        for enrollment_host in enrollment_hosts():
             try:
                 queued = enroll_client(enrollment_host, args.enrollment_port, args.tls_ca,
                                        args.tls_server_name, request)
@@ -729,14 +786,42 @@ def main() -> None:
         try:
             st.save_pending(pending_file, code=queued["code"], room=proposed_room,
                             name=computer_name, expires_at=queued["expires_at"],
-                            client_id=client_id)
+                            client_id=ident["client_id"], request_id=queued.get("request_id"))
         except OSError as exc:
             print(f"[Client] Δεν αποθηκεύτηκε το αίτημα για το παράθυρο: {exc}", flush=True)
         status.update(room=proposed_room, name=computer_name,
-                      enrollment=st.load_pending(pending_file, client_id))
+                      enrollment=st.load_pending(pending_file, ident["client_id"]))
         until = time.strftime("%d/%m/%Y %H:%M", time.localtime(queued["expires_at"]))
         print(f"Αίθουσα: {proposed_room} | Υπολογιστής: {computer_name} | "
               f"Κωδικός: {queued['code']} | Λήξη: {until}", flush=True)
+
+    def amend(room_value: str, name_value: str) -> None:
+        """5C2: πριν από την πρώτη έγκριση· διόρθωση του αιτήματος, ίδιος κωδικός."""
+        cid = ident["client_id"]
+        waiting = st.load_pending(pending_file, cid)
+        if waiting is None or not waiting.get("request_id"):
+            raise ConnectionError("δεν βρέθηκε το αίτημα εγγραφής αυτού του υπολογιστή")
+        seq = waiting["seq"] + 1
+        message = make_amend(waiting["request_id"], cid, room_value, name_value, seq,
+                             ident["keyfile"].read_bytes(), ident["password"])
+        errors = []
+        for enrollment_host in enrollment_hosts():
+            try:
+                amend_enrollment(enrollment_host, args.enrollment_port, args.tls_ca,
+                                 args.tls_server_name, message)
+                break
+            except (OSError, EOFError, ValueError) as exc:
+                errors.append(f"{enrollment_host}: {exc}")
+        else:
+            raise ConnectionError("; ".join(errors))
+        st.save_pending(pending_file, code=waiting["code"], room=room_value, name=name_value,
+                        expires_at=waiting["expires_at"], client_id=cid,
+                        request_id=waiting["request_id"], seq=seq)
+        save_hints(args.client_hints_file, room_value, name_value)
+        status.update(room=room_value, name=name_value, change=None,
+                      enrollment=st.load_pending(pending_file, cid))
+        print(f"[Client] Διορθώθηκε το αίτημα εγγραφής: {room_value} · {name_value} "
+              f"(ίδιος κωδικός {waiting['code']})", flush=True)
 
     if args.enroll:
         try:
@@ -754,11 +839,9 @@ def main() -> None:
         except (OSError, EOFError, ValueError) as exc:
             print(f"[Client] Η νέα αίτηση εγγραφής δεν καταχωρήθηκε: {exc}. "
                   "Δοκιμάστε αργότερα με --enroll.", flush=True)
-    trusted_director = client_context(args.tls_ca, certfile=certfile, keyfile=keyfile,
-                                      password=password)
-    print(f"Πιστοποιητικό Client: {certfile}", flush=True)
+    print(f"Πιστοποιητικό Client: {ident['certfile']}", flush=True)
     print("Απαιτείται μία αρχική έγκριση του PEM από τον Director.", flush=True)
-    print(f"Client ID: {client_id} | Αίθουσα: {room}", flush=True)
+    print(f"Client ID: {client_id} | Αίθουσα: {ident['room']}", flush=True)
 
     # 5B2: ενημερώσεις μόνο σε εγκατεστημένο Client (current.json του εγκαταστάτη).
     history = st.History(args.identity_file.with_name(st.HISTORY_FILE)).load()
@@ -772,21 +855,31 @@ def main() -> None:
             status.update(live_since=None)
 
     announcement = AnnouncementState(on_change=on_announcement)
-    updater = None
     layout = Layout()
     try:
         installed = layout.current_version()
     except ValueError as exc:
         installed = None
         print(f"[Ενημέρωση] Αγνοείται το {layout.current_file}: {exc}", flush=True)
+    worker: dict = {"updater": None}
+
+    def start_updater() -> None:
+        if installed is None:
+            return
+        worker["updater"] = Updater(layout, ident["client_id"], ident["context"],
+                                    server_name=args.tls_server_name, port=args.update_port,
+                                    trusted_keys=args.update_trusted_key,
+                                    announcement=announcement,
+                                    on_state=status.set_update,
+                                    **({} if args.update_retry_seconds is None
+                                       else {"error_retry": args.update_retry_seconds})).start()
+
+    def trigger_update(manager_host: str | None) -> None:
+        if worker["updater"] is not None:
+            worker["updater"].trigger(manager_host)
+
     if installed is not None:
-        updater = Updater(layout, client_id, trusted_director,
-                          server_name=args.tls_server_name, port=args.update_port,
-                          trusted_keys=args.update_trusted_key,
-                          announcement=announcement,
-                          on_state=status.set_update,
-                          **({} if args.update_retry_seconds is None
-                             else {"error_retry": args.update_retry_seconds})).start()
+        start_updater()
         print(f"[Ενημέρωση] Εγκατεστημένη έκδοση {installed}", flush=True)
     else:
         status.set_update("none")
@@ -812,12 +905,12 @@ def main() -> None:
                     print(f"[Ενημέρωση] Η έκδοση {trial['version']} συνδέθηκε· "
                           + ("επιβεβαιώθηκε." if answer.get("ok")
                              else f"ο supervisor: {answer.get('error')}"), flush=True)
-                    if answer.get("ok") and updater is not None:
+                    if answer.get("ok") and worker["updater"] is not None:
                         result = layout.home / RESULT_FILE
                         deadline = time.monotonic() + 15
                         while not result.exists() and time.monotonic() < deadline:
                             time.sleep(0.25)
-                        updater.trigger(manager_host)
+                        trigger_update(manager_host)
                     return
                 except OSError as exc:
                     error = exc
@@ -830,6 +923,7 @@ def main() -> None:
     def on_settings(info: dict) -> None:
         name = info["name"] or socket.gethostname()[:64]
         save_hints(args.client_hints_file, info["room"], name)
+        changes.set_current(info["room"], name)
         status.update(room=info["room"], name=name)
 
     def on_output(output) -> None:
@@ -841,7 +935,7 @@ def main() -> None:
             status.set_state(kind, detail)
             return
         # Ο Manager απέρριψε το πιστοποιητικό: αναμονή έγκρισης, ανάκληση ή καμία αίτηση.
-        waiting = st.load_pending(pending_file, client_id)
+        waiting = st.load_pending(pending_file, ident["client_id"])
         status.update(enrollment=waiting)
         if waiting is not None:
             status.set_state(st.PENDING)
@@ -856,12 +950,11 @@ def main() -> None:
         seen = load_seen(args.registry_seen_file, key)
         manager_host = peer_host(connection)
         try:
-            send_hello(connection, client_id, room, seen=seen)
+            send_hello(connection, ident["client_id"], ident["room"], seen=seen)
             welcome = receive_welcome(connection)
         except ProtocolMismatch:
             # Ασύμβατο πρωτόκολλο ήχου: η ενημέρωση είναι ο τρόπος να ξανασυνδεθεί.
-            if updater is not None:
-                updater.trigger(manager_host)
+            trigger_update(manager_host)
             raise
         except ManagerFull:
             raise
@@ -871,8 +964,7 @@ def main() -> None:
         status.set_state(st.CONNECTED)
         st.clear_pending(pending_file)
         confirm_trial(manager_host)
-        if updater is not None:
-            updater.trigger(manager_host)   # σε κάθε σύνδεση και επανασύνδεση
+        trigger_update(manager_host)   # σε κάθε σύνδεση και επανασύνδεση
         if welcome is not None:
             if seen is not None and (seen["rv"] > welcome["rv"] or (
                     seen["rv"] == welcome["rv"] and seen["hash"] != welcome["hash"])):
@@ -888,7 +980,11 @@ def main() -> None:
             test_report.event("connected")
         current["connection"] = connection
         heartbeat_stop = threading.Event()
+        # 5C2: τα αιτήματα αλλαγής φεύγουν από το ίδιο νήμα με τα heartbeat.
+        outbox: queue.Queue = queue.Queue()
+        changes.connected(outbox)
         sender = threading.Thread(target=heartbeat_sender, args=(connection, heartbeat_stop),
+                                  kwargs={"outbox": outbox},
                                   name="client-heartbeat", daemon=True)
         sender.start()
         try:
@@ -902,9 +998,10 @@ def main() -> None:
                         settings_callback=on_settings,
                         on_output=on_output,
                         test_report=test_report, announcement=announcement,
-                        update_check=None if updater is None
-                        else lambda: updater.trigger(manager_host))
+                        update_check=lambda: trigger_update(manager_host),
+                        change_status=changes.on_status)
         finally:
+            changes.disconnected()
             current["connection"] = None
             announcement.set(False)
             if test_report is not None:
@@ -917,17 +1014,10 @@ def main() -> None:
         from shared.test_report import TestReport
         test_report = TestReport(args.test_report)
     stop = threading.Event()
+    epoch = threading.Event()        # τέλος του τρέχοντος βρόχου σύνδεσης (stop ή νέα ταυτότητα)
+    reenroll: dict = {"target": None}
 
-    def network() -> None:
-        run_with_reconnect(args.host, args.port, session,
-                           discovery_port=args.discovery_port, pin_file=pin_file,
-                           tls_context=trusted_director,
-                           tls_server_name=args.tls_server_name,
-                           on_state=on_state, stop=stop)
-
-    def stop_network() -> None:
-        """Από το GUI: τέλος βρόχου και κλείσιμο της τρέχουσας σύνδεσης (επαναφορά ήχου)."""
-        stop.set()
+    def close_connection() -> None:
         connection = current["connection"]
         if connection is not None:
             try:
@@ -935,6 +1025,74 @@ def main() -> None:
             except OSError:
                 pass
 
+    def new_enrollment(room_value: str, name_value: str) -> None:
+        """5C2: μετά από ανάκληση/χωρίς αίτημα· νέα ταυτότητα και νέος κωδικός."""
+        if worker["updater"] is not None:
+            worker["updater"].stop()
+            worker["updater"] = None
+        activate(PREVIOUS, room_value, extra=(pending_file, change_file))
+        changes.reset(ident["client_id"])
+        status.update(client_id=ident["client_id"], room=room_value, name=name_value,
+                      enrollment=None, approved_before=False)
+        try:
+            submit_enrollment(room_value, name_value)
+            status.set_state(st.PENDING)
+        except (OSError, EOFError, ValueError) as exc:
+            print(f"[Client] Η νέα αίτηση εγγραφής δεν καταχωρήθηκε: {exc}", flush=True)
+            changes.fail(room_value, name_value, str(exc))
+            status.set_state(st.UNAPPROVED)
+        start_updater()
+
+    def network() -> None:
+        while not stop.is_set():
+            epoch.clear()
+            run_with_reconnect(args.host, args.port, session,
+                               discovery_port=args.discovery_port, pin_file=pin_file,
+                               tls_context=ident["context"],
+                               tls_server_name=args.tls_server_name,
+                               on_state=on_state, stop=epoch)
+            target, reenroll["target"] = reenroll["target"], None
+            if stop.is_set():
+                return
+            if target is not None:
+                new_enrollment(*target)
+
+    def handle_change(room_value: str, name_value: str) -> str:
+        """«Αλλαγή…» του παραθύρου και ``--request-change``: ανάλογα με την κατάσταση."""
+        room_value, name_value = cr.check_room(room_value), cr.check_name(name_value)
+        mode = st.change_mode(status.snapshot())
+        if mode == st.MODE_CHANGE:
+            changes.request(room_value, name_value)
+        elif mode == st.MODE_AMEND:
+            def work() -> None:
+                try:
+                    amend(room_value, name_value)
+                except (OSError, EOFError, ValueError) as exc:
+                    print(f"[Client] Δεν διορθώθηκε το αίτημα εγγραφής: {exc}", flush=True)
+                    changes.fail(room_value, name_value, str(exc))
+            threading.Thread(target=work, name="client-amend", daemon=True).start()
+        else:
+            reenroll["target"] = (room_value, name_value)
+            epoch.set()
+            close_connection()
+        return mode
+
+    def set_scale(scale: int) -> None:
+        try:
+            save_settings(data_folder, ui_scale=scale)
+        except (OSError, ValueError) as exc:
+            print(f"[Client] Δεν αποθηκεύτηκε η κλίμακα: {exc}", flush=True)
+        status.update(scale=scale)
+
+    def stop_network() -> None:
+        """Από το GUI: τέλος βρόχου και κλείσιμο της τρέχουσας σύνδεσης (επαναφορά ήχου)."""
+        stop.set()
+        epoch.set()
+        close_connection()
+
+    threading.Thread(target=watch_inbox,
+                     args=(data_folder, lambda: ident["client_id"], handle_change, stop),
+                     name="client-change-inbox", daemon=True).start()
     try:
         if not args.no_tray and st.tray_supported():
             try:
@@ -943,13 +1101,15 @@ def main() -> None:
                 print(f"[Client] Χωρίς tray (λείπει το PySide6: {exc})", flush=True)
             else:
                 run_tray(status, history, network, stop=stop_network, dump_file=args.status_dump,
-                         show_window=args.show_window)
+                         show_window=args.show_window, on_change=handle_change,
+                         on_scale=set_scale)
                 print("Ο Client τερματίστηκε.", flush=True)
                 return
         network()
     except KeyboardInterrupt:
         print("\nΟ Client τερματίστηκε.", flush=True)
     finally:
+        stop.set()
         if test_report is not None:
             test_report.close()
 

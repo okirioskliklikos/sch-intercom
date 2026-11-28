@@ -73,7 +73,8 @@ class DirectorWindowTests(TestCase):
 
     def test_idle_layout_and_safe_state(self):
         window = self.make(self.STATUS)
-        self.assertEqual(window.windowTitle(), "School Intercom — Διεύθυνση")
+        self.assertEqual(window.windowTitle(), "School Intercom — Director")
+        self.assertEqual(window.brand_sub.text(), "Director")
         self.assertEqual(self.broadcaster.targets, [(set(), set())])
         self.assertFalse(self.mic.device_open)
         self.assertEqual(window.online_count.text(), "(2/3 online)")

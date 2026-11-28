@@ -89,8 +89,8 @@ class StatusTests(TestCase):
         rows = {row["label"]: row for row in st.info_rows(status.snapshot(), now=NOW)}
         self.assertEqual(rows["Κατάσταση"]["value"], "Συνδεδεμένος")
         self.assertEqual(rows["Κατάσταση"]["note"], "από 12:00")
-        self.assertEqual(rows["Αποτύπωμα Manager"]["value"], "84:28:5C:A1 … 7E:41:9D:33")
-        self.assertTrue(rows["Αποτύπωμα Manager"]["mono"])
+        self.assertEqual(rows["Αποτύπωμα Director"]["value"], "84:28:5C:A1 … 7E:41:9D:33")
+        self.assertTrue(rows["Αποτύπωμα Director"]["mono"])
         self.assertEqual(rows["Ενημέρωση"]["value"], "Ενημερωμένη")
         self.assertEqual(rows["Ενημέρωση"]["tone"], "ok")
         self.assertEqual(rows["Ένταση ανακοίνωσης"]["value"], "60% · σίγαση άλλων ήχων")
@@ -273,8 +273,8 @@ class TrayTests(TestCase):
         self.flush()
         dump = tray.dump()
         self.assertEqual([item["text"] for item in dump["menu"]],
-                         ["C2627-Γ1 · Board1", "Συνδεδεμένος", "Άνοιγμα"])
-        self.assertEqual([item["enabled"] for item in dump["menu"]], [False, False, True])
+                         ["C2627-Γ1 · Board1", "Συνδεδεμένος", "Ιστορικό…", "Πληροφορίες…"])
+        self.assertEqual([item["enabled"] for item in dump["menu"]], [False, False, True, True])
         self.assertNotIn("Έξοδος", json.dumps(dump, ensure_ascii=False))
         self.assertEqual(dump["tooltip"], "C2627-Γ1 · Board1 — Συνδεδεμένος")
         self.assertEqual(dump["tone"], "ok")
@@ -350,3 +350,126 @@ class TrayTests(TestCase):
         worker.join()
         self.flush()
         self.assertEqual(tray.dump()["tooltip"], "C2627-Γ1 · Board1 — Συνδεδεμένος")
+
+
+@skipUnless(HAVE_QT, "PySide6")
+class ChangeWindowTests(TestCase):
+    """5C2: αριστερή μπάρα, «Αλλαγή…», Κλίμακα, εικονίδιο στους διαλόγους, μενού tray."""
+
+    @classmethod
+    def setUpClass(cls):
+        from client.qt_client import setup_application
+        cls.app = setup_application()
+
+    def flush(self):
+        self.app.processEvents()
+        self.app.processEvents()
+
+    def make(self, **initial):
+        from client.qt_client import ClientTray
+        self.dir = Path(tempfile.mkdtemp())
+        status = st.ClientStatus(**initial)
+        history = st.History(self.dir / st.HISTORY_FILE).load()
+        self.changes, self.scales, self.dialogs = [], [], []
+        tray = ClientTray(status, history, tray_available=True,
+                          on_change=lambda r, n: self.changes.append((r, n)),
+                          on_scale=lambda s: (self.scales.append(s), status.update(scale=s)))
+        self.addCleanup(tray.window.deleteLater)
+        return status, history, tray
+
+    def test_sidebar_titles_and_info_buttons(self):
+        status, _history, tray = self.make(room="C2627-Γ1", name="Board1", scale=90)
+        status.set_state(st.CONNECTED)
+        self.flush()
+        window = tray.window.dump()
+        self.assertEqual(window["window_title"], "School Intercom — C2627-Γ1 · Board1")
+        self.assertEqual(window["brand_sub"], "Client")
+        self.assertEqual(window["title"], "C2627-Γ1 · Board1")
+        self.assertEqual(window["page_title"], "Ιστορικό")
+        tray.window.show_tab("Πληροφορίες")
+        self.assertEqual(tray.window.dump()["page_title"], "Πληροφορίες")
+        rows = {row["label"]: row for row in tray.window.dump()["info_rows"]}
+        labels = list(rows)
+        self.assertEqual(labels[:5], ["Κατάσταση", "Αίθουσα", "Υπολογιστής", "Κλίμακα",
+                                      "Director"])
+        self.assertEqual(rows["Υπολογιστής"]["action"], st.ACTION_CHANGE)
+        self.assertEqual(rows["Κλίμακα"]["action"], st.ACTION_SCALE)
+        self.assertEqual(rows["Κλίμακα"]["value"], "90%")
+        for action in (st.ACTION_CHANGE, st.ACTION_SCALE):
+            button = tray.window.info.action_button(action)
+            self.assertFalse(button.isHidden())
+            self.assertEqual(button.text(), "Αλλαγή…")
+        self.assertFalse(any("Manager" in str(row) for row in tray.window.dump()["info_rows"]))
+
+    def test_tray_menu_opens_tabs(self):
+        status, _history, tray = self.make(room="C2627-Γ1", name="Board1")
+        tray.window.show_tab("Πληροφορίες")
+        tray.menu.actions()[-1].trigger()            # «Πληροφορίες…»
+        self.assertEqual(tray.window.current_tab, "Πληροφορίες")
+        tray.open_action.trigger()                   # «Ιστορικό…»
+        self.assertEqual(tray.window.current_tab, "Ιστορικό")
+        tray.window.show_tab("Πληροφορίες")
+        from PySide6.QtWidgets import QSystemTrayIcon
+        tray._activated(QSystemTrayIcon.ActivationReason.DoubleClick)
+        self.assertEqual(tray.window.current_tab, "Ιστορικό")
+        tray.window.hide()
+
+    def test_change_dialog_by_state_with_app_icon(self):
+        from client.qt_client import ChangeDialog
+        status, _history, tray = self.make(room="C2627-Γ1", name="Board1")
+        status.set_state(st.CONNECTED)
+        seen = []
+
+        def hook(dialog):
+            seen.append(dialog)
+            self.assertIsInstance(dialog, ChangeDialog)
+            self.assertFalse(dialog.windowIcon().isNull())     # εικονίδιο στη γραμμή τίτλου
+            self.assertEqual(dialog.windowTitle(), st.CHANGE_TITLE)
+            self.assertEqual(dialog.accept_button.text(), "Αποστολή αιτήματος")
+            self.assertEqual(dialog.room.text(), "C2627-Γ1")
+            dialog.room.setText("  C2627-Γ2 ")
+            dialog.name.setText("")
+            dialog._accept()
+            self.assertFalse(dialog.error.isHidden())            # κενό όνομα: μένει ανοιχτός
+            dialog.name.setText("Board 2")
+            dialog._accept()
+            return dialog.result()
+        tray.dialog_hook = hook
+        tray.action(st.ACTION_CHANGE)
+        self.assertEqual(self.changes, [("C2627-Γ2", "Board 2")])
+        for state, extra, text in ((st.REVOKED, {}, "Νέα αίτηση εγγραφής"),
+                                   (st.PENDING, {"enrollment": {"code": "482913",
+                                                                "expires_at": 9e9}},
+                                    "Διόρθωση αιτήματος")):
+            status.update(**extra)
+            status.set_state(state)
+            tray.dialog_hook = lambda d, t=text: (self.assertEqual(d.accept_button.text(), t), 0)[1]
+            tray.action(st.ACTION_CHANGE)
+        self.assertEqual(len(self.changes), 1)                   # Άκυρο: τίποτα
+
+    def test_scale_dialog_applies_without_reconnect(self):
+        from client.qt_client import ScaleDialog
+        from shared.ui import theme
+        status, _history, tray = self.make(room="C2627-Γ1", name="Board1", scale=100)
+        tray.window.show_tab("Πληροφορίες")
+        old = tray.window
+
+        def hook(dialog):
+            self.assertIsInstance(dialog, ScaleDialog)
+            self.assertFalse(dialog.windowIcon().isNull())
+            self.assertEqual([b.text() for b in dialog.buttons.values()],
+                             [f"{v}%" for v in theme.UI_SCALES])
+            self.assertTrue(dialog.buttons[100].isChecked())
+            dialog.buttons[125].click()
+            return 1
+        tray.dialog_hook = hook
+        try:
+            tray.action(st.ACTION_SCALE)
+            self.assertEqual(self.scales, [125])
+            self.assertIsNot(tray.window, old)
+            self.assertEqual(tray.window.current_tab, "Πληροφορίες")
+            rows = {r["label"]: r for r in tray.window.dump()["info_rows"]}
+            self.assertEqual(rows["Κλίμακα"]["value"], "125%")
+        finally:
+            from client.qt_client import setup_application
+            setup_application(ui_scale=theme.default_ui_scale())

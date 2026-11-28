@@ -24,7 +24,9 @@ MAX_HELLO_BYTES = 512
 # 6 = Manager-owned room/name updates over authenticated control stream.
 # 7 = 4.2D3: το HELLO αναφέρει τη μεγαλύτερη έκδοση μητρώου που είδε ο Client
 #     ("seen") και το αποδεκτό WELCOME στέλνει την έκδοση και το hash του μητρώου.
-CONNECTION_PROTOCOL = 7
+# 8 = 5C2: αίτημα αλλαγής αίθουσας/ονόματος Client → Director ανάμεσα στα heartbeat
+#     (shared.control, shared.change_request) και απάντηση MESSAGE_CHANGE_STATUS.
+CONNECTION_PROTOCOL = 8
 WELCOME_MAGIC = b"SIWK"
 WELCOME = struct.Struct("!4sBB")
 #: Συνέχεια αποδεκτού WELCOME (v7): registry_version και SHA-256 του μητρώου.

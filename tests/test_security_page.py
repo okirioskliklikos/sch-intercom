@@ -655,9 +655,11 @@ class SecurityPageTests(SecurityFixture, unittest.TestCase):
             top_left = widget.mapTo(row, widget.rect().topLeft())
             return top_left.x(), top_left.y(), top_left.x() + widget.width()
 
-        title_x, title_y, title_right = box(row.title)
+        # 5C2 (#mgr-edit-request): η πρώτη γραμμή είναι ID/χρόνοι· πεδία Αίθουσα/Υπολογιστής.
+        self.assertTrue(row.title.isHidden())
+        title_x, title_y, title_right = box(row.meta)
         result_x, result_y, result_right = box(row.result)
-        self.assertLessEqual(abs(result_y - title_y), row.title.height())  # ίδια γραμμή
+        self.assertLessEqual(abs(result_y - title_y), row.meta.height())  # ίδια γραμμή
         self.assertGreaterEqual(result_x, title_right)
         code_x, _y, code_right = box(row.code)
         approve_x, _y, approve_right = box(row.approve)

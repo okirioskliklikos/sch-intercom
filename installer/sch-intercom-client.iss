@@ -216,7 +216,11 @@ begin
 
   if NeedsDetails then
     Exec(Python(False), HomeArgs + ' --enroll --room "' + Room + '" --computer-name "' + ComputerName + '" --pause',
-      ExpandConstant('{app}'), SW_SHOW, ewWaitUntilTerminated, Code);
+      ExpandConstant('{app}'), SW_SHOW, ewWaitUntilTerminated, Code)
+  else if not NewIdentity and (Room <> '') and (ComputerName <> '') then
+    { 5C2: επανεγκατάσταση με /ROOM= και /PC=· αίτημα αλλαγής στον Director (χωρίς κωδικό). }
+    Exec(Python(False), HomeArgs + ' --request-change --room "' + Room + '" --computer-name "' + ComputerName + '"',
+      ExpandConstant('{app}'), SW_HIDE, ewWaitUntilTerminated, Code);
 
   if not HasSwitch('NOSTART') then
     Exec(Python(True), '-m client.supervisor --home "' + ExpandConstant('{app}') + '"',

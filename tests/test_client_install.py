@@ -111,10 +111,10 @@ class VersionAndLayoutTests(TempTest):
         self.assertIn(str(ROOT), self.layout.child_env(None)["PYTHONPATH"].split(os.pathsep))
 
     def test_settings_round_trip_and_main_defaults(self):
-        self.assertEqual(load_settings(self.data), {"director_host": None, "device": None})
+        self.assertEqual(load_settings(self.data), {"director_host": None, "device": None, "ui_scale": None})
         save_settings(self.data, director_host="10.0.0.5")
         save_settings(self.data, device=3)
-        self.assertEqual(load_settings(self.data), {"director_host": "10.0.0.5", "device": 3})
+        self.assertEqual(load_settings(self.data), {"director_host": "10.0.0.5", "device": 3, "ui_scale": None})
         with mock.patch.dict(os.environ, {DATA_ENV: str(self.data)}):
             args = client_main.build_parser().parse_args([])
         self.assertEqual(args.identity_file, self.data / "client.json")
@@ -172,7 +172,7 @@ class CtlTests(TempTest):
         with mock.patch("sys.stdout", new=io.StringIO()):
             self.assertEqual(ctl.main(base + ["--set-director-host", "10.1.2.3"]), 0)
             self.assertEqual(ctl.main(base + ["--set-device", "2"]), 0)
-            self.assertEqual(load_settings(self.data), {"director_host": "10.1.2.3", "device": 2})
+            self.assertEqual(load_settings(self.data), {"director_host": "10.1.2.3", "device": 2, "ui_scale": None})
             self.assertEqual(ctl.main(base + ["--set-director-host", "auto"]), 0)
             self.assertIsNone(load_settings(self.data)["director_host"])
             self.assertEqual(ctl.main(base + ["--status"]), ctl.EXIT_NOT_RUNNING)
