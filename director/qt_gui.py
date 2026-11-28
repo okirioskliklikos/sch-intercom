@@ -17,7 +17,7 @@ from shared.room_names import short_room
 
 from PySide6.QtCore import (QElapsedTimer, QPointF, QRectF, QSize, Qt, QTimer,
                             QVariantAnimation)
-from PySide6.QtGui import QColor, QFont, QFontDatabase, QFontMetrics, QPainter, QPen
+from PySide6.QtGui import QColor, QFont, QFontMetrics, QPainter, QPen
 from PySide6.QtWidgets import (QAbstractButton, QApplication, QButtonGroup, QCheckBox,
                                QFrame, QGridLayout, QHBoxLayout, QLabel, QMainWindow, QMessageBox,
                                QPushButton, QRadioButton, QScrollArea, QSizePolicy,
@@ -816,10 +816,9 @@ class DirectorWindow(QMainWindow):
             self.full_bar.set_text(text)
         duplicates = getattr(broadcaster, "duplicate_identities", list)()
         names = getattr(broadcaster, "client_names", dict)()
-        mono = QFontDatabase.systemFont(QFontDatabase.SystemFont.FixedFont).family()
         # Δεύτερη γραμμή («Στον έναν…») λίγο μικρότερη, όπως το «small» των καρτών.
         hint = f"{self.duplicate_bar.text.font().pointSizeF() * 0.9:.1f}pt"
-        text = duplicate_html(duplicates, names, mono=f'"{mono}"', hint_size=hint)
+        text = duplicate_html(duplicates, names, hint_size=hint)
         self.duplicate_bar.setVisible(text is not None)
         if text is not None:
             self.duplicate_bar.set_text(text)

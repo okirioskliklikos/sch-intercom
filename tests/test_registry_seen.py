@@ -44,9 +44,9 @@ class ProtocolTests(unittest.TestCase):
         self.addCleanup(self.right.close)
         self.client_id = str(uuid.uuid4())
 
-    def test_version_is_8(self):
+    def test_version_is_9(self):
         # 7 = 4.2D3 (seen/rv+hash)· 8 = 5C2 (αίτημα αλλαγής αίθουσας/ονόματος).
-        self.assertEqual(CONNECTION_PROTOCOL, 8)
+        self.assertEqual(CONNECTION_PROTOCOL, 9)
 
     def test_hello_round_trip_with_and_without_seen(self):
         send_hello(self.left, self.client_id, "Γ1", seen={"rv": 20, "hash": HASH_A})

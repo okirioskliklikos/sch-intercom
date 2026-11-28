@@ -34,6 +34,8 @@ MESSAGE_CLIENT_SETTINGS = 3
 MESSAGE_UPDATE_CHECK = 4
 #: 5C2 (πρωτόκολλο σύνδεσης v8): κατάσταση αιτήματος αλλαγής, JSON (shared.change_request).
 MESSAGE_CHANGE_STATUS = 5
+#: 5C3 (πρωτόκολλο σύνδεσης v9): «νέα ταυτότητα» από τον Director, JSON {room, name, token}.
+MESSAGE_NEW_IDENTITY = 6
 MAX_SETTINGS_BYTES = 512
 _HEADER = struct.Struct("!2sBBIIQ")
 HEADER_BYTES = _HEADER.size
@@ -131,6 +133,38 @@ def encode_change_status(state: str, room: str = "", name: str = "") -> bytes:
     payload = encode_status(state, room, name)
     return _HEADER.pack(PROTOCOL_MAGIC, PROTOCOL_VERSION,
                         MESSAGE_CHANGE_STATUS, len(payload), 0, 0) + payload
+
+
+def encode_new_identity(room: str, name: str, token: str) -> bytes:
+    """Director → Client (5C3): φτιάξε νέα ταυτότητα και ζήτα εγγραφή με αυτά τα στοιχεία.
+
+    Στέλνεται μόνο στη σύνδεση μίας IP· το ``token`` επιστρέφει στο αίτημα εγγραφής, ώστε
+    ο Manager να το εγκρίνει χωρίς κωδικό (phase5.md §6.6).
+    """
+    payload = json.dumps({"room": room, "name": name, "token": token},
+                         ensure_ascii=False, sort_keys=True).encode("utf-8")
+    decode_new_identity(payload)
+    return _HEADER.pack(PROTOCOL_MAGIC, PROTOCOL_VERSION,
+                        MESSAGE_NEW_IDENTITY, len(payload), 0, 0) + payload
+
+
+def decode_new_identity(payload: bytes) -> dict:
+    if len(payload) > MAX_SETTINGS_BYTES:
+        raise ValueError("New identity payload too large")
+    try:
+        data = json.loads(payload.decode("utf-8"))
+    except (UnicodeError, ValueError) as exc:
+        raise ValueError("Invalid new identity message") from exc
+    if not isinstance(data, dict) or set(data) != {"room", "name", "token"}:
+        raise ValueError("Invalid new identity keys")
+    from shared.change_request import check_name, check_room
+    check_room(data["room"])
+    check_name(data["name"])
+    token = data["token"]
+    if not isinstance(token, str) or len(token) != 32 or \
+            any(ch not in "0123456789abcdef" for ch in token):
+        raise ValueError("Invalid new identity token")
+    return data
 
 
 def send_frame(connection: socket.socket, pcm: bytes, seq: int = 0,

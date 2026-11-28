@@ -13,6 +13,7 @@ import subprocess
 import sys
 from pathlib import Path
 import queue
+import secrets
 import socket
 import threading
 import time
@@ -33,7 +34,7 @@ from director.registry_sync import (apply_from_file, examine, export_registry,
 from shared.discovery import BeaconWatcher
 from shared.update_protocol import UPDATE_PORT
 from shared.enrollment import (EnrollmentError, EnrollmentServer, ENROLL_PORT,
-                               IncorrectCodeError)
+                               IncorrectCodeError, REQUEST_TTL, SPONSOR_RESET)
 from shared.discovery import announce, director_id, DISCOVERY_PORT
 from shared.identity import ProtocolMismatch, receive_hello_details, send_welcome
 from shared.change_request import DIRECTOR_FILE as CHANGES_FILE, ChangeRequests
@@ -116,10 +117,14 @@ def show_help() -> str:
   none          Παύση ομιλίας προς όλους
   room <όνομα>  Μετάδοση σε μία ή περισσότερες αίθουσες
   client <UUID> Μετάδοση σε έναν ή περισσότερους Clients
-  revoke <UUID> Ανάκληση Client και άμεση αποσύνδεσή του
+  revoke <UUID> [with-clones]  Ανάκληση Client και άμεση αποσύνδεσή του
+                 (with-clones: και όσοι εγκρίθηκαν με σύστασή του)
   pending        Εκκρεμή αιτήματα: ID, αίθουσα, όνομα, λήξη (1 ημέρα)
   approve <ID> <κωδικός>  Έγκριση με τον κωδικό που έγραψε ο Client
                  (ID = οι 8 χαρακτήρες του pending· 3 προσπάθειες κωδικού)
+  approve <ID> [<αίθουσα> <όνομα>]  Κλώνος / νέα ταυτότητα: χωρίς κωδικό
+  new-identity <UUID> <IP> [<αίθουσα> <όνομα>]  Νέα ταυτότητα στον υπολογιστή της IP
+                 (σε διπλή ταυτότητα· χωρίς αίθουσα/όνομα: τα τρέχοντα)
   deny <ID>      Απόρριψη αιτήματος εγγραφής
   changes        Αιτήματα αλλαγής αίθουσας/ονόματος από υπολογιστές (χωρίς κωδικό)
   approve-change <ID> / deny-change <ID>  Έγκριση/απόρριψη αιτήματος αλλαγής
@@ -376,6 +381,10 @@ class RegistryTrust:
         self.changes = ChangeRequests(registry.path.with_name(CHANGES_FILE),
                                       apply=self._apply_change,
                                       log=lambda line: print(line, flush=True))
+        #: 5C3: «Νέα ταυτότητα στο <IP>»: client_id → (token, λήξη, IP). Το token γυρίζει
+        #: στο αίτημα εγγραφής της νέας ταυτότητας, ώστε να εγκριθεί χωρίς κωδικό.
+        self._identity_tokens: dict[str, tuple[str, float, str]] = {}
+        self._tokens_lock = threading.Lock()
 
     def attach(self, broadcaster: AudioBroadcaster) -> None:
         """Συνδέει τα αιτήματα αλλαγής με τις ζωντανές συνδέσεις (5C2)."""
@@ -392,6 +401,44 @@ class RegistryTrust:
             current_room, current_name = entry["room"], entry.get("name") or ""
         return self.changes.submit(client_id, room, name, current_room=current_room,
                                    current_name=current_name)
+
+    def new_identity(self, client_id: str, ip: str, room: str, name: str,
+                     broadcaster: AudioBroadcaster) -> bool:
+        """5C3: εντολή «Νέα ταυτότητα» μόνο στη σύνδεση της ``ip`` (phase5.md §6.6).
+
+        True αν στάλθηκε τώρα, False αν περιμένει την επόμενη σύνδεση από αυτή την IP
+        (με διπλή ταυτότητα οι δύο υπολογιστές «κλέβουν» τη σύνδεση εναλλάξ).
+        """
+        from shared.change_request import check_name, check_room
+        room, name = check_room(room), check_name(name)
+        with self.registry.lock:
+            require_primary(load_manager_state(self._manager_state_path))
+            if self.registry.approved_entry(client_id) is None:
+                raise RegistryError("Ο υπολογιστής δεν είναι εγκεκριμένος")
+        token = secrets.token_hex(16)
+        with self._tokens_lock:
+            self._identity_tokens[client_id] = (token, time.time() + REQUEST_TTL, ip)
+        return broadcaster.send_new_identity(client_id, ip, room, name, token)
+
+    def sponsor_entry(self, kind: str, origin: str, token: str) -> dict | None:
+        """Για τη θύρα εγγραφής (5C3): η εγκεκριμένη εγγραφή της παλιάς ταυτότητας.
+
+        Η «Νέα ταυτότητα» δεκτή μόνο με το token που έστειλε αυτός ο Manager.
+        """
+        entry = self.registry.approved_entry(origin)
+        if entry is None:
+            raise RegistryError("Η παλιά ταυτότητα δεν είναι εγκεκριμένη")
+        if kind == SPONSOR_RESET:
+            with self._tokens_lock:
+                expected = self._identity_tokens.get(origin)
+            if expected is None or expected[1] <= time.time() or \
+                    not secrets.compare_digest(expected[0], token or ""):
+                raise RegistryError("Άγνωστο token νέας ταυτότητας")
+        return entry
+
+    def derived(self, client_id: str) -> list[dict]:
+        """Εγκεκριμένοι κλώνοι/νέες ταυτότητες με σύσταση του ``client_id`` (5C3)."""
+        return self.registry.derived(client_id)
 
     def _apply_change(self, client_id: str, room: str, name: str) -> None:
         if self._broadcaster is None:
@@ -426,11 +473,14 @@ class RegistryTrust:
             return self._context
 
     def approve(self, client_id: str, room: str, cert_pem: bytes, *,
-                name: str = "") -> None:
+                name: str = "", origin: str | None = None) -> None:
         """Έγκριση (και νέου κλειδιού μετά από ανάκληση) με άμεσο νέο mTLS context."""
         with self.registry.lock:
             require_primary(load_manager_state(self._manager_state_path))
-            self.registry.approve(client_id, room, cert_pem, name=name)
+            self.registry.approve(client_id, room, cert_pem, name=name, origin=origin)
+            if origin is not None:
+                with self._tokens_lock:
+                    self._identity_tokens.pop(origin, None)
             self._context = self.registry.tls_server_context(self._certfile, self._keyfile)
 
     def update_info(self, client_id: str, broadcaster: AudioBroadcaster, *,
@@ -679,16 +729,50 @@ def command_loop(broadcaster: AudioBroadcaster, stop: threading.Event,
                 else:
                     print("Χρήση: registry export|import <αρχείο> ή registry accept-current "
                           "[confirm]", flush=True)
-            elif command == "revoke" and len(values) == 1 and revoke is not None:
+            elif command == "revoke" and values and revoke is not None and (
+                    len(values) == 1 or values[1:] == ["with-clones"]):
+                derived = (trust.derived(values[0])
+                           if trust is not None and len(values) == 2 else [])
                 revoke(values[0])
                 print(f"Ανακλήθηκε ο Client {values[0]}", flush=True)
+                for entry in derived:
+                    revoke(entry["client_id"])
+                    print(f"Ανακλήθηκε και ο κλώνος {entry['client_id']} "
+                          f"({entry['room']} · {entry.get('name', '')})", flush=True)
             elif command == "pending" and not values and enrollment is not None:
-                requests = enrollment.pending()
+                requests = enrollment.pending_details()
                 if not requests:
                     print("Δεν υπάρχουν εκκρεμείς εγγραφές.", flush=True)
-                for request_id, room, name, expires in requests:
-                    until = time.strftime("%d/%m %H:%M", time.localtime(expires))
-                    print(f"  {request_id[:8]} | {room} | {name} | λήγει {until}", flush=True)
+                for item in requests:
+                    until = time.strftime("%d/%m %H:%M", time.localtime(item["expires"]))
+                    sponsor = item["sponsor"] if item["sponsored"] else None
+                    extra = ""
+                    if sponsor is not None:
+                        what = "κλώνος" if sponsor["kind"] == "clone" else "νέα ταυτότητα"
+                        extra = (f" | {what} του {sponsor['origin_room']} · "
+                                 f"{sponsor['origin_name']} (χωρίς κωδικό)")
+                    print(f"  {item['request_id'][:8]} | {item['room']} | {item['name']} | "
+                          f"λήγει {until}{extra}", flush=True)
+            elif command == "approve" and len(values) in (1, 3) and enrollment is not None:
+                request_id = enrollment.resolve(values[0])
+                details = {item["request_id"]: item for item in enrollment.pending_details()}
+                if not details.get(request_id, {}).get("sponsored"):
+                    print("Χρειάζεται κωδικός: approve <ID> <κωδικός>", flush=True)
+                    continue
+                room, name = (values[1], values[2]) if len(values) == 3 else (None, None)
+                info = enrollment.decide(request_id, None, approve=True, room=room, name=name)
+                print(f"Εγκρίθηκε χωρίς κωδικό: {info['room']} | {info['name']} | "
+                      f"{info['client_id']}", flush=True)
+            elif command == "new-identity" and len(values) in (2, 4) and trust is not None:
+                entry = trust.registry.approved_entry(values[0])
+                if entry is None:
+                    print("Άγνωστος ή μη εγκεκριμένος Client", flush=True)
+                    continue
+                room, name = ((values[2], values[3]) if len(values) == 4
+                              else (entry["room"], entry.get("name") or ""))
+                sent = trust.new_identity(values[0], values[1], room, name, broadcaster)
+                print(f"Νέα ταυτότητα στο {values[1]}: " +
+                      ("στάλθηκε" if sent else "στέλνεται στην επόμενη σύνδεση"), flush=True)
             elif command == "approve" and len(values) == 2 and enrollment is not None:
                 request_id = enrollment.resolve(values[0])
                 try:

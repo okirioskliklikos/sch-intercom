@@ -16,6 +16,10 @@ from collections.abc import Callable
 from client.install_paths import atomic_write_json
 from shared.room_names import room_title, short_room
 
+#: 5C3: ίδιες τιμές με shared.enrollment (χωρίς εξάρτηση από cryptography εδώ).
+SPONSOR_CLONE = "clone"
+SPONSOR_RESET = "reset"
+
 #: Μόνο για δοκιμές/ανάπτυξη: 1 = χωρίς tray, όπως πριν από το 5C1.
 NO_TRAY_ENV = "SCH_INTERCOM_NO_TRAY"
 
@@ -29,6 +33,7 @@ REVOKED = "revoked"            # ήταν εγκεκριμένη (είδε μη�
 INCOMPATIBLE = "incompatible"  # άλλο πρωτόκολλο ήχου· αναμονή ενημέρωσης
 FULL = "full"                  # ο Manager έχει ήδη 70 υπολογιστές
 ERROR = "error"                # π.χ. ξένος Manager, δύο Managers
+NAMING = "naming"              # 5C3: κλώνος· αναμονή ονόματος στο παράθυρο πριν από το αίτημα
 
 LABELS = {
     SEARCHING: "Αναζήτηση Director…",
@@ -40,11 +45,12 @@ LABELS = {
     INCOMPATIBLE: "Ασύμβατη έκδοση",
     FULL: "Ο Director είναι γεμάτος",
     ERROR: "Σφάλμα σύνδεσης",
+    NAMING: "Αναμονή ονόματος",
 }
 #: Χρώμα κουκκίδας/κειμένου: ok = πράσινο, wait = κίτρινο, bad = κόκκινο.
 TONES = {
     SEARCHING: "wait", CONNECTING: "wait", CONNECTED: "ok", PENDING: "wait",
-    FULL: "wait", UNAPPROVED: "bad", REVOKED: "bad", INCOMPATIBLE: "bad", ERROR: "bad",
+    FULL: "wait", NAMING: "wait", UNAPPROVED: "bad", REVOKED: "bad", INCOMPATIBLE: "bad", ERROR: "bad",
 }
 NEW_COMPUTER = "Νέος υπολογιστής"
 
@@ -62,7 +68,9 @@ class ClientStatus:
               "version", "update", "volume", "mute_others", "device", "client_id",
               "enrollment", "live_since", "approved_before",
               # 5C2: κλίμακα παραθύρου (%) και αίτημα αλλαγής {room, name, state}.
-              "scale", "change")
+              "scale", "change",
+              # 5C3: κλώνος που περιμένει όνομα {origin_room, origin_name, room, name, deadline}.
+              "naming")
 
     def __init__(self, *, clock: Callable[[], float] = time.time, **initial):
         self.clock = clock
@@ -87,6 +95,8 @@ class ClientStatus:
             data["enrollment"] = dict(data["enrollment"])
         if data["change"] is not None:
             data["change"] = dict(data["change"])
+        if data["naming"] is not None:
+            data["naming"] = dict(data["naming"])
         return data
 
     def update(self, **fields) -> bool:
@@ -157,7 +167,8 @@ def status_label(snap: dict) -> str:
 def tooltip(snap: dict) -> str:
     text = f"{title(snap)} — {status_label(snap)}"
     enrollment = snap.get("enrollment")
-    if snap["state"] == PENDING and enrollment and enrollment.get("code"):
+    if snap["state"] == PENDING and enrollment and enrollment.get("code") and \
+            not enrollment.get("sponsor"):
         text += f", κωδικός {format_code(enrollment['code'])}"
     if (snap.get("update") or {}).get("state") == "failed":
         text += " · αποτυχία ενημέρωσης"
@@ -243,9 +254,13 @@ def info_rows(snap: dict, *, now: float | None = None) -> list[dict]:
     rows.append({"label": "Αίθουσα", "value": short_room(snap.get("room")) or "—"})
     # 5C2: «Αλλαγή…» τέρμα δεξιά στη γραμμή του Υπολογιστή (δεν κρύβεται ποτέ) και
     # «Κλίμακα» ακριβώς πάνω από τον Director (αποφάσεις χρήστη 28/11/2026).
-    rows.append({"label": "Υπολογιστής", "value": snap.get("name") or "—", "action": ACTION_CHANGE})
-    rows.append({"label": "Κλίμακα", "value": scale_text(snap.get("scale")),
-                 "action": ACTION_SCALE})
+    naming = snap["state"] == NAMING
+    # 5C3 (mockup): στην αναμονή ονόματος το όνομα δίνεται στην κάρτα από πάνω.
+    rows.append({"label": "Υπολογιστής", "value": snap.get("name") or "—",
+                 "action": "" if naming else ACTION_CHANGE})
+    if not naming:
+        rows.append({"label": "Κλίμακα", "value": scale_text(snap.get("scale")),
+                     "action": ACTION_SCALE})
     rows.append({"label": "Director", "value": snap.get("manager") or "—"})
     if snap.get("fingerprint"):
         rows.append({"label": "Αποτύπωμα Director",
@@ -281,6 +296,7 @@ def scale_text(scale) -> str:
 MODE_CHANGE = "change"   # εγκεκριμένος: αίτημα αλλαγής στον Director, χωρίς κωδικό
 MODE_AMEND = "amend"     # πριν από την πρώτη έγκριση: διόρθωση αιτήματος, ίδιος κωδικός
 MODE_ENROLL = "enroll"   # ανακλήθηκε / χωρίς αίτημα: νέα αίτηση εγγραφής με νέο κωδικό
+MODE_NAME = "name"       # 5C3: κλώνος σε αναμονή ονόματος· το πρώτο αίτημα (με σύσταση)
 CHANGE_TITLE = "Αλλαγή αίθουσας ή ονόματος"
 CHANGE_DIALOG = {
     MODE_CHANGE: ("Θα σταλεί αίτημα στον Director. Τα στοιχεία αλλάζουν μόνο όταν το εγκρίνει.",
@@ -297,6 +313,8 @@ SCALE_APPLY = "Εφαρμογή"
 
 
 def change_mode(snap: dict) -> str:
+    if snap["state"] == NAMING:
+        return MODE_NAME
     if snap["state"] in (REVOKED, UNAPPROVED):
         return MODE_ENROLL
     if snap.get("enrollment"):
@@ -304,6 +322,19 @@ def change_mode(snap: dict) -> str:
     if snap.get("approved_before") or snap["state"] == CONNECTED:
         return MODE_CHANGE
     return MODE_ENROLL
+
+
+# --- 5C3: όνομα κλώνου (mockup 5C3 c3-clone-name, απόφαση χρήστη 28/11/2026) ------------------
+#: Αν κανείς δεν πατήσει «Αποστολή», το αίτημα φεύγει μόνο του με τις προτεινόμενες τιμές.
+CLONE_NAME_SECONDS = 300
+NAME_SEND = "Αποστολή"
+
+
+def naming_countdown(deadline: float, *, now: float | None = None) -> str:
+    """«Αποστέλλεται αυτόματα σε <b>4:32</b> με αυτά τα στοιχεία» (rich text)."""
+    left = max(0, int(round(deadline - (time.time() if now is None else now))))
+    return (f"Αποστέλλεται αυτόματα σε <b>{left // 60}:{left % 60:02d}</b> "
+            "με αυτά τα στοιχεία")
 
 
 def _html(text: str) -> str:
@@ -333,9 +364,26 @@ def window_bars(snap: dict) -> tuple[str | None, str | None]:
         return (f"Η αλλαγή σε {target} δεν στάλθηκε: "
                 + _html(change.get("detail") or "άγνωστο σφάλμα")), None
     info = None
-    if state == FULL:
+    sponsor = (snap.get("enrollment") or {}).get("sponsor") if state == PENDING else None
+    if state == NAMING:
+        source = room_title((snap.get("naming") or {}).get("origin_room") or "",
+                            (snap.get("naming") or {}).get("origin_name") or "")
+        info = ((f"Αυτός ο υπολογιστής είναι αντίγραφο του <b>{_html(source)}</b> "
+                 if source else "Αυτός ο υπολογιστής είναι αντίγραφο άλλου ")
+                + "και χρειάζεται δικό του όνομα. Ο Director τον εγκρίνει χωρίς κωδικό.")
+    elif state == FULL:
         info = ("Ο Director έχει συμπληρώσει το όριο υπολογιστών· νέα προσπάθεια "
                 "κάθε 30 δευτερόλεπτα.")
+    elif sponsor and sponsor["kind"] == SPONSOR_CLONE:
+        source = room_title(sponsor["room"], sponsor["name"])
+        info = f"Κλώνος του <b>{_html(source)}</b>" if source else "Κλώνος"
+        if snap.get("room") and snap.get("name"):
+            info += (f" ως <b>{_html(room_title(snap['room'], snap['name']))}</b>: "
+                     "αναμονή έγκρισης από τον Director")
+        else:
+            info += ": αναμονή ονόματος και έγκρισης από τον Director"
+    elif sponsor:
+        info = "Νέα ταυτότητα από τον Director: αναμονή έγκρισης"
     elif change.get("state") == "pending":
         info = f"Αίτημα αλλαγής σε {target}: αναμονή έγκρισης από τον Director"
     elif change.get("state") == "queued":
@@ -353,11 +401,17 @@ PENDING_FILE = "enrollment-pending.json"
 
 
 def save_pending(path: Path, *, code: str, room: str, name: str, expires_at: float,
-                 client_id: str, request_id: str | None = None, seq: int = 0) -> None:
-    """5C2: και ``request_id``/``seq`` για τη διόρθωση του αιτήματος (ίδιος κωδικός)."""
+                 client_id: str, request_id: str | None = None, seq: int = 0,
+                 sponsor: dict | None = None) -> None:
+    """5C2: και ``request_id``/``seq`` για τη διόρθωση του αιτήματος (ίδιος κωδικός).
+
+    5C3: ``sponsor`` {kind, room, name}: ο Director δέχτηκε τη σύσταση της παλιάς
+    ταυτότητας (κλώνος / νέα ταυτότητα), οπότε εγκρίνει χωρίς κωδικό.
+    """
     atomic_write_json(path, {"code": str(code), "room": room, "name": name,
                              "expires_at": float(expires_at), "client_id": client_id,
-                             "request_id": request_id, "seq": int(seq)})
+                             "request_id": request_id, "seq": int(seq),
+                             **({"sponsor": sponsor} if sponsor else {})})
 
 
 def load_pending(path: Path, client_id: str, *, now: float | None = None) -> dict | None:
@@ -374,10 +428,16 @@ def load_pending(path: Path, client_id: str, *, now: float | None = None) -> dic
             not isinstance(expires, (int, float)) or expires <= now:
         return None
     request_id, seq = data.get("request_id"), data.get("seq")
+    sponsor = data.get("sponsor")
+    if not (isinstance(sponsor, dict) and sponsor.get("kind") in (SPONSOR_CLONE, SPONSOR_RESET)):
+        sponsor = None
+    else:
+        sponsor = {"kind": sponsor["kind"], "room": str(sponsor.get("room") or ""),
+                   "name": str(sponsor.get("name") or "")}
     return {"code": code, "room": str(data.get("room") or ""),
             "name": str(data.get("name") or ""), "expires_at": float(expires),
             "request_id": request_id if isinstance(request_id, str) else None,
-            "seq": seq if type(seq) is int and seq >= 0 else 0}
+            "seq": seq if type(seq) is int and seq >= 0 else 0, "sponsor": sponsor}
 
 
 def clear_pending(path: Path) -> None:

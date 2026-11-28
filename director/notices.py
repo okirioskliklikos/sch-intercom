@@ -14,8 +14,9 @@ FULL_NAMES_SHOWN = 3
 TEXT_DUPLICATE_STATE = "Σε 2 υπολογιστές"
 TEXT_SHOW = "Προβολή"
 DUPLICATE_HINT = "Στον έναν από τους δύο:"
-DUPLICATE_COMMAND = "client --new-identity"
-DUPLICATE_HINT_END = "και νέα έγκριση"
+#: 5C3 (mockup 5C): η ενέργεια είναι στο ⋮ του υπολογιστή, όχι πια εντολή στον Client.
+DUPLICATE_COMMAND = "«Νέα ταυτότητα στο <IP>»"
+DUPLICATE_HINT_END = "από το ⋮ του υπολογιστή και νέα έγκριση"
 
 
 def _label(room: str, name: str | None) -> str:
@@ -36,8 +37,7 @@ def full_html(waiting: list[tuple[str, str, str]], limit: int) -> str | None:
 
 
 def duplicate_html(duplicates: list[tuple[str, str, tuple[str, ...]]],
-                   names: dict[str, str] | None = None, *, mono: str = "monospace",
-                   hint_size: str = "small") -> str | None:
+                   names: dict[str, str] | None = None, *, hint_size: str = "small") -> str | None:
     """Ίδια ταυτότητα σε 2 υπολογιστές (αίθουσα · όνομα, IP) και τι κάνει ο χρήστης, ή None.
 
     ``names``: όνομα υπολογιστή ανά UUID (από το μητρώο ή τη σύνδεση). ``hint_size``:
@@ -51,7 +51,7 @@ def duplicate_html(duplicates: list[tuple[str, str, tuple[str, ...]]],
         for client_id, room, addresses in duplicates)
     return (f"Ίδια ταυτότητα σε 2 υπολογιστές: {items}"
             f"<br><span style='font-size:{hint_size}'>{DUPLICATE_HINT} "
-            f"<span style='font-family:{mono}'>{DUPLICATE_COMMAND}</span> "
+            f"{escape(DUPLICATE_COMMAND)} "
             f"{DUPLICATE_HINT_END}</span>")
 
 
